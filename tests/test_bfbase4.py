@@ -59,6 +59,35 @@ def test_base4_add64_matches_modulo_u64_boundaries():
         assert _decode(result.memory, dst) == ((a_value + b_value) & MASK64)
 
 
+def test_base4_mul10_is_two_fixed_lane_passes_and_matches_u64():
+    cases = [
+        0,
+        1,
+        3,
+        4,
+        123456789,
+        0x7FFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF,
+    ]
+
+    for value in cases:
+        bf = BFEmitter()
+        core = Base4I64Core(bf)
+        dst = Base4I64Ref(20)
+        scratch = Base4I64Ref(120)
+
+        core.set_u64(dst, value)
+        core.mul10_inplace(dst, scratch)
+        result = run_bf(bf.code(), memory_size=400, step_limit=150_000_000)
+
+        assert _decode(result.memory, dst) == ((value * 10) & MASK64)
+
+    bf = BFEmitter()
+    core = Base4I64Core(bf)
+    core.mul10_inplace(Base4I64Ref(20), Base4I64Ref(120))
+    assert len(bf.code()) < 30_000
+
+
 def test_base4_sub64_matches_modulo_u64_boundaries():
     cases = [
         (0, 0),
