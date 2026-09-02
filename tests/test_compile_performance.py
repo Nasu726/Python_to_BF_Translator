@@ -46,10 +46,14 @@ def test_contest_list_index_program_compiles_in_practical_time():
         f"L{line}:{kind}={size:,}B"
         for line, kind, size in compiler.statement_sizes
     )
+    detail = ", ".join(
+        f"L{line}:{kind}={size:,}B"
+        for line, kind, size in compiler.detail_sizes
+    )
     diagnostics = (
         f"total={elapsed:.2f}s lowering={lower_elapsed:.2f}s "
         f"optimizer={opt_elapsed:.2f}s raw={raw_size:,}B final={final_size:,}B "
-        f"statements=[{attribution}]"
+        f"statements=[{attribution}] detail=[{detail}]"
     )
 
     assert code
