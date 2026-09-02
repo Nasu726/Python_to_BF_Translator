@@ -10,7 +10,14 @@ when all participating values are ``Quad64Ref`` instances.
 from __future__ import annotations
 
 from bfpacked64 import PackedI64Ref
-from bfquad import WORD_CELLS, Quad64Core, Quad64Ref
+from bfquad import (
+    DIGITS,
+    STRIDE,
+    WORD_CELLS,
+    Quad64Core,
+    Quad64Ref,
+    _RelativeBuilder,
+)
 from bfstringlists import BinaryStringListIO
 
 
@@ -234,6 +241,76 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             self._clear_scratch()
             return
         super().eq64(result, a, b)
+
+    @staticmethod
+    def _force_seen_from_bit(
+        r: _RelativeBuilder,
+        bit: int,
+        seen: int,
+        scratch: int,
+    ) -> None:
+        """seen |= bit while preserving the Boolean source bit."""
+        r.clear(scratch)
+        r.move(bit)
+        r.emit("[")
+        r.emit("-")
+        r.clear(seen)
+        r.add(seen, 1)
+        r.add(scratch, 1)
+        r.move(bit)
+        r.emit("]")
+        r.move(scratch)
+        r.emit("[")
+        r.emit("-")
+        r.add(bit, 1)
+        r.move(scratch)
+        r.emit("]")
+
+    def _quad_is_nonzero(self, result: int, word: Quad64Ref) -> None:
+        """Compute bool(word) with one emitted repeated 32-lane body."""
+        bf = self.bf
+        q0 = self._qtmp(0)
+        tmp = self._qtmp(1) if word.base == q0.base else q0
+        delta = tmp.base - word.base
+
+        for digit in range(DIGITS):
+            bf.set_const(word.marker(digit), 1)
+        bf.clear(word.marker(DIGITS))
+        bf.clear(tmp.marker(0))
+
+        r = _RelativeBuilder()
+        marker = 0
+        bit0, bit1 = 1, 2
+        seen_in = delta
+        scratch = delta + 1
+        seen_out = delta + STRIDE
+
+        r.clear(marker)
+        r.clear(seen_out)
+        r.transfer(seen_in, seen_out)
+        self._force_seen_from_bit(r, bit0, seen_out, scratch)
+        self._force_seen_from_bit(r, bit1, seen_out, scratch)
+        r.move(STRIDE)
+
+        bf.move(word.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = word.marker(DIGITS)
+
+        bf.clear(result)
+        carry = tmp.marker(DIGITS)
+        bf.move(carry)
+        bf.emit("[-")
+        bf.move(result)
+        bf.emit("+")
+        bf.move(carry)
+        bf.emit("]")
+        self._clear_scratch()
+
+    def _is_nonzero64(self, result: int, word) -> None:
+        if isinstance(word, Quad64Ref):
+            self._quad_is_nonzero(result, word)
+            return
+        super()._is_nonzero64(result, word)
 
     def _inc64_inplace(self, word) -> None:
         if isinstance(word, Quad64Ref):
