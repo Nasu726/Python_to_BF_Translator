@@ -1,5 +1,5 @@
 from bf_runtime import run_bf
-from transpiler_inputs import compile_source
+from compiler import compile_source
 
 
 def execute(source: str, input_data: str = '') -> str:
@@ -60,6 +60,18 @@ A = list(map(int, input().split()))
 print(a + b, S[0], A[1])
 '''
     assert execute(source, '3 4\nfoo bar\n8 9 10\n') == '7 foo 9\n'
+
+
+def test_map_int_unpack_does_not_read_through_newline():
+    source = '''
+a, b = map(int, input().split())
+x = int(input())
+print(a, b, x)
+'''
+    # CPython would raise on the malformed unpack.  The fixed runtime does not
+    # implement ValueError yet, but it must still preserve input()'s line
+    # boundary instead of stealing x from the next line.
+    assert execute(source, '5\n9\n') == '5 0 9\n'
 
 
 def test_string_list_capacity_truncates_but_preserves_next_line():
