@@ -10,7 +10,7 @@ Pythonの実用的なサブセットをBrainfuckへ変換するコンパイラ�
 python main.py program.py
 ```
 
-同じディレクトリに `program.bf` が生成されます。
+同じディレクトリに `program.bf` が生成されます。コンパイル後には生成されたBrainfuckのbyte数も表示します。
 
 生成後の実行にPythonは不要です。`program.bf` を通常のBrainfuckインタプリタへそのまま渡してください。
 
@@ -44,12 +44,32 @@ Python側が実行時に計算・管理する仕組みはありません。Pytho
 
 現在の実行モデルは以下を前提とします。
 
+- **実行開始時、使用可能なtape cellはすべて0で初期化されている**
 - 8-bit wrapping cells (`255 + 1 == 0`)
 - cell 0より左へは移動しない
 - 必要量を確保できる右方向のtape
 - `,` / `.` によるbyte I/O
 
+zero-initialized tapeは生成コード最適化の正式なABI前提です。コンパイラは、まだ一度も書き込まれていないセルへの不要な`[-]`等を省略できます。
+
 `pybf/bf_runtime.py` はCIで生成物を検証するためのテスト用Brainfuckインタプリタであり、生成された `.bf` の依存ランタイムではありません。
+
+## 生成Brainfuckのサイズ
+
+競技プログラミングでは提出ソースサイズにも上限があるため、生成物の小ささをcorrectnessと並ぶ実用要件として扱います。
+
+現在のpublic compilerでは、標準Brainfuckの意味を保ったまま以下を行います。
+
+- zero-initialized tapeを利用した不要clear / dead loop除去
+- 隣接するpointer移動・cell加減算の正規化
+- 頻繁に使うscratch cellをデータ近傍へ配置して`>` / `<`を削減
+- `for c in s`の1文字loop変数を、安全な場合はcompactな1-byte payloadとして保持
+- `c == "A"`等の1文字比較をbyte比較へspecialize
+- 安全性を証明できる` s = input(); for c in s:`パターンでは、255-byte文字列のmaterializeと再走査をせず入力を直接loopへstreamingする
+
+streaming optimizationは、loop body内に別の`input()`がある場合や、元のstring値が後から必要になる場合には適用しません。`break`時も元の`input()`と同じく現在行を最後まで消費してから次へ進みます。
+
+`main.py` は生成byte数を表示し、512 KiBを超えた場合には警告します。CIにも代表的な短いstring走査について512 KiB以下を要求するregression testがあります。
 
 ## 固定ランタイム型
 
@@ -90,7 +110,8 @@ words = input().split()
 - `& | ^ ~ << >>`
 - `== != < <= > >=`
 - `and / or / not`
-- `if / else`, `while`, `for range(...)`
+- `if / else`, `while`, `for ... in range(...)`
+- `for x in list`, `for c in string`
 - `break`, `continue`, loop `else`
 - `input()`, `int(input())`
 - `a, b = map(int, input().split())`
@@ -100,6 +121,8 @@ words = input().split()
 - `S = input().split()` / `list(input().split())`
 - `S = list(map(str, input().split()))`
 - int/string listのindex、代入、`append`, `len`, iteration
+- runtime list repetition (`[x] * n`, `A * n`, `n * A`) ※現行固定容量まで
+- runtime負index
 - `print(...)`, `sep=`, `end=`
 - `abs`, `bool`, `min`, `max`
 
@@ -119,4 +142,4 @@ legacy/          # 旧実装・参考コード
 python -m pytest -q
 ```
 
-CIでは生成したBrainfuckを実際にインタプリタで実行して検証します。また、公開APIテストで生成物が標準Brainfuck 8命令だけであることを検査します。
+CIでは生成したBrainfuckを実際にインタプリタで実行して検証します。また、公開APIテストで生成物が標準Brainfuck 8命令だけであることを検査します。生成サイズについても、競プロ提出を想定したregression gateを段階的に追加します。

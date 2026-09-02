@@ -17,6 +17,9 @@ from pathlib import Path
 from pybf import CompileError, compile_source
 
 
+ATCODER_SOURCE_LIMIT = 512 * 1024
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: python main.py <program.py>", file=sys.stderr)
@@ -39,7 +42,14 @@ def main() -> int:
 
     output_path = source_path.with_suffix(".bf")
     output_path.write_text(code, encoding="utf-8")
-    print(f"wrote {output_path}")
+    size = len(code.encode("ascii"))
+    print(f"wrote {output_path} ({size:,} bytes)")
+    if size > ATCODER_SOURCE_LIMIT:
+        print(
+            "warning: generated Brainfuck exceeds AtCoder's 512 KiB source limit "
+            f"by {size - ATCODER_SOURCE_LIMIT:,} bytes",
+            file=sys.stderr,
+        )
     return 0
 
 
