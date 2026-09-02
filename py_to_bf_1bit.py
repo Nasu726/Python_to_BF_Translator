@@ -6,9 +6,9 @@ import re
 
 
 class MemoryBlock():
-    def __init__(self, name:str="", dtype=None, begin:int = 0, end:int = 0):
-        self.name = name
-        self.dtype = dtype
+    def __init__(self, name:str="", dtype:str="", begin:int = 0, end:int = 0):
+        self.name:  str = name
+        self.dtype: str = dtype
         # 範囲は半開区間 [begin, end) で表現
         self.begin: int = begin
         self.end:   int = end
@@ -52,6 +52,15 @@ class MemoryManager():
                 return begin
         return -1
 
+    def _allocate_new(self, var_name: str, dtype: str, size: int):
+        reusable_addr = self._find_reusable_addr(size)
+        if reusable_addr != -1:
+            return MemoryBlock(name=var_name, dtype=dtype, begin=reusable_addr, end=reusable_addr+size)
+        else:
+            addr = self.current_static_top
+            self.current_static_top += size
+            return MemoryBlock(name=var_name, dtype=dtype, begin=addr, end=addr+size)
+
     def get_block(self, var_name):
         for scope in reversed(self.env):
             if var_name in scope:
@@ -78,21 +87,25 @@ class MemoryManager():
                 self.freed_blocks.append(MemoryBlock("", "", old_block.begin, old_block.end))
                 new_block = self._allocate_new(var_name, dtype, size)
             target_scope[var_name] = new_block
-            return new_block.begin
+            return new_block
         else:
             # どこにも見つからなかったら新しく定義
             new_block = self._allocate_new(var_name, dtype, size)
             self.env[-1][var_name] = new_block
-            return new_block.begin
-
-    def _allocate_new(self, var_name: str, dtype: str, size: int):
-        reusable_addr = self._find_reusable_addr(size)
-        if reusable_addr != -1:
-            return MemoryBlock(name=var_name, dtype=dtype, begin=reusable_addr, end=reusable_addr+size)
-        else:
-            addr = self.current_static_top
-            self.current_static_top += size
-            return MemoryBlock(name=var_name, dtype=dtype, begin=addr, end=addr+size)
+            return new_block
+        
+    def free_variable(self, var_name):
+        target_scope = None
+        for scope in reversed(self.env):
+            if var_name in scope:
+                # 見つかったらそのスコープをセット
+                target_scope = scope
+                break
+        
+        if target_scope is not None:
+            block = target_scope[var_name]
+            self.freed_blocks.append(MemoryBlock("", "", block.begin, block.end))
+        
 
     def push_scope(self):
         self.env.append({})
@@ -109,100 +122,184 @@ class PythonToBFTranspiler(ast.NodeVisitor):
         self.modint = 2
         self.bf_code = ""
         self.ptr = 0
+        self.tmp_var_name = "temporary_variable_in_compilation_" # 普通に宣言したら被らない名前
+        self.tmp_num = 0
+        self.max_str_len = 64
         self.memory_manager = MemoryManager()
         # メモリマネージャなどの初期化もここで行う
 
-    def visit_Assign(self, node):
-        # 代入文の処理ロジック
-        target_node = node.targets[0]
-        if isinstance(target_node, ast.Name):
-            var_name = target_node.id
+    def visit_Constant(self, node):
+        print("[DEBUG] 即値にアクセスしました")
+        block = None
+        tmp_name = self.tmp_var_name + str(self.tmp_num)
+
+        if isinstance(node.value, int):
+            size = max(1, node.value.bit_length())
+            block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="int", size=size)
+            # 即値のセットアップ
+            for i in range(size):
+                self.move_to(block.begin + i)
+                if (node.value >> i) & 1:
+                    self.bf_code += "+"
+
+        elif isinstance(node.value,str):
+            size = min(len(node.value), self.max_str_len)
+            block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="str", size=size)
+            for i, c in enumerate(node.value[:size]):
+                self.move_to(block.begin + i)
+                self.bf_code += "[-]" + "+" * ord(c)
+        
+        elif isinstance(node.value, bool):
+            print("[DEBUG] bool型は未対応です")
+            # block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="bool", size=1)
         else:
+            raise ValueError(f"不明な即値です：{node.value}")
+
+        self.tmp_num += 1
+        print(f"[DEBUG] メモリマネージャ：{block.name} を {block.begin} 番地に割り当てました")
+        return block 
+
+    def visit_Name(self, node):
+        print("[DEBUG] 変数にアクセスしました")
+        return self.memory_manager.get_block(var_name=node.id)
+
+    def visit_BinOp(self, node):
+        print("[DEBUG] 二項演算子にアクセスしました")
+        left_hand:  MemoryBlock = self.visit(node.left)
+        right_hand: MemoryBlock = self.visit(node.right)
+        result_block = None
+        tmp_name = self.tmp_var_name + str(self.tmp_num)
+        self.tmp_num += 1
+
+        if isinstance(node.op, ast.Add):
+            if left_hand.dtype == right_hand.dtype == "int":
+                calc_size = min(64, max(left_hand.size, right_hand.size)+1)
+                result_block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="int", size=calc_size)
+                self._math_add(left_hand, right_hand, result_block)
+                print(f"[DEBUG] メモリマネージャ：加算結果 {result_block.name} を {result_block.begin} 番地に割り当てました")
+            elif left_hand.dtype == right_hand.dtype == "str":
+                total_size = min(left_hand.size + right_hand.size, self.max_str_len)
+                result_block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="str", size=total_size)
+                self._math_concat_str(left_hand, right_hand, result_block)
+                print(f"[DEBUG] メモリマネージャ：結合結果 {result_block.name} を {result_block.begin} 番地に割り当てました")
+            else:
+                raise TypeError(f"{left_hand.dtype} と {right_hand.dtype} の値に対して {node.op} は適用できません。")
+
+        elif isinstance(node.op, ast.Sub):
+            pass
+        elif isinstance(node.op, ast.Mult):
+            pass
+        elif isinstance(node.op, ast.FloorDiv):
+            pass
+        elif isinstance(node.op, ast.Mod):
+            pass
+        elif isinstance(node.op, ast.And):
+            pass
+        elif isinstance(node.op, ast.Or):
+            pass
+        elif isinstance(node.op, ast.BitAnd):
+            pass
+        elif isinstance(node.op, ast.BitOr):
+            pass
+        elif isinstance(node.op, ast.BitXor):
+            pass
+        else:
+            raise NotImplementedError(f"演算子 {type(node.op).__name__} は未実装です")
+
+        self._free_tmp(left_hand, right_hand)
+        return result_block
+
+    def visit_Assign(self, node):
+        print("[DEBUG] 代入演算子にアクセスしました")
+        right_hand: MemoryBlock = self.visit(node.value)
+        if right_hand is None:
             return
-        
-        value_node = node.value
-        if isinstance(value_node, ast.Constant):
-            var_value = value_node.value
 
-            if isinstance(var_value, int):
-                print(f"[DEBUG] 整数の代入検知：変数名={var_name}, 値={var_value}")
-                cell_index = self.memory_manager.assign_variable(var_name=var_name, dtype="int", size=64)
-                print(f"[DEBUG] メモリマネージャ：{var_name} を {cell_index} 番地に割り当てました")
-
-                for i in range(64):
-                    self.move_to(cell_index + i)
-                    if (var_value >> i) & 1:
-                        self.bf_code += "+"
-
-            elif isinstance(var_value, str):
-                print(f"[DEBUG] 文字列の代入検知：変数名={var_name}, 値={var_value}")
-                cell_index = self.memory_manager.assign_variable(var_name=var_name, dtype="str", size=len(var_value))
-                print(f"[DEBUG] メモリマネージャ：{var_name} を {cell_index} 番地に割り当てました")
-
-                for i, c in enumerate(var_value):
-                    self.move_to(cell_index + i)
-                    self.bf_code += "[-]" + "+"*ord(c)
-        
-        elif isinstance(value_node, ast.Name):
-            print("[DEBUG] 変数にアクセスしました")
+        target_name = node.targets[0].id
+        try:
+            old_block = self.memory_manager.get_block(target_name)
+            self._zero_clear_region(old_block.begin, old_block.size)
+        except Exception:
             pass
 
-        elif isinstance(value_node, ast.Call):
-            print("[DEBUG] 関数にアクセスしました")
-            if isinstance(value_node.func, ast.Name):
-                if value_node.func.id == "int":
-                    pass
-        elif isinstance(value_node, ast.BinOp):
-            print("[DEBUG] 二項演算子にアクセスしました")
-            if value_node.op == "Add()":
-                lh = self.memory_manager.assign_variable
-        else:
-            print("[DEBUG]", node)
-            print(f"[DEBUG] まだ対応していない複雑な代入です")
+        dest_block  = self.memory_manager.assign_variable(target_name, right_hand.dtype, right_hand.size)
+        print(f"[DEBUG] メモリマネージャ：{dest_block.name} を {dest_block.begin} 番地に割り当てました")
 
-        # self.generic_visit(node)
-
-    # ... その他の visit_ メソッド ...
+        self.copy_values(right_hand.begin, right_hand.size, dest_block.begin)
+        self._free_tmp(right_hand)
+    
     def visit_Call(self, node):
-        print("[DEBUG]", node)
-        if isinstance(node.func, ast.Name):
-            if node.func.id == "print":
-                argc = len(node.args)
-                for arg_idx, arg in enumerate(node.args):
-                    if isinstance(arg, ast.Name):
-                        var_name = arg.id
-                        block = self.memory_manager.get_block(var_name)
-                        if block.dtype == "int":
-                            self.print_64bit(block.begin)
-                        elif block.dtype == "str":
-                            for i in range(block.size):
-                                self.move_to(block.begin + i)
-                                self.bf_code += "."
+        print("[DEBUG] 関数にアクセスしました")
+        if not isinstance(node.func, ast.Name):
+            return None
 
-                    elif isinstance(arg, ast.Constant):
-                        inst_val = arg.value
-                        print_workspace = self.memory_manager.current_static_top
-                        if isinstance(inst_val, int):
-                            for i in range(64):
-                                self.set_value(print_workspace + i, inst_val % self.modint)
-                                inst_val //= self.modint
-                            self.print_64bit(print_workspace)
-                        elif isinstance(inst_val, str):
-                            self.move_to(print_workspace)
-                            for c in inst_val:
-                                self.set_value(print_workspace, ord(c))
-                                self.bf_code += ".[-]"
-                    
-                    if arg_idx < argc - 1:
-                        self.print_space()
-                self.println()
-            elif node.func.id == "input":
-                pass
-            elif node.func.id == "int":
-                if isinstance(node.args[0], ast.Name) and node.args[0].id == "input":
-                    self.read_integer()
-            
-            self.generic_visit(node)
+        if node.func.id == "print":
+            argc = len(node.args)
+            for arg_idx, arg in enumerate(node.args):
+                arg_block: MemoryBlock = self.visit(arg)
+
+                if arg_block.dtype == "int":
+                    self.print_64bit(arg_block.begin)
+                elif arg_block.dtype == "str":
+                    self.move_to(arg_block.begin)
+                    for i in range(arg_block.size):
+                        self.bf_code += ".>>"
+                self._free_tmp(arg_block)
+                
+                if arg_idx < argc - 1:
+                    self.print_space()
+            self.println()
+            return None
+        
+        elif node.func.id == "input":
+            print("[DEBUG] input にアクセスしました")
+            tmp_name = self.tmp_var_name + str(self.tmp_num)
+            self.tmp_num += 1
+            result_block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="str", size=self.max_str_len)
+            self._io_read_string(result_block)
+            return result_block
+
+        elif node.func.id == "int":
+            if isinstance(node.args[0], ast.Call) and getattr(node.args[0].func, "id", "") == "input":
+                print("[DEBUG] int(input()) にアクセスしました")
+                tmp_name = self.tmp_var_name + str(self.tmp_num)
+                self.tmp_num += 1
+                result_block = self.memory_manager.assign_variable(var_name=tmp_name, dtype="int", size=64)
+                self._io_read_int(result_block)
+                return result_block
+        return None
+
+    def _allocate_tmp(self, op, *args: MemoryBlock):
+        if isinstance(op, ast.Add):
+            left_hand, right_hand = args
+            result_block = None
+            if left_hand.dtype == right_hand.dtype:
+                if left_hand.dtype == "int":
+                    result_block = self.memory_manager.assign_variable(var_name=self.tmp_var_name + str(self.tmp_num), dtype="int", size=64)
+                elif left_hand.dtype == "str":
+                    result_block = self.memory_manager.assign_variable(var_name=self.tmp_var_name + str(self.tmp_num), dtype="str", size=left_hand.size+right_hand.size)
+                elif left_hand.dtype == "bool":
+                    result_block = self.memory_manager.assign_variable(var_name=self.tmp_var_name + str(self.tmp_num), dtype="bool", size=1)
+                else:
+                    raise TypeError(f"{left_hand.dtype} と {right_hand.dtype} の値に対して {op} は適用できません。")
+            else:
+                raise TypeError(f"{left_hand.dtype} と {right_hand.dtype} の値に対して {op} は適用できません。")
+            return result_block
+        return 
+
+    def _zero_clear_region(self, begin, size):
+        original_ptr = self.ptr
+        for i in range(size):
+            self.move_to(begin+i, is_work=False)
+            self.bf_code += "[-]"
+        self._restore_ptr(original_ptr)
+
+    def _free_tmp(self, *args: MemoryBlock):
+        for arg in args:
+            if arg.name.startswith("temporary_variable_in_compilation_"):
+                self._zero_clear_region(arg.begin, arg.size)
+                self.memory_manager.free_variable(arg.name)
+                print(f"[DEBUG] {arg.name} を解放しました")
 
     def _restore_ptr(self, original_physical_ptr):
         if self.ptr < original_physical_ptr:
@@ -259,7 +356,162 @@ class PythonToBFTranspiler(ast.NodeVisitor):
             else:
                 res.append(c)
         return "".join(res)
-    
+
+    def _math_concat_str(self, left_block: MemoryBlock, right_block: MemoryBlock, result: MemoryBlock):
+        """文字列の結合処理 (最大64文字制限対応)"""
+        print(f"[DEBUG] BF生成: 文字列結合を実行します")
+        # まず左辺をコピー
+        copy_len_left = min(left_block.size, result.size)
+        if copy_len_left > 0:
+            self.copy_values(left_block.begin, copy_len_left, result.begin)
+        
+        # 次に右辺をオフセット位置からコピー（上限まで）
+        copy_len_right = min(right_block.size, result.size - copy_len_left)
+        if copy_len_right > 0:
+            self.copy_values(right_block.begin, copy_len_right, result.begin + copy_len_left)
+
+    def _math_add(self, left_block: MemoryBlock, right_block: MemoryBlock, result: MemoryBlock):
+        print(f"[DEBUG] BF生成: 加算を実行します")
+        cell_index = result.begin
+
+        # 加算器ワークエリアの確保 (T, Carry, NextCarry)
+        work = self.memory_manager.current_static_top
+        self.memory_manager.current_static_top += 3
+        
+        self.set_value(work + 1, 0) # Carry = 0 に初期化
+        
+        for i in range(64):
+            # Z_i = X_i (左辺のコピー)
+            self.copy_values(left_block.begin + i, 1, cell_index + i)
+            # T = Y_i (右辺をワークエリアへコピー)
+            self.copy_values(right_block.begin + i, 1, work)
+            
+            # Z_i += T (右辺を加算)
+            self.move_to(work, is_work=False); self.bf_code += "[-"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "+"
+            self.move_to(work, is_work=False); self.bf_code += "]"
+            
+            # Z_i += Carry (下位ビットからの繰り上がりを加算)
+            self.move_to(work + 1, is_work=False); self.bf_code += "[-"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "+"
+            self.move_to(work + 1, is_work=False); self.bf_code += "]"
+            
+            # 現在 Z_i は 0, 1, 2, 3 のいずれか。これを T に移動し、NextCarryを初期化
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "[-"
+            self.move_to(work, is_work=False); self.bf_code += "+"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "]"
+            self.set_value(work + 2, 0)
+            
+            # --- 究極の1bit加算ロジック (DivMod 2) ---
+            # T [- R+ T[- R- Q+ T[- R+]]]
+            # T(work)の値を評価し、R(cell_index+i)に剰余を、Q(work+2)に商(キャリー)を入れる
+            self.move_to(work, is_work=False); self.bf_code += "[-"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "+"
+            self.move_to(work, is_work=False); self.bf_code += "[-"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "-"
+            self.move_to(work + 2, is_work=False); self.bf_code += "+"
+            self.move_to(work, is_work=False); self.bf_code += "[-"
+            self.move_to(cell_index + i, is_work=False); self.bf_code += "+"
+            self.move_to(work, is_work=False); self.bf_code += "]]]"
+            
+            # NextCarry を次ループの Carry へ移動
+            self.move_to(work + 2, is_work=False); self.bf_code += "[-"
+            self.move_to(work + 1, is_work=False); self.bf_code += "+"
+            self.move_to(work + 2, is_work=False); self.bf_code += "]"
+            
+        # ワークエリアの解放
+        self.memory_manager.current_static_top -= 3
+
+    def _carry_propagate(self, R: MemoryBlock):
+        """1bit加算の連鎖による高速なキャリー伝播（1桁加算用）"""
+        work = self.memory_manager.current_static_top
+        self.memory_manager.current_static_top += 1
+        for i in range(R.size - 1):
+            # R[i] が 2 になった場合のみ R[i]=0, R[i+1]+=1 とするDivMod-2ロジック
+            self.move_to(R.begin + i, is_work=False); self.bf_code += "[-"
+            self.move_to(work, is_work=False); self.bf_code += "+"
+            self.move_to(R.begin + i, is_work=False); self.bf_code += "[-"
+            self.move_to(work, is_work=False); self.bf_code += "-"
+            self.move_to(R.begin + i + 1, is_work=False); self.bf_code += "+"
+            self.move_to(R.begin + i, is_work=False); self.bf_code += "]]"
+            self.move_to(work, is_work=False); self.bf_code += "[-"
+            self.move_to(R.begin + i, is_work=False); self.bf_code += "+]"
+        self.memory_manager.current_static_top -= 1
+
+    def _io_read_string(self, result_block: MemoryBlock):
+        """LF判定でコピーを使わず、-10と+10でスマートに分岐する文字列読み込み"""
+        self.move_to(result_block.begin, is_work=False)
+        self.bf_code += "----------"\
+                        "[++++++++++>>,+[-----------[<+>>]]<]<<[-<<]"\
+                        ">>>[[-<<+>>]<+>>>]<<<[[-]<<]>"
+
+    def _io_read_int(self, result_block: MemoryBlock):
+        """10進数文字列を読み込み、64bitバイナリに展開する本格的パーサー"""
+        work = self.memory_manager.current_static_top
+        self.memory_manager.current_static_top += 3
+        
+        flag = work
+        temp = work + 1
+        is_space = work + 2
+
+        T1 = self.memory_manager.assign_variable(var_name="tmp_T1", dtype="int", size=64)
+        T2 = self.memory_manager.assign_variable(var_name="tmp_T2", dtype="int", size=64)
+
+        self.set_value(flag, 1)
+        
+        self.move_to(flag, is_work=False); self.bf_code += "["
+        
+        self.move_to(temp, is_work=False); self.bf_code += "[-],"
+        self.bf_code += "----------" # LF判定
+        self.move_to(flag, is_work=False); self.bf_code += "[-]"
+        
+        self.move_to(temp, is_work=False); self.bf_code += "["
+        self.bf_code += "++++++++++" # 復元
+        self.bf_code += "-" * 32     # Space判定
+        
+        self.move_to(is_space, is_work=False); self.bf_code += "[-]+"
+        self.move_to(temp, is_work=False); self.bf_code += "["
+        self.bf_code += "+" * 32     # Space以外なら復元
+        self.move_to(is_space, is_work=False); self.bf_code += "[-]"
+        
+        # --- 正常な数値の処理 ---
+        self.bf_code += "-" * 48     # '0' を引いて実数値 (0-9) に変換
+        
+        # 1. 現在の値を T1(シフト1 = *2) と T2(シフト3 = *8) に分配
+        for i in range(64):
+            self.move_to(result_block.begin + i, is_work=False); self.bf_code += "[-"
+            if i + 1 < 64:
+                self.move_to(T1.begin + i + 1, is_work=False); self.bf_code += "+"
+            if i + 3 < 64:
+                self.move_to(T2.begin + i + 3, is_work=False); self.bf_code += "+"
+            self.move_to(result_block.begin + i, is_work=False); self.bf_code += "]"
+        
+        # 2. R * 10 の加算を実行
+        self._math_add(T1, T2, result_block)
+        self._zero_clear_region(T1.begin, 64)
+        self._zero_clear_region(T2.begin, 64)
+
+        # 3. 新しい桁を最下位ビットに加算
+        self.move_to(temp, is_work=False); self.bf_code += "[-"
+        self.move_to(result_block.begin, is_work=False); self.bf_code += "+"
+        self.move_to(temp, is_work=False); self.bf_code += "]"
+        
+        # 4. キャリー(繰り上がり)を全体に伝播させる
+        self._carry_propagate(result_block)
+
+        self.move_to(flag, is_work=False); self.bf_code += "+" # ループ継続
+        self.move_to(temp, is_work=False); self.bf_code += "]" # tempループ(Space以外)終了
+        
+        self.move_to(is_space, is_work=False); self.bf_code += "["
+        self.move_to(flag, is_work=False); self.bf_code += "[-]" # Spaceならフラグを折って終了
+        self.move_to(is_space, is_work=False); self.bf_code += "[-]]"
+        
+        self.move_to(flag, is_work=False); self.bf_code += "]" # メイン読み込みループ終了
+
+        self.memory_manager.free_variable(T1.name)
+        self.memory_manager.free_variable(T2.name)
+        self.memory_manager.current_static_top -= 3
+
     def print_space(self):
         original_ptr = self.ptr
         print_workspace = self.memory_manager.current_static_top
@@ -641,11 +893,15 @@ def main():
     # 5. 生成されたBrainfuckコードを出力（またはファイルに書き出し）
 
     output_file_path = re.findall("[A-Za-z-_]*.py", file_path)[0]
-    output_file_path = output_file_path.replace(".py", ".bf")
+    output_file_path = "./test/" + output_file_path.replace(".py", ".bf")
 
     with open(output_file_path, "w", encoding="utf-8") as f:
         f.write(transpiler.bf_code)
         print(f"Brainfuckコードが {output_file_path} に出力されました")
+
+    with open("./test/submission.txt", "w", encoding="utf-8") as f:
+        f.write(transpiler.bf_code)
+        print(f"Brainfuckコードが submission.txt に出力されました")
 
 
 if __name__ == "__main__":

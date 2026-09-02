@@ -10,13 +10,15 @@ def read_file(filename):
         print("File open error.", file=sys.stderr)
         sys.exit(1)
 
-def brainfuck_interpreter(code):
-    mem = [0] * 300000
+def brainfuck_interpreter(code, arg):
+    mem = [0] * REALLOC_SIZE
     ptr = 0
     pc = 0
+    stdin_ptr = 0
     code_len = len(code)
 
     while pc < code_len:
+        # print(stdin_ptr)
         cmd = code[pc]
 
         if cmd == '>':
@@ -30,11 +32,12 @@ def brainfuck_interpreter(code):
         elif cmd == '.':
             print(chr(mem[ptr]), end='')
         elif cmd == ',':
-            try:
-                inp = input()[0]
+            if stdin_ptr < len(arg):
+                inp = arg[stdin_ptr]
                 mem[ptr] = ord(inp)
-            except IndexError:
-                mem[ptr] = 0
+                stdin_ptr += 1
+            else:
+                mem[ptr] = -1
         elif cmd == '[':
             if mem[ptr] == 0:
                 rc = 1
@@ -63,8 +66,9 @@ def brainfuck_interpreter(code):
         pc += 1
 
 def main():
-    code = read_file("test.bf")
-    brainfuck_interpreter(code)
+    code = read_file("./test/test.bf")
+    arg = read_file("./test/input.txt")
+    brainfuck_interpreter(code, arg)
 
 if __name__ == "__main__":
     main()
