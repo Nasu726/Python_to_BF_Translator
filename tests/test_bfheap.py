@@ -1,11 +1,16 @@
 from bf_runtime import run_bf
-from bfcore import BFEmitter
+from bfcore import BFEmitter, Binary64Core, Int64Ref
 from bfheap import BLOCK_STRIDE, HANDLE, MARKER, TYPE, HeapBlockArena
 from bfobjects import ObjectHandleCore, ObjectHandleRef
+from bfpacked64 import PackedI64Core, PackedI64Ref
 
 
 def _u32(memory: list[int], base: int) -> int:
     return sum(memory[base + i] << (8 * i) for i in range(4))
+
+
+def _u64_bytes(memory: list[int], ref: PackedI64Ref) -> int:
+    return sum(memory[ref.byte(i)] << (8 * i) for i in range(8))
 
 
 def test_heap_allocates_blocks_at_runtime_and_returns_to_anchor():
@@ -143,4 +148,38 @@ def test_heap_header_u32_fields_round_trip_through_alias_handle():
     assert _u32(result.memory, length_out.base) == 123_456
     assert _u32(result.memory, capacity_out.base) == 200_000
     assert _u32(result.memory, next_out.base) == 0x00ABCDEF
+    assert _u32(result.memory, alias.base) == _u32(result.memory, obj.base) == 1
+
+
+def test_heap_packed_i64_payload_round_trips_through_runtime_lookup():
+    bf = BFEmitter()
+    next_handle = ObjectHandleRef(0)
+    obj = ObjectHandleRef(4)
+    alias = ObjectHandleRef(8)
+    source_bits = Int64Ref(16)
+    packed = PackedI64Ref(80)
+    restored_packed = PackedI64Ref(88)
+    left_sentinel = 128
+    scratch = 104
+    binary = Binary64Core(bf, scratch_base=112)
+    storage = PackedI64Core(bf, scratch_base=scratch)
+    arena = HeapBlockArena(
+        bf,
+        left_sentinel=left_sentinel,
+        next_handle=next_handle,
+        scratch_base=scratch,
+    )
+    handles = ObjectHandleCore(bf, scratch_base=scratch)
+
+    arena.initialize()
+    arena.allocate(obj, type_tag=9)
+    handles.copy(alias, obj)
+    binary.set_u64(source_bits, 0xFEDCBA9876543210)
+    storage.from_int64(packed, source_bits)
+    arena.write_payload_i64(alias, packed)
+    arena.read_payload_i64(restored_packed, obj)
+
+    result = run_bf(bf.code(), memory_size=512, step_limit=150_000_000)
+    assert _u64_bytes(result.memory, packed) == 0xFEDCBA9876543210
+    assert _u64_bytes(result.memory, restored_packed) == 0xFEDCBA9876543210
     assert _u32(result.memory, alias.base) == _u32(result.memory, obj.base) == 1
