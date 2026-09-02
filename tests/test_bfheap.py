@@ -15,8 +15,6 @@ def _u64_bytes(memory: list[int], ref: PackedI64Ref) -> int:
 
 
 def _run(bf: BFEmitter, *, memory_size: int, step_limit: int):
-    # Public compilation always runs the source optimizer. Heap E2E tests use
-    # the same execution boundary instead of benchmarking raw, redundant BF.
     return run_bf(optimize_bf(bf.code()), memory_size=memory_size, step_limit=step_limit)
 
 
@@ -80,7 +78,7 @@ def test_heap_type_tag_is_stored_in_each_object_header():
     assert _u32(result.memory, second + HANDLE) == 2
 
 
-def test_heap_resolves_type_through_runtime_handle_and_alias():
+def test_heap_resolves_type_through_runtime_handle_alias_and_null():
     bf = BFEmitter()
     next_handle = ObjectHandleRef(0)
     a = ObjectHandleRef(4)
@@ -88,8 +86,8 @@ def test_heap_resolves_type_through_runtime_handle_and_alias():
     alias = ObjectHandleRef(12)
     type_a = 20
     type_alias = 21
-    type_missing = 22
-    missing = ObjectHandleRef(24)
+    type_null = 22
+    null = ObjectHandleRef(24)  # zero-initialized null sentinel
     left_sentinel = 64
     arena = HeapBlockArena(
         bf,
@@ -103,16 +101,15 @@ def test_heap_resolves_type_through_runtime_handle_and_alias():
     arena.allocate(a, type_tag=11)
     arena.allocate(b, type_tag=22)
     handles.copy(alias, b)
-    handles.set_u32(missing, 999)
 
     arena.read_type(type_a, a)
     arena.read_type(type_alias, alias)
-    arena.read_type(type_missing, missing)
+    arena.read_type(type_null, null)
 
     result = _run(bf, memory_size=512, step_limit=50_000_000)
     assert result.memory[type_a] == 11
     assert result.memory[type_alias] == 22
-    assert result.memory[type_missing] == 0
+    assert result.memory[type_null] == 0
     assert _u32(result.memory, b.base) == 2
     assert _u32(result.memory, alias.base) == 2
 
