@@ -16,7 +16,7 @@ from bfmemory import allocate_live_blocks
 from bfpacked64 import PackedI64Ref
 from bfquad import WORD_CELLS, Quad64Ref
 from bfquadbackend import QuadBinaryStringListIO
-from bfquadinplace import add64_inplace
+from bfquadinplace import add64_inplace, sub_double64
 from bfstringlists import StringListRef
 from bfstrings import StringRef
 from compiler import CompileError, _infer_int_list_names, _infer_string_list_names
@@ -27,6 +27,27 @@ from transpiler_full import _LoopContext
 from transpiler_inputs import infer_split_string_names
 from transpiler_v2 import MASK64, _TempArena
 from transpiler_v3 import infer_string_names
+
+
+def _times_two_name(node: ast.AST) -> str | None:
+    """Return the scalar name in exactly ``2*x`` or ``x*2``."""
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+        return None
+    if (
+        isinstance(node.left, ast.Constant)
+        and type(node.left.value) is int
+        and node.left.value == 2
+        and isinstance(node.right, ast.Name)
+    ):
+        return node.right.id
+    if (
+        isinstance(node.right, ast.Constant)
+        and type(node.right.value) is int
+        and node.right.value == 2
+        and isinstance(node.left, ast.Name)
+    ):
+        return node.left.id
+    return None
 
 
 class PythonToBFQuad(PythonToBFCompact):
@@ -201,6 +222,30 @@ class PythonToBFQuad(PythonToBFCompact):
         self.backend.drain_to_line_end(line_open, self.workspace_base)
         self.backend.packed64.clear(token)
 
+    def compile_expr(self, node: ast.AST):
+        # ``x - 2*y`` is common in partition/prefix-sum code.  Both operands
+        # are pure scalar names here, so one fused lane pass is exactly
+        # equivalent to materializing ``2*y`` and subtracting it, while avoiding
+        # one complete temporary Quad word and its copy/shift traffic.
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Sub)
+            and isinstance(node.left, ast.Name)
+            and node.left.id in self.variables
+        ):
+            doubled = _times_two_name(node.right)
+            if doubled is not None and doubled in self.variables:
+                result = self._new_word()
+                if sub_double64(
+                    self.backend,
+                    result,
+                    self.variables[node.left.id],
+                    self.variables[doubled],
+                ):
+                    return result
+
+        return super().compile_expr(node)
+
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         # Common reduction ``sum += values[i]``.  Do not lower the subscript as
         # a general expression: that would allocate a distant compiler temp for
@@ -221,11 +266,6 @@ class PythonToBFQuad(PythonToBFCompact):
             ref = self.lists[node.value.value.id]
             rhs = self.backend._qtmp(0)
 
-            # A compact range loop may expose a private one-byte induction
-            # shadow.  It is semantically redundant with the Python-visible
-            # int64 target but is exactly the representation the list walker
-            # wants.  Using it avoids both a full-width ``index < capacity``
-            # comparison and a Quad->byte conversion on every access.
             shadow = None
             if isinstance(node.value.slice, ast.Name):
                 shadow = getattr(self, "_range_index_shadows", {}).get(
