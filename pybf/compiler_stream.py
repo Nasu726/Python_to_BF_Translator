@@ -168,10 +168,6 @@ class PythonToBFStream(PythonToBFQuad):
         target_node, start_node, stop_node, step = self._range_parts(node)
         target = self._var(target_node)
 
-        # Compile-time literal starts do not need a temporary source plus a full
-        # Quad copy.  Likewise a scalar stop name can be read directly when the
-        # body does not rebind it; range()'s snapshot semantics are then
-        # observationally identical to the live value.
         start_literal = _literal_int(start_node)
         if start_literal is not None:
             current = self._new_word(start_literal)
@@ -201,11 +197,60 @@ class PythonToBFStream(PythonToBFQuad):
             step_word = self._new_word(step)
             add_tmp = self._new_word()
 
+        # A 0,+1 induction variable can maintain a private byte shadow for
+        # fixed-capacity list indexing. The Python-visible target remains the
+        # normal int64 value; this shadow is only a lowering aid. Once the byte
+        # reaches list_capacity, ``valid`` stays false forever, so wrapping at
+        # 256 cannot accidentally make an out-of-capacity index valid again.
+        shadow = None
+        target_name = target_node.id if isinstance(target_node, ast.Name) else None
+        if (
+            target_name is not None
+            and step == 1
+            and start_literal == 0
+            and not _body_rebinds(target_name, node.body)
+        ):
+            index_byte = self.temps.cell()
+            valid = self.temps.cell()
+            hit_capacity = self.temps.cell()
+            self.bf.clear(index_byte)
+            self.bf.set_const(valid, 1)
+            self.bf.clear(hit_capacity)
+            shadow = (index_byte, valid, hit_capacity)
+
+        shadows = getattr(self, "_range_index_shadows", None)
+        if shadows is None:
+            shadows = {}
+            self._range_index_shadows = shadows
+        previous_shadow = shadows.get(target_name) if target_name is not None else None
+        if shadow is not None and target_name is not None:
+            shadows[target_name] = shadow[:2]
+
         self.bf.begin_while(control)
         self.bf.add_const(control, -1)
         self.backend.copy64(target, current)
-        for stmt in node.body:
-            self.compile_stmt(stmt)
+        try:
+            for stmt in node.body:
+                self.compile_stmt(stmt)
+        finally:
+            # Compile-time visibility of the shadow must not escape the body;
+            # the emitted runtime cells themselves are updated below.
+            if shadow is not None and target_name is not None:
+                if previous_shadow is None:
+                    shadows.pop(target_name, None)
+                else:
+                    shadows[target_name] = previous_shadow
+
+        if shadow is not None:
+            index_byte, valid, hit_capacity = shadow
+            self.bf.add_const(index_byte, 1)
+            self.backend._eq_byte_const(
+                hit_capacity, index_byte, self.list_capacity
+            )
+            self.bf.begin_while(hit_capacity)
+            self.bf.add_const(hit_capacity, -1)
+            self.bf.clear(valid)
+            self.bf.end_while(hit_capacity)
 
         if step == 1:
             if not inc64_inplace(self.backend, current):
