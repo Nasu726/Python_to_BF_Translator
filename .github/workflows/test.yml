@@ -35,6 +35,7 @@ jobs:
               tests/test_bfobjects.py
               tests/test_bfpacked.py
               tests/test_bfpacked64.py
+              tests/test_bfstreamseq.py
               tests/test_bfstrings.py
               tests/test_bftokens.py
           - suite: frontend
