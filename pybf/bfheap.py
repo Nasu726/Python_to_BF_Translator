@@ -330,11 +330,25 @@ class HeapBlockArena:
         return r.code()
 
     def _return_result_from_after_target(self, width: int) -> str:
+        """Carry a lookup result back to the fixed left sentinel.
+
+        The first transfer moves from the block *after* the target into the
+        target block.  The following BF loop then walks one block left per
+        iteration.  Its body must be expressed relative to the marker reached
+        at runtime; resetting the builder origin here is essential.  Without
+        that reset, the second iteration reused offsets relative to the
+        original after-target block and bounced between incorrect cells.
+        """
         r = _RelativeBuilder(initial_pos=LOCAL0)
         for i in range(width):
             r.transfer(RESULT + i, -BLOCK_STRIDE + RESULT + i)
         r.move(-BLOCK_STRIDE + MARKER)
         r.parts.append("[")
+
+        # The loop-local origin is now the current block marker.  Rebase the
+        # coordinate tracker without emitting movement so the fixed loop body
+        # uses +RESULT and -BLOCK_STRIDE deltas on every runtime iteration.
+        r.pos = MARKER
         for i in range(width):
             r.transfer(RESULT + i, -BLOCK_STRIDE + RESULT + i)
         r.move(-BLOCK_STRIDE + MARKER)
