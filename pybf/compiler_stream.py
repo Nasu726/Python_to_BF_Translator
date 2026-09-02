@@ -44,6 +44,17 @@ def _contains_input_call(nodes: list[ast.stmt]) -> bool:
     return False
 
 
+def _contains_loop_transfer(nodes: list[ast.stmt]) -> bool:
+    # Conservative by design: even a break/continue owned by a nested loop
+    # disables this source-size optimization. Correctness matters more than
+    # squeezing the rare nested-control case.
+    return any(
+        isinstance(item, (ast.Break, ast.Continue))
+        for stmt in nodes
+        for item in ast.walk(stmt)
+    )
+
+
 def _positive_power_of_two_constant(node: ast.AST) -> int | None:
     if not isinstance(node, ast.Constant) or not isinstance(node.value, int):
         return None
@@ -68,13 +79,7 @@ def _literal_int(node: ast.AST) -> int | None:
 
 
 def _self_min_abs_assignment(node: ast.stmt) -> tuple[str, ast.AST] | None:
-    """Recognize ``x = min(x, abs(fresh_binary_expression))``.
-
-    Restricting the absolute-value operand to a BinOp guarantees that evaluating
-    it returns a fresh compiler temporary; the optimizer may then negate that
-    value in place without mutating a user variable.  The general min/abs paths
-    remain available for every other AST shape.
-    """
+    """Recognize ``x = min(x, abs(fresh_binary_expression))``."""
     if not (
         isinstance(node, ast.Assign)
         and len(node.targets) == 1
@@ -131,11 +136,6 @@ class PythonToBFStream(PythonToBFQuad):
             if target_name not in self.variables:
                 return super()._compile_stmt_inner(node)
 
-            # Generic lowering materializes three avoidable full Quad copies:
-            # abs(expr), min-result, and assignment-back-to-target.  Here the
-            # BinOp result is already a fresh temporary.  Take its magnitude in
-            # place, compare directly against the live target, and overwrite
-            # only when the candidate is smaller.
             candidate = self.compile_expr(magnitude_expr)
             sign = self.temps.cell()
             self.backend.copy_cell(candidate.bit(63), sign, self.backend.s0)
@@ -144,7 +144,7 @@ class PythonToBFStream(PythonToBFQuad):
             self.backend._neg64_inplace(candidate)
             self.bf.end_while(sign)
 
-            dst = self._var(ast.Name(id=target_name, ctx=ast.Load()))
+            dst = self.variables[target_name]
             choose = self.temps.cell()
             self.backend.slt64(choose, candidate, dst)
             self.bf.begin_while(choose)
@@ -158,36 +158,76 @@ class PythonToBFStream(PythonToBFQuad):
     def _list_index_word(self, node: ast.AST, ref):
         proven = getattr(self, "_proven_nonnegative_indices", set())
         if isinstance(node, ast.Name) and node.id in proven:
-            # Positive-step range induction variables that start nonnegative and
-            # are not rebound in the loop body can never need Python's
-            # ``len(list) + negative_index`` normalization. Returning the live
-            # scalar directly also avoids an otherwise redundant Quad copy.
             return self.compile_expr(node), None
         return super()._list_index_word(node, ref)
+
+    def _compile_for_range_simple(self, node: ast.For) -> None:
+        """Range loop without break/continue/else bookkeeping."""
+        target_node, start_node, stop_node, step = self._range_parts(node)
+        target = self._var(target_node)
+        start = self.compile_expr(start_node)
+        stop_value = self.compile_expr(stop_node)
+        current = self._copy_new(start)
+        stop = self._copy_new(stop_value)
+        control = self.temps.cell()
+
+        if step > 0:
+            self.backend.slt64(control, current, stop)
+        else:
+            self.backend.sgt64(control, current, stop)
+
+        step_word = None
+        add_tmp = None
+        if step != 1:
+            step_word = self._new_word(step)
+            add_tmp = self._new_word()
+
+        self.bf.begin_while(control)
+        self.bf.add_const(control, -1)
+        self.backend.copy64(target, current)
+        for stmt in node.body:
+            self.compile_stmt(stmt)
+
+        if step == 1:
+            self.backend._inc64_inplace(current)
+        else:
+            assert step_word is not None and add_tmp is not None
+            self.backend.add64(add_tmp, current, step_word)
+            self.backend.copy64(current, add_tmp)
+
+        if step > 0:
+            self.backend.slt64(control, current, stop)
+        else:
+            self.backend.sgt64(control, current, stop)
+        self.bf.end_while(control)
 
     def _compile_for_range_control(self, node: ast.For) -> None:
         target, start, _stop, step = self._range_parts(node)
         name = target.id if isinstance(target, ast.Name) else None
         start_value = _literal_int(start)
-        safe = (
+        safe_nonnegative = (
             name is not None
             and step > 0
             and start_value is not None
             and start_value >= 0
             and not _body_rebinds(name, node.body)
         )
+        lean_control = not node.orelse and not _contains_loop_transfer(node.body)
 
         proven = getattr(self, "_proven_nonnegative_indices", None)
         if proven is None:
             proven = set()
             self._proven_nonnegative_indices = proven
         already = name in proven if name is not None else False
-        if safe and name is not None:
+        if safe_nonnegative and name is not None:
             proven.add(name)
         try:
-            super()._compile_for_range_control(node)
+            if lean_control:
+                self._compile_for_range_simple(node)
+            else:
+                super()._compile_for_range_control(node)
         finally:
-            if safe and name is not None and not already:
+            if safe_nonnegative and name is not None and not already:
                 proven.remove(name)
 
     def compile_stmt(self, node: ast.stmt) -> None:
