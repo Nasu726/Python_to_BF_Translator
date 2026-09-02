@@ -10,16 +10,56 @@ concurrency:
 
 jobs:
   pytest:
+    name: pytest (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: arithmetic
+            files: >-
+              tests/test_bfarith.py
+              tests/test_bfcompare.py
+              tests/test_bfcore.py
+              tests/test_bfio.py
+              tests/test_bfsigned.py
+              tests/test_bfwordops.py
+          - suite: runtime
+            files: >-
+              tests/test_bfdynlist.py
+              tests/test_bfheap.py
+              tests/test_bflists.py
+              tests/test_bfmemory.py
+              tests/test_bfobjects.py
+              tests/test_bfpacked.py
+              tests/test_bfpacked64.py
+              tests/test_bfstrings.py
+              tests/test_bftokens.py
+          - suite: frontend
+            files: >-
+              tests/test_controlflow.py
+              tests/test_input_lines.py
+              tests/test_split_input.py
+              tests/test_string_iteration.py
+              tests/test_transpiler_current.py
+              tests/test_transpiler_lists.py
+              tests/test_transpiler_v2.py
+              tests/test_transpiler_v3.py
+          - suite: contest
+            files: >-
+              tests/test_abc_c_foundation.py
+              tests/test_code_size.py
+              tests/test_compile_performance.py
+              tests/test_public_api.py
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest pytest-xdist
-      - name: Run tests in parallel
-        # BF execution tests are CPU/memory heavy.  A fixed worker count avoids
-        # oversubscribing hosted runners while still parallelizing independent
-        # generated-program executions.
-        run: python -m pytest -q -n 4 --dist=worksteal --durations=20
+      - name: Run ${{ matrix.suite }} tests
+        # Separate matrix entries get separate hosted runners.  Two xdist
+        # workers inside each runner use its CPU without the over-subscription
+        # caused by a single `-n auto` job.
+        run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
