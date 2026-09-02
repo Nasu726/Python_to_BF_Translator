@@ -216,8 +216,28 @@ class PythonToBF(PythonToBFV3):
         raise self._error(node, "unsupported list expression")
 
     def _list_index_word(self, node: ast.AST, ref: IntListRef) -> tuple[Int64Ref, int | None]:
+        # Python parses ``-1`` as UnaryOp(USub, Constant(1)), not as a
+        # Constant(-1).  Fold signed integer literals here before applying
+        # Python's length-relative negative-index semantics.
+        raw: int | None = None
         if isinstance(node, ast.Constant) and isinstance(node.value, int):
             raw = node.value
+        elif (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.USub)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)
+        ):
+            raw = -node.operand.value
+        elif (
+            isinstance(node, ast.UnaryOp)
+            and isinstance(node.op, ast.UAdd)
+            and isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, int)
+        ):
+            raw = node.operand.value
+
+        if raw is not None:
             if raw >= 0:
                 return self._new_word(raw), raw
             # Python negative indexing is relative to the runtime length.
