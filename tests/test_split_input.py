@@ -81,3 +81,13 @@ x = int(input())
 print(S, x)
 '''
     assert execute(source, 'a b c d e f\n42\n') == "['a', 'b', 'c', 'd'] 42\n"
+
+
+def test_empty_list_stays_an_integer_list_by_default():
+    source = '''
+A = []
+A.append(3)
+A.append(-1)
+print(A)
+'''
+    assert execute(source) == '[3, -1]\n'
