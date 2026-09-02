@@ -14,7 +14,7 @@ from bfstringlists import BinaryStringListIO
 
 
 class QuadBinaryStringListIO(BinaryStringListIO):
-    """String/list backend plus runtime-lane scalar add/sub/comparison."""
+    """String/list backend plus runtime-lane scalar copy/add/sub/comparison."""
 
     def __init__(self, bf, scratch_base: int) -> None:
         super().__init__(bf, scratch_base=scratch_base)
@@ -22,7 +22,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         self._quad_workspace_base: int | None = None
 
     def set_quad_workspace(self, base: int) -> None:
-        # Two Quad words fit inside the existing shared signed-divmod workspace.
         self._quad_workspace_base = base
 
     def _qtmp(self, index: int = 0) -> Quad64Ref:
@@ -39,7 +38,9 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         return isinstance(a, Quad64Ref) and isinstance(b, Quad64Ref) and a.base == b.base
 
     def copy64(self, dst, src) -> None:
-        if isinstance(dst, Quad64Ref) and isinstance(src, Quad64Ref) and dst.base == src.base:
+        if self._all_quad(dst, src):
+            if not self._same(dst, src):
+                self.quad.copy64(dst, src)
             return
         super().copy64(dst, src)
 
@@ -52,8 +53,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
     def add64(self, dst, a, b) -> None:
         if self._all_quad(dst, a, b):
             if self._same(a, b):
-                # Quad64Core uses B's marker cells as lane-local scratch, so
-                # aliased operands must be separated physically first.
                 rhs = self._qtmp(0)
                 self.copy64(rhs, b)
                 self.quad.add64(dst, a, rhs)
@@ -116,9 +115,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             if self._same(a, b):
                 self.bf.set_const(result, 1)
                 return
-            # Signed ordering is unsigned ordering after XORing the sign bit of
-            # both operands with 1<<63.  Mutate only for the duration of the
-            # comparison and restore before returning.
             self._toggle_bit(a.bit(63), self.s0)
             self._toggle_bit(b.bit(63), self.s0)
             self._clear_scratch()
@@ -165,7 +161,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             if self._same(a, b):
                 self.bf.set_const(result, 1)
                 return
-            # Equality iff both unsigned >= directions hold.
             other = self.s1
             gate = self.s2
             self.quad.uge64(result, a, b, self._qtmp(0))
