@@ -7,9 +7,9 @@ Each word uses 32 lanes plus a sentinel::
 The value bits still represent the exact same two's-complement int64 ABI as
 ``Int64Ref``.  ``Quad64Ref`` subclasses ``Int64Ref`` and only changes physical
 bit addressing, so correctness-first backend operations can continue to work
-through the normal ``bit(i)`` interface while hot add/sub/compare operations
-use one runtime lane-walking Brainfuck body instead of 64 Python-unrolled
-bodies.
+through the normal ``bit(i)`` interface while hot copy/add/sub/compare
+operations use one runtime lane-walking Brainfuck body instead of Python-
+unrolled bit bodies.
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ def _add_not_preserved(
 
 
 class Quad64Core:
-    """Runtime-lane add/sub/unsigned-compare over ``Quad64Ref`` values."""
+    """Runtime-lane copy/add/sub/unsigned-compare over ``Quad64Ref`` values."""
 
     def __init__(self, bf: BFEmitter) -> None:
         self.bf = bf
@@ -192,6 +192,41 @@ class Quad64Core:
         self.bf.clear(dst.marker(DIGITS))
         self.bf.clear(dst.bit0(DIGITS))
         self.bf.clear(dst.bit1(DIGITS))
+
+    def copy64(self, dst: Quad64Ref, src: Quad64Ref) -> None:
+        """Copy all value bits with one emitted 32-lane runtime loop."""
+        if dst.base == src.base:
+            return
+
+        bf = self.bf
+        delta = dst.base - src.base
+
+        # Source markers drive the loop.  The current source marker is consumed
+        # at the start of every lane and then reused as the restoration scratch
+        # for the two Boolean payload bits.
+        for digit in range(DIGITS):
+            bf.set_const(src.marker(digit), 1)
+        bf.clear(src.marker(DIGITS))
+
+        r = _RelativeBuilder()
+        marker = 0
+        s0, s1 = 1, 2
+        dmark, d0, d1 = delta, delta + 1, delta + 2
+
+        r.clear(marker)
+        r.clear(dmark)
+        r.clear(d0)
+        r.clear(d1)
+        _add_preserved(r, s0, d0, marker)
+        _add_preserved(r, s1, d1, marker)
+        r.move(STRIDE)
+
+        bf.move(src.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = src.marker(DIGITS)
+        bf.clear(dst.marker(DIGITS))
+        bf.clear(dst.bit0(DIGITS))
+        bf.clear(dst.bit1(DIGITS))
 
     def _prepare_binary_op(
         self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref
