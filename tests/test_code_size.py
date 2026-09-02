@@ -28,3 +28,32 @@ def test_size_optimized_user_string_loop_still_executes():
     code = compile_source(USER_STRING_LOOP)
     result = run_bf(code, "ABCA\n", step_limit=300_000_000)
     assert result.output == "A..A"
+
+
+def test_stream_fusion_break_still_consumes_original_input_line():
+    source = '''
+s = input()
+for c in s:
+    if c == "B":
+        break
+x = input()
+print(c, x)
+'''
+    code = compile_source(source)
+    result = run_bf(code, "ABCD\nNEXT\n", step_limit=300_000_000)
+    assert result.output == "B NEXT\n"
+
+
+def test_stream_fusion_preserves_continue_and_for_else():
+    source = '''
+s = input()
+for c in s:
+    if c == "B":
+        continue
+    print(c, end="")
+else:
+    print("!", end="")
+'''
+    code = compile_source(source)
+    result = run_bf(code, "ABC\n", step_limit=300_000_000)
+    assert result.output == "AC!"
