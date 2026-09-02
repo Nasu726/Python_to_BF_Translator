@@ -9,6 +9,7 @@ when all participating values are ``Quad64Ref`` instances.
 
 from __future__ import annotations
 
+from bfpacked64 import PackedI64Ref
 from bfquad import WORD_CELLS, Quad64Core, Quad64Ref
 from bfstringlists import BinaryStringListIO
 
@@ -37,10 +38,73 @@ class QuadBinaryStringListIO(BinaryStringListIO):
     def _same(a, b) -> bool:
         return isinstance(a, Quad64Ref) and isinstance(b, Quad64Ref) and a.base == b.base
 
+    def _packed_to_quad_destructive(self, dst: Quad64Ref, src: PackedI64Ref) -> None:
+        """Expand eight packed bytes into Quad bits with compact emitted source.
+
+        ``src`` is traversal scratch when this fast path is used, so consuming
+        it is intentional.  The legacy converter preserves each source byte and
+        reconstructs eight Boolean bits through many long scratch round-trips.
+        Here each byte crosses the long tape distance exactly once into the hot
+        four-cell scratch area, then repeated runtime division-by-two extracts
+        its eight little-endian bits locally.
+        """
+        bf = self.bf
+        quotient = self.s0
+        parity = self.s1
+        gate = self.s2
+        byte = self.s3
+
+        for byte_index in range(8):
+            bf.clear(byte)
+            source = src.byte(byte_index)
+            bf.begin_while(source)
+            bf.add_const(source, -1)
+            bf.add_const(byte, 1)
+            bf.end_while(source)
+
+            for within in range(8):
+                bf.clear(quotient)
+                bf.clear(parity)
+
+                # quotient, parity = divmod(byte, 2), consuming byte.
+                bf.begin_while(byte)
+                bf.add_const(byte, -1)
+                bf.set_const(gate, 1)
+
+                bf.begin_while(parity)
+                bf.add_const(parity, -1)
+                bf.clear(gate)
+                bf.add_const(quotient, 1)
+                bf.end_while(parity)
+
+                bf.begin_while(gate)
+                bf.add_const(gate, -1)
+                bf.add_const(parity, 1)
+                bf.end_while(gate)
+                bf.end_while(byte)
+
+                out = dst.bit(byte_index * 8 + within)
+                bf.clear(out)
+                bf.begin_while(parity)
+                bf.add_const(parity, -1)
+                bf.add_const(out, 1)
+                bf.end_while(parity)
+
+                # Feed the quotient into the next bit extraction.
+                bf.begin_while(quotient)
+                bf.add_const(quotient, -1)
+                bf.add_const(byte, 1)
+                bf.end_while(quotient)
+
+        self._clear_scratch()
+
     def copy64(self, dst, src) -> None:
         if self._all_quad(dst, src):
             if not self._same(dst, src):
                 self.quad.copy64(dst, src)
+            return
+        if isinstance(dst, Quad64Ref) and isinstance(src, PackedI64Ref):
+            self._packed_to_quad_destructive(dst, src)
             return
         super().copy64(dst, src)
 
