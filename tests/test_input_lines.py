@@ -1,45 +1,50 @@
 from bf_runtime import run_bf
-from pybf import compile_source
+from compiler import compile_source as compile_internal
+from pybf import compile_source as compile_public
 
 
-def execute(source: str, input_data: str) -> str:
-    code = compile_source(source)
+def run(code: str, input_data: str) -> str:
     return run_bf(
         code,
         input_data,
-        memory_size=400_000,
-        step_limit=1_500_000_000,
+        memory_size=80_000,
+        step_limit=500_000_000,
     ).output
 
 
-def test_fixed_arity_map_int_then_next_input_line():
+def execute(source: str, input_data: str) -> str:
+    # Small fixed capacities exercise exactly the same line/token lowering while
+    # keeping BF execution tests fast. Public fixed-ABI routing is tested once
+    # separately below.
+    code = compile_internal(
+        source,
+        string_capacity=24,
+        list_capacity=8,
+    )
+    return run(code, input_data)
+
+
+def test_public_entrypoint_routes_fixed_arity_map_to_line_aware_compiler():
     source = '''
 a, b = map(int, input().split())
 c = int(input())
 print(a, b, c)
 '''
-    assert execute(source, '10 -2\n7\n') == '10 -2 7\n'
+    assert run(compile_public(source), '10 -2\n7\n') == '10 -2 7\n'
 
 
-def test_fixed_arity_map_does_not_leak_extra_same_line_token():
+def test_fixed_arity_map_does_not_leak_across_input_lines():
     source = '''
 a, b = map(int, input().split())
 c = int(input())
 print(a, b, c)
 '''
-    # CPython would raise ValueError for the extra token during unpacking.  The
-    # fixed BF runtime deliberately discards extras, but it must still preserve
-    # the source-level input() line boundary rather than feeding 999 to c.
+    # Extra values are intentionally discarded rather than implementing
+    # Python's unpacking ValueError, but they must remain owned by this input().
     assert execute(source, '1 2 999\n7\n') == '1 2 7\n'
 
-
-def test_fixed_arity_map_does_not_steal_from_next_line_when_short():
-    source = '''
-a, b = map(int, input().split())
-c = int(input())
-print(a, b, c)
-'''
-    # Missing values are currently zero-filled instead of raising ValueError.
+    # Missing values are currently zero-filled, and most importantly the next
+    # source-level input() still starts at the following line.
     assert execute(source, '5\n8\n') == '5 0 8\n'
 
 
