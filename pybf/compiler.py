@@ -158,6 +158,11 @@ class PythonToBFCompiler(PythonToBFInputs):
         self.temps = _TempArena(self.scratch_base + Binary64Core.SCRATCH_CELLS)
         self._loop_stack: list[_LoopContext] = []
 
+    def _expr_is_string_list(self, node: ast.AST) -> bool:
+        # Keep runtime expression classification consistent with the final
+        # inference rule: [] has no string evidence and remains an int list.
+        return _string_list_expr(node, self.string_list_names)
+
     def _close_line_if_end(self, line_open: int, end_line: int) -> None:
         """Set ``line_open = 0`` when a token reader consumed newline/EOF."""
         gate = self.temps.cell()
