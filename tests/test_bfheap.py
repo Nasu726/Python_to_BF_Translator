@@ -1,7 +1,7 @@
 from bf_runtime import run_bf
 from bfcore import BFEmitter
 from bfheap import BLOCK_STRIDE, HANDLE, MARKER, TYPE, HeapBlockArena
-from bfobjects import ObjectHandleRef
+from bfobjects import ObjectHandleCore, ObjectHandleRef
 
 
 def _u32(memory: list[int], base: int) -> int:
@@ -68,3 +68,41 @@ def test_heap_type_tag_is_stored_in_each_object_header():
     assert result.memory[second + TYPE] == 2
     assert _u32(result.memory, first + HANDLE) == 1
     assert _u32(result.memory, second + HANDLE) == 2
+
+
+def test_heap_resolves_type_through_runtime_handle_and_alias():
+    bf = BFEmitter()
+    next_handle = ObjectHandleRef(0)
+    a = ObjectHandleRef(4)
+    b = ObjectHandleRef(8)
+    alias = ObjectHandleRef(12)
+    type_a = 20
+    type_alias = 21
+    type_missing = 22
+    missing = ObjectHandleRef(24)
+    left_sentinel = 64
+    arena = HeapBlockArena(
+        bf,
+        left_sentinel=left_sentinel,
+        next_handle=next_handle,
+        scratch_base=32,
+    )
+    handles = ObjectHandleCore(bf, scratch_base=32)
+
+    arena.initialize()
+    arena.allocate(a, type_tag=11)
+    arena.allocate(b, type_tag=22)
+    handles.copy(alias, b)
+    handles.set_u32(missing, 999)
+
+    arena.read_type(type_a, a)
+    arena.read_type(type_alias, alias)
+    arena.read_type(type_missing, missing)
+
+    result = run_bf(bf.code(), memory_size=512, step_limit=50_000_000)
+    assert result.memory[type_a] == 11
+    assert result.memory[type_alias] == 22
+    assert result.memory[type_missing] == 0
+    # Lookup must preserve the aliasing handle values themselves.
+    assert _u32(result.memory, b.base) == 2
+    assert _u32(result.memory, alias.base) == 2
