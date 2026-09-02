@@ -9,15 +9,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# The implementation was developed as a set of sibling modules.  Keeping the
-# package directory on sys.path lets those internal absolute imports remain
-# stable while the user-facing repository root stays clean.
+# Internal modules intentionally use sibling imports.  Add the package
+# directory once so the user-facing root stays clean and only ``main.py`` is an
+# executable entrypoint.
 _PACKAGE_DIR = str(Path(__file__).resolve().parent)
 if _PACKAGE_DIR not in sys.path:
     sys.path.insert(0, _PACKAGE_DIR)
 
 from abi import INT_BITS, LIST_CAPACITY, STRING_CAPACITY  # noqa: E402
-from transpiler_full import compile_source as _compile_source  # noqa: E402
+from transpiler_inputs import compile_source as _compile_source  # noqa: E402
 from transpiler_v2 import CompileError  # noqa: E402
 
 
