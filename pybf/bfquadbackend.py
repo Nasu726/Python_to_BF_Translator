@@ -46,21 +46,28 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         return isinstance(a, Quad64Ref) and isinstance(b, Quad64Ref) and a.base == b.base
 
     def _packed_to_quad_destructive(self, dst: Quad64Ref, src: PackedI64Ref) -> None:
-        """Expand eight packed bytes into Quad bits with compact emitted source.
+        """Expand eight packed bytes into Quad bits with only eight long moves.
 
         ``src`` is traversal scratch when this fast path is used, so consuming
-        it is intentional.  Each byte crosses the long tape distance exactly
-        once into the hot four-cell scratch area; repeated runtime divmod-by-two
-        then extracts its eight little-endian Boolean bits locally.
+        it is intentional.  One packed byte is moved directly beside the four
+        Quad lanes that own its eight output bits.  Those four lane-marker cells
+        temporarily act as byte/quotient/parity/gate scratch, so the repeated
+        divmod-by-two work stays local instead of bouncing through the global
+        scratch area once per output bit.  All four markers finish zero.
         """
         bf = self.bf
-        quotient = self.s0
-        parity = self.s1
-        gate = self.s2
-        byte = self.carry0
 
         for byte_index in range(8):
-            bf.clear(byte)
+            first_digit = byte_index * 4
+            byte = dst.marker(first_digit)
+            quotient = dst.marker(first_digit + 1)
+            parity = dst.marker(first_digit + 2)
+            gate = dst.marker(first_digit + 3)
+
+            for cell in (byte, quotient, parity, gate):
+                bf.clear(cell)
+
+            # This is the only long-distance transfer for the packed byte.
             source = src.byte(byte_index)
             bf.begin_while(source)
             bf.add_const(source, -1)
@@ -71,6 +78,7 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.clear(quotient)
                 bf.clear(parity)
 
+                # quotient, parity = divmod(byte, 2), consuming byte.
                 bf.begin_while(byte)
                 bf.add_const(byte, -1)
                 bf.set_const(gate, 1)
@@ -99,7 +107,8 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.add_const(byte, 1)
                 bf.end_while(quotient)
 
-        self._clear_scratch()
+        # Eight divisions consume every byte completely.  The local markers
+        # are therefore already zero and global scratch was never touched.
 
     def copy64(self, dst, src) -> None:
         if self._all_quad(dst, src):
