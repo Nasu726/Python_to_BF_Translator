@@ -52,6 +52,7 @@ jobs:
               tests/test_abc_c_foundation.py
               tests/test_code_size.py
               tests/test_compile_performance.py
+              tests/test_layout_plan.py
               tests/test_public_api.py
     steps:
       - uses: actions/checkout@v4
