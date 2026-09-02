@@ -14,7 +14,6 @@ def test_peak_temp_arena_keeps_high_water_across_rewind():
     assert arena.top == 100
     assert arena.peak == 137
     assert arena.cells_used_peak == 37
-    assert arena.runtime_base if False else True  # guard against accidental API assumptions
 
 
 def test_final_layout_plan_is_after_all_compile_time_temporaries():
