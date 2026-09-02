@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-from dataclasses import dataclass
 from pathlib import Path
 
 from bfcore import BFEmitter, Binary64Core, Int64Ref, WORD_BITS
@@ -48,9 +47,34 @@ class _AssignedNames(ast.NodeVisitor):
             self.names.add(node.id)
 
 
-@dataclass
 class _TempArena:
-    top: int
+    """Compile-time temporary allocator with high-water tracking.
+
+    Older compiler layers mutate ``temps.top`` directly, so ``top`` remains a
+    read/write property rather than forcing every frontend to adopt a new API.
+    Recording ``peak`` is useful beyond diagnostics: a future two-pass lowering
+    can measure the maximum temporary footprint first and place the runtime
+    variable-sized heap immediately after that proven bound on the second pass.
+    """
+
+    def __init__(self, top: int) -> None:
+        self._top = top
+        self.base = top
+        self.peak = top
+
+    @property
+    def top(self) -> int:
+        return self._top
+
+    @top.setter
+    def top(self, value: int) -> None:
+        self._top = value
+        if value > self.peak:
+            self.peak = value
+
+    @property
+    def cells_used_peak(self) -> int:
+        return self.peak - self.base
 
     def mark(self) -> int:
         return self.top
@@ -122,220 +146,261 @@ class PythonToBFV2:
         self.backend.copy_cell(cell, result.bit(0), self.backend.s0)
         return result
 
-    def _truth_cell(self, value: Int64Ref) -> int:
-        result = self.temps.cell()
-        self.backend._is_nonzero64(result, value)
-        return result
-
-    def _emit_string(self, text: str) -> None:
-        # The shared workspace is dead between backend calls; its first byte is
-        # a convenient character output cell.
-        cell = self.workspace_base
-        for ch in text:
-            self.backend.print_char(ord(ch), cell)
+    def _flag_not(self, dst: int, src: int, tmp: int) -> None:
+        self.bf.set_const(dst, 1)
+        self.backend.copy_cell(src, tmp, self.backend.s0)
+        self.bf.begin_while(tmp)
+        self.bf.clear(tmp)
+        self.bf.clear(dst)
+        self.bf.end_while(tmp)
 
     # ------------------------------------------------------------------
-    # expression lowering
+    # expressions
     # ------------------------------------------------------------------
     def compile_expr(self, node: ast.AST) -> Int64Ref:
         if isinstance(node, ast.Constant):
-            if isinstance(node.value, bool):
-                return self._new_word(int(node.value))
-            if isinstance(node.value, int):
+            if type(node.value) is bool:
+                return self._new_word(1 if node.value else 0)
+            if type(node.value) is int:
                 return self._new_word(node.value)
-            raise self._error(node, f'unsupported scalar constant {node.value!r}')
+            raise self._error(node, 'only int/bool constants are supported here')
 
         if isinstance(node, ast.Name):
             return self._var(node)
 
         if isinstance(node, ast.UnaryOp):
             value = self.compile_expr(node.operand)
-            if isinstance(node.op, ast.UAdd):
-                return self._copy_new(value)
+            result = self._new_word()
             if isinstance(node.op, ast.USub):
-                result = self._copy_new(value)
-                self.backend._neg64_inplace(result)
+                zero = self._new_word(0)
+                self.backend.sub64(result, zero, value)
+                return result
+            if isinstance(node.op, ast.UAdd):
+                self.backend.copy64(result, value)
                 return result
             if isinstance(node.op, ast.Invert):
-                result = self._new_word()
                 self.backend.not64(result, value)
                 return result
             if isinstance(node.op, ast.Not):
-                result = self._new_word(0)
-                self.backend._is_nonzero64(result.bit(0), value)
-                self.backend._toggle_bit(result.bit(0), self.backend.s0)
-                self.backend._clear_scratch()
-                return result
-            raise self._error(node, f'unsupported unary operator {type(node.op).__name__}')
-
-        if isinstance(node, ast.BoolOp):
-            if not node.values:
-                raise self._error(node, 'empty boolean expression')
-            # Python and/or return one of their operands, not a coerced bool.
-            result = self._copy_new(self.compile_expr(node.values[0]))
-            is_and = isinstance(node.op, ast.And)
-            is_or = isinstance(node.op, ast.Or)
-            if not (is_and or is_or):
-                raise self._error(node, f'unsupported BoolOp {type(node.op).__name__}')
-
-            for rhs_node in node.values[1:]:
-                control = self._truth_cell(result)
-                if is_or:
-                    self.backend._toggle_bit(control, self.backend.s0)
-                    self.backend._clear_scratch()
-                self.bf.begin_while(control)
-                self.bf.add_const(control, -1)
-                rhs = self.compile_expr(rhs_node)
-                self.backend.copy64(result, rhs)
-                self.bf.end_while(control)
-            return result
+                nonzero = self.temps.cell()
+                self.backend._is_nonzero64(nonzero, value)
+                self._flag_not(nonzero, nonzero, self.temps.cell())
+                return self._bool_word_from_cell(nonzero)
+            raise self._error(node, 'unsupported unary operator')
 
         if isinstance(node, ast.BinOp):
-            if isinstance(node.op, ast.Pow):
-                return self._compile_constant_pow(node)
-
             left = self.compile_expr(node.left)
             right = self.compile_expr(node.right)
-
+            result = self._new_word()
             if isinstance(node.op, ast.Add):
-                result = self._new_word()
                 self.backend.add64(result, left, right)
-                return result
-            if isinstance(node.op, ast.Sub):
-                result = self._new_word()
+            elif isinstance(node.op, ast.Sub):
                 self.backend.sub64(result, left, right)
-                return result
-            if isinstance(node.op, ast.Mult):
-                result = self._new_word()
+            elif isinstance(node.op, ast.Mult):
                 self.backend.mul64(result, left, right, self.workspace_base)
-                return result
-            if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
-                quotient = self._new_word()
-                remainder = self._new_word()
-                self.backend.sdivmod64(
-                    quotient, remainder, left, right, self.workspace_base
-                )
-                return quotient if isinstance(node.op, ast.FloorDiv) else remainder
-            if isinstance(node.op, ast.BitAnd):
-                result = self._new_word()
+            elif isinstance(node.op, ast.FloorDiv):
+                rem = self._new_word()
+                self.backend.sdivmod64(result, rem, left, right, self.workspace_base)
+            elif isinstance(node.op, ast.Mod):
+                quot = self._new_word()
+                self.backend.sdivmod64(quot, result, left, right, self.workspace_base)
+            elif isinstance(node.op, ast.BitAnd):
                 self.backend.and64(result, left, right)
-                return result
-            if isinstance(node.op, ast.BitOr):
-                result = self._new_word()
+            elif isinstance(node.op, ast.BitOr):
                 self.backend.or64(result, left, right)
-                return result
-            if isinstance(node.op, ast.BitXor):
-                result = self._new_word()
+            elif isinstance(node.op, ast.BitXor):
                 self.backend.xor64(result, left, right)
-                return result
-            if isinstance(node.op, (ast.LShift, ast.RShift)):
-                if not isinstance(node.right, ast.Constant) or not isinstance(node.right.value, int):
-                    raise self._error(node, 'v2 currently requires a constant shift amount')
-                amount = node.right.value
-                if amount < 0:
-                    raise self._error(node, 'negative shift count')
-                result = self._new_word()
-                if isinstance(node.op, ast.LShift):
-                    self.backend.shl_const(result, left, amount)
-                else:
-                    # Python signed >> is arithmetic.  The current primitive is
-                    # logical, so only nonnegative/unsigned behavior is exposed
-                    # until arithmetic-shift lowering is added.
-                    self.backend.shr_const(result, left, amount)
-                return result
-            raise self._error(node, f'unsupported binary operator {type(node.op).__name__}')
+            elif isinstance(node.op, ast.LShift):
+                if not isinstance(node.right, ast.Constant) or type(node.right.value) is not int or node.right.value < 0:
+                    raise self._error(node, 'shift count must be a non-negative integer constant')
+                self.backend.shl_const(result, left, node.right.value)
+            elif isinstance(node.op, ast.RShift):
+                if not isinstance(node.right, ast.Constant) or type(node.right.value) is not int or node.right.value < 0:
+                    raise self._error(node, 'shift count must be a non-negative integer constant')
+                self.backend.shr_const(result, left, node.right.value)
+            elif isinstance(node.op, ast.Pow):
+                if not isinstance(node.right, ast.Constant) or type(node.right.value) is not int or node.right.value < 0:
+                    raise self._error(node, 'exponent must be a non-negative integer constant')
+                self.backend.pow_const(result, left, node.right.value, self.workspace_base)
+            else:
+                raise self._error(node, 'unsupported binary operator')
+            return result
 
         if isinstance(node, ast.Compare):
             if len(node.ops) != 1 or len(node.comparators) != 1:
-                raise self._error(node, 'chained comparisons are not lowered yet')
+                raise self._error(node, 'only one comparison at a time is supported')
             left = self.compile_expr(node.left)
             right = self.compile_expr(node.comparators[0])
-            result = self._new_word(0)
-            out = result.bit(0)
+            flag = self.temps.cell()
             op = node.ops[0]
             if isinstance(op, ast.Eq):
-                self.backend.eq64(out, left, right)
+                self.backend.eq64(flag, left, right)
             elif isinstance(op, ast.NotEq):
-                self.backend.eq64(out, left, right)
-                self.backend._toggle_bit(out, self.backend.s0)
+                self.backend.eq64(flag, left, right)
+                self.backend._toggle_bit(flag, self.backend.s0)
                 self.backend._clear_scratch()
             elif isinstance(op, ast.Lt):
-                self.backend.slt64(out, left, right)
+                self.backend.slt64(flag, left, right)
             elif isinstance(op, ast.LtE):
-                self.backend.sle64(out, left, right)
+                self.backend.sle64(flag, left, right)
             elif isinstance(op, ast.Gt):
-                self.backend.sgt64(out, left, right)
+                self.backend.sgt64(flag, left, right)
             elif isinstance(op, ast.GtE):
-                self.backend.sge64(out, left, right)
+                self.backend.sge64(flag, left, right)
             else:
-                raise self._error(node, f'unsupported comparison {type(op).__name__}')
+                raise self._error(node, 'unsupported comparison')
+            return self._bool_word_from_cell(flag)
+
+        if isinstance(node, ast.BoolOp):
+            if len(node.values) < 2:
+                raise self._error(node, 'boolean expression needs at least two operands')
+            result = self._copy_new(self.compile_expr(node.values[0]))
+            for rhs_node in node.values[1:]:
+                nonzero = self.temps.cell()
+                self.backend._is_nonzero64(nonzero, result)
+                gate = self.temps.cell()
+                if isinstance(node.op, ast.And):
+                    self.backend.copy_cell(nonzero, gate, self.backend.s0)
+                elif isinstance(node.op, ast.Or):
+                    self._flag_not(gate, nonzero, self.temps.cell())
+                else:
+                    raise self._error(node, 'unsupported boolean operator')
+                self.bf.begin_while(gate)
+                self.bf.add_const(gate, -1)
+                rhs = self.compile_expr(rhs_node)
+                self.backend.copy64(result, rhs)
+                self.bf.end_while(gate)
             return result
 
         if isinstance(node, ast.Call):
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == 'int'
-                and len(node.args) == 1
-                and not node.keywords
-                and isinstance(node.args[0], ast.Call)
-                and isinstance(node.args[0].func, ast.Name)
-                and node.args[0].func.id == 'input'
-                and not node.args[0].args
-                and not node.args[0].keywords
-            ):
-                result = self._new_word()
-                self.backend.read_s64(result, self.workspace_base)
-                return result
-            raise self._error(node, 'unsupported call in scalar expression')
+            if isinstance(node.func, ast.Name) and node.func.id == 'int' and len(node.args) == 1:
+                arg = node.args[0]
+                if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == 'input' and not arg.args and not arg.keywords:
+                    result = self._new_word()
+                    self.backend.read_s64(result, self.workspace_base)
+                    return result
+            raise self._error(node, 'unsupported call expression')
 
-        if isinstance(node, ast.IfExp):
-            result = self._new_word()
-            cond = self.compile_expr(node.test)
-            control = self._truth_cell(cond)
-            else_control = self.temps.cell()
-            self.bf.set_const(else_control, 1)
-
-            self.bf.begin_while(control)
-            self.bf.add_const(control, -1)
-            self.bf.clear(else_control)
-            yes = self.compile_expr(node.body)
-            self.backend.copy64(result, yes)
-            self.bf.end_while(control)
-
-            self.bf.begin_while(else_control)
-            self.bf.add_const(else_control, -1)
-            no = self.compile_expr(node.orelse)
-            self.backend.copy64(result, no)
-            self.bf.end_while(else_control)
-            return result
-
-        raise self._error(node, f'unsupported expression {type(node).__name__}')
-
-    def _compile_constant_pow(self, node: ast.BinOp) -> Int64Ref:
-        if not isinstance(node.right, ast.Constant) or not isinstance(node.right.value, int):
-            raise self._error(node, 'v2 currently requires a constant integer exponent')
-        exponent = node.right.value
-        if exponent < 0:
-            raise self._error(node, 'negative exponent would require non-integer TrueDiv')
-
-        base = self._copy_new(self.compile_expr(node.left))
-        result = self._new_word(1)
-        e = exponent
-        while e:
-            if e & 1:
-                product = self._new_word()
-                self.backend.mul64(product, result, base, self.workspace_base)
-                result = product
-            e >>= 1
-            if e:
-                squared = self._new_word()
-                self.backend.mul64(squared, base, base, self.workspace_base)
-                base = squared
-        return result
+        raise self._error(node, f'unsupported expression: {type(node).__name__}')
 
     # ------------------------------------------------------------------
     # statements / control flow
     # ------------------------------------------------------------------
+    def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        if isinstance(node, ast.Assign):
+            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                raise self._error(node, 'assignment requires one simple name target')
+            value = self.compile_expr(node.value)
+            self.backend.copy64(self._var(node.targets[0]), value)
+            return
+
+        if isinstance(node, ast.AugAssign):
+            if not isinstance(node.target, ast.Name):
+                raise self._error(node, 'augmented assignment requires a simple name target')
+            target = self._var(node.target)
+            rhs = self.compile_expr(node.value)
+            result = self._new_word()
+            if isinstance(node.op, ast.Add):
+                self.backend.add64(result, target, rhs)
+            elif isinstance(node.op, ast.Sub):
+                self.backend.sub64(result, target, rhs)
+            elif isinstance(node.op, ast.Mult):
+                self.backend.mul64(result, target, rhs, self.workspace_base)
+            else:
+                raise self._error(node, 'unsupported augmented assignment operator')
+            self.backend.copy64(target, result)
+            return
+
+        if isinstance(node, ast.Expr):
+            # print(...)
+            call = node.value
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name) or call.func.id != 'print':
+                raise self._error(node, 'only print(...) expression statements are supported')
+            for i, arg in enumerate(call.args):
+                if i:
+                    self.backend.write_literal(' ')
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    self.backend.write_literal(arg.value)
+                else:
+                    self.backend.print_s64(self.compile_expr(arg), self.workspace_base)
+            self.backend.write_literal('\n')
+            return
+
+        if isinstance(node, ast.If):
+            cond_word = self.compile_expr(node.test)
+            cond = self.temps.cell()
+            self.backend._is_nonzero64(cond, cond_word)
+            else_flag = self.temps.cell()
+            self.bf.set_const(else_flag, 1)
+            self.bf.begin_while(cond)
+            self.bf.add_const(cond, -1)
+            self.bf.clear(else_flag)
+            for stmt in node.body:
+                self.compile_stmt(stmt)
+            self.bf.end_while(cond)
+            self.bf.begin_while(else_flag)
+            self.bf.add_const(else_flag, -1)
+            for stmt in node.orelse:
+                self.compile_stmt(stmt)
+            self.bf.end_while(else_flag)
+            return
+
+        if isinstance(node, ast.While):
+            if node.orelse:
+                raise self._error(node, 'while ... else is not supported yet')
+            control = self.temps.cell()
+            cond_word = self.compile_expr(node.test)
+            self.backend._is_nonzero64(control, cond_word)
+            self.bf.begin_while(control)
+            self.bf.add_const(control, -1)
+            for stmt in node.body:
+                self.compile_stmt(stmt)
+            cond_word = self.compile_expr(node.test)
+            self.backend._is_nonzero64(control, cond_word)
+            self.bf.end_while(control)
+            return
+
+        if isinstance(node, ast.For):
+            if not isinstance(node.target, ast.Name):
+                raise self._error(node, 'for target must be a simple name')
+            if not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name) or node.iter.func.id != 'range':
+                raise self._error(node, 'only for ... in range(...) is supported')
+            args = node.iter.args
+            if len(args) == 1:
+                start_node, stop_node, step = ast.Constant(0), args[0], 1
+            elif len(args) == 2:
+                start_node, stop_node, step = args[0], args[1], 1
+            elif len(args) == 3 and isinstance(args[2], ast.Constant) and type(args[2].value) is int and args[2].value != 0:
+                start_node, stop_node, step = args[0], args[1], args[2].value
+            else:
+                raise self._error(node, 'range() requires 1/2 args or constant nonzero step')
+
+            target = self._var(node.target)
+            current = self._copy_new(self.compile_expr(start_node))
+            stop = self._copy_new(self.compile_expr(stop_node))
+            control = self.temps.cell()
+            if step > 0:
+                self.backend.slt64(control, current, stop)
+            else:
+                self.backend.sgt64(control, current, stop)
+            step_word = self._new_word(step)
+            add_tmp = self._new_word()
+            self.bf.begin_while(control)
+            self.bf.add_const(control, -1)
+            self.backend.copy64(target, current)
+            for stmt in node.body:
+                self.compile_stmt(stmt)
+            self.backend.add64(add_tmp, current, step_word)
+            self.backend.copy64(current, add_tmp)
+            if step > 0:
+                self.backend.slt64(control, current, stop)
+            else:
+                self.backend.sgt64(control, current, stop)
+            self.bf.end_while(control)
+            return
+
+        raise self._error(node, f'unsupported statement: {type(node).__name__}')
+
     def compile_stmt(self, node: ast.stmt) -> None:
         mark = self.temps.mark()
         try:
@@ -343,193 +408,12 @@ class PythonToBFV2:
         finally:
             self.temps.rewind(mark)
 
-    def _compile_stmt_inner(self, node: ast.stmt) -> None:
-        if isinstance(node, ast.Assign):
-            if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-                raise self._error(node, 'only simple scalar assignment is supported')
-            dst = self._var(node.targets[0])
-            value = self.compile_expr(node.value)
-            if dst.base != value.base:
-                self.backend.copy64(dst, value)
-            return
-
-        if isinstance(node, ast.AugAssign):
-            if not isinstance(node.target, ast.Name):
-                raise self._error(node, 'only simple scalar augmented assignment is supported')
-            dst = self._var(node.target)
-            rhs = self.compile_expr(node.value)
-            tmp = self._new_word()
-            if isinstance(node.op, ast.Add):
-                self.backend.add64(tmp, dst, rhs)
-            elif isinstance(node.op, ast.Sub):
-                self.backend.sub64(tmp, dst, rhs)
-            elif isinstance(node.op, ast.Mult):
-                self.backend.mul64(tmp, dst, rhs, self.workspace_base)
-            else:
-                raise self._error(node, f'unsupported augmented operator {type(node.op).__name__}')
-            self.backend.copy64(dst, tmp)
-            return
-
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            call = node.value
-            if isinstance(call.func, ast.Name) and call.func.id == 'print':
-                self._compile_print(call)
-                return
-            # Evaluate other supported calls for their side effects.
-            self.compile_expr(call)
-            return
-
-        if isinstance(node, ast.If):
-            cond = self.compile_expr(node.test)
-            control = self._truth_cell(cond)
-            else_control = self.temps.cell() if node.orelse else None
-            if else_control is not None:
-                self.bf.set_const(else_control, 1)
-
-            self.bf.begin_while(control)
-            self.bf.add_const(control, -1)
-            if else_control is not None:
-                self.bf.clear(else_control)
-            for stmt in node.body:
-                self.compile_stmt(stmt)
-            self.bf.end_while(control)
-
-            if else_control is not None:
-                self.bf.begin_while(else_control)
-                self.bf.add_const(else_control, -1)
-                for stmt in node.orelse:
-                    self.compile_stmt(stmt)
-                self.bf.end_while(else_control)
-            return
-
-        if isinstance(node, ast.While):
-            if node.orelse:
-                raise self._error(node, 'while ... else is not lowered yet')
-            cond0 = self.compile_expr(node.test)
-            control = self._truth_cell(cond0)
-            self.bf.begin_while(control)
-            self.bf.add_const(control, -1)
-            for stmt in node.body:
-                self.compile_stmt(stmt)
-            cond_next = self.compile_expr(node.test)
-            self.backend._is_nonzero64(control, cond_next)
-            self.bf.end_while(control)
-            return
-
-        if isinstance(node, ast.For):
-            self._compile_for_range(node)
-            return
-
-        if isinstance(node, ast.Pass):
-            return
-
-        raise self._error(node, f'unsupported statement {type(node).__name__}')
-
-    def _compile_print(self, call: ast.Call) -> None:
-        if call.keywords:
-            raise self._error(call, 'print keyword arguments are not lowered yet')
-        for index, arg in enumerate(call.args):
-            if index:
-                self.backend.print_space(self.workspace_base)
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                self._emit_string(arg.value)
-            else:
-                value = self.compile_expr(arg)
-                self.backend.print_s64(value, self.workspace_base)
-        self.backend.print_newline(self.workspace_base)
-
-    def _range_parts(self, node: ast.For):
-        if not isinstance(node.target, ast.Name):
-            raise self._error(node, 'range target must be a simple name')
-        if not (
-            isinstance(node.iter, ast.Call)
-            and isinstance(node.iter.func, ast.Name)
-            and node.iter.func.id == 'range'
-            and not node.iter.keywords
-        ):
-            raise self._error(node, 'only for ... in range(...) is supported')
-        args = node.iter.args
-        if len(args) == 1:
-            start_node, stop_node, step = ast.Constant(value=0), args[0], 1
-        elif len(args) == 2:
-            start_node, stop_node, step = args[0], args[1], 1
-        elif len(args) == 3:
-            start_node, stop_node = args[0], args[1]
-            if not isinstance(args[2], ast.Constant) or not isinstance(args[2].value, int):
-                raise self._error(node, 'range step must currently be a constant integer')
-            step = args[2].value
-        else:
-            raise self._error(node, 'range expects one to three arguments')
-        if step == 0:
-            raise self._error(node, 'range() arg 3 must not be zero')
-        return node.target, start_node, stop_node, step
-
-    def _compile_for_range(self, node: ast.For) -> None:
-        if node.orelse:
-            raise self._error(node, 'for ... else is not lowered yet')
-        target_node, start_node, stop_node, step = self._range_parts(node)
-        target = self._var(target_node)
-
-        # range arguments are evaluated once.  Hidden current also means body
-        # assignments to the visible loop variable do not disturb iteration,
-        # matching Python's behavior.
-        start = self.compile_expr(start_node)
-        stop_value = self.compile_expr(stop_node)
-        current = self._copy_new(start)
-        stop = self._copy_new(stop_value)
-        control = self.temps.cell()
-
-        if step > 0:
-            self.backend.slt64(control, current, stop)
-        else:
-            self.backend.sgt64(control, current, stop)
-
-        step_word = None
-        add_tmp = None
-        if step not in (1,):
-            step_word = self._new_word(step)
-            add_tmp = self._new_word()
-
-        self.bf.begin_while(control)
-        self.bf.add_const(control, -1)
-        self.backend.copy64(target, current)
-
-        for stmt in node.body:
-            self.compile_stmt(stmt)
-
-        if step == 1:
-            self.backend._inc64_inplace(current)
-        else:
-            assert step_word is not None and add_tmp is not None
-            self.backend.add64(add_tmp, current, step_word)
-            self.backend.copy64(current, add_tmp)
-
-        if step > 0:
-            self.backend.slt64(control, current, stop)
-        else:
-            self.backend.sgt64(control, current, stop)
-        self.bf.end_while(control)
-
     def compile_module(self, tree: ast.AST) -> str:
         if not isinstance(tree, ast.Module):
             raise CompileError('expected ast.Module')
         for stmt in tree.body:
             self.compile_stmt(stmt)
-        return clean_bf(self.bf.code())
-
-
-def clean_bf(code: str) -> str:
-    """Conservative adjacent cancellation; never rewrites loop structure."""
-    stack: list[str] = []
-    opposite = {'>': '<', '<': '>', '+': '-', '-': '+'}
-    for ch in code:
-        if ch not in '><+-[],.':
-            continue
-        if ch in opposite and stack and stack[-1] == opposite[ch]:
-            stack.pop()
-        else:
-            stack.append(ch)
-    return ''.join(stack)
+        return self.bf.code()
 
 
 def compile_source(source: str, filename: str = '<string>') -> str:
@@ -537,18 +421,20 @@ def compile_source(source: str, filename: str = '<string>') -> str:
     return PythonToBFV2(tree).compile_module(tree)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description='Compile the supported Python subset to Brainfuck')
-    parser.add_argument('input', type=Path)
-    parser.add_argument('-o', '--output', type=Path)
+def _cli() -> int:
+    parser = argparse.ArgumentParser(description='Compile a small Python subset to Brainfuck')
+    parser.add_argument('input', type=Path, help='Python source file')
+    parser.add_argument('-o', '--output', type=Path, help='Output .bf file')
     args = parser.parse_args()
 
     source = args.input.read_text(encoding='utf-8')
-    code = compile_source(source, str(args.input))
-    output = args.output or args.input.with_suffix('.bf')
-    output.write_text(code, encoding='utf-8')
-    print(f'wrote {output} ({len(code)} BF commands)')
+    code = compile_source(source, filename=str(args.input))
+    if args.output:
+        args.output.write_text(code, encoding='ascii')
+    else:
+        print(code)
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(_cli())
