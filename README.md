@@ -35,6 +35,7 @@ Python側が実行時に計算・管理する仕組みはありません。Pytho
 - `while` / `for` / `break` / `continue` → Brainfuck loopと明示的control flag
 - `print(int)` → Brainfuck上のdecimal conversion
 - `input()` / `int(input())` → `,` とBrainfuck上のparser
+- `input().split()` → Brainfuck上の空白tokenizerとnewline管理
 - string/list → tape上の固定レイアウト
 - listの動的index → Brainfuck上のindex比較・走査
 - 一時変数・変数配置 → コンパイル時にtape addressへ割当
@@ -58,12 +59,26 @@ CLIオプションで型サイズは変更できません。型表現はABIと�
 - `bool`: 64-bit scalar上の0/1
 - `str`: 最大255 byteの固定長領域（NUL終端）
 - `list[int]`: 最大64要素、各要素signed 64-bit
+- `list[str]`: 最大64要素、各要素は固定長byte string
 
 Python本来の任意精度int、動的長string/list、完全なobject alias semanticsとは異なります。
 
+## 入力
+
+`input()` はPython同様、1行を1つの論理入力として扱います。`input().split()` のtokenizationも生成Brainfuck自身が行い、通常の空白区切り入力をそのまま書けます。
+
+```python
+a, b = map(int, input().split())
+name, country = input().split()
+A = list(map(int, input().split()))
+words = input().split()
+```
+
+固定長ABIのため、`list`容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。現在はPythonの`ValueError`等の例外再現までは行いません。
+
 ## 主な対応構文
 
-- 整数・bool・文字列・整数listリテラル
+- 整数・bool・文字列・`list[int]`・`list[str]`リテラル
 - `+ - * // % **`
 - `& | ^ ~ << >>`
 - `== != < <= > >=`
@@ -72,8 +87,12 @@ Python本来の任意精度int、動的長string/list、完全なobject alias se
 - `break`, `continue`, loop `else`
 - `input()`, `int(input())`
 - `a, b = map(int, input().split())`
+- `a, b = input().split()`
+- `a, b = map(str, input().split())`
 - `A = list(map(int, input().split()))`
-- `A[i]`, `A[i] = x`, `A.append(x)`, `len(A)`, `for x in A`
+- `S = input().split()` / `list(input().split())`
+- `S = list(map(str, input().split()))`
+- int/string listのindex、代入、`append`, `len`, iteration
 - `print(...)`, `sep=`, `end=`
 - `abs`, `bool`, `min`, `max`
 
