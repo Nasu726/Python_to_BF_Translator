@@ -1,14 +1,14 @@
 """Runtime-walked fixed-stride heap blocks for mutable Python objects.
 
 The current monotonic allocator gives every object a 1-based ordinal handle:
-handle 1 is the first heap block, handle 2 the second, and so on.  Lookup uses
-that fact directly.  A packed handle is carried across blocks and decremented
+handle 1 is the first heap block, handle 2 the second, and so on. Lookup uses
+that fact directly. A packed handle is carried across blocks and decremented
 at runtime until it reaches zero; the old design compared four handle bytes in
 every allocated block and scanned the entire heap for every access.
 
-Handle 0 is the null sentinel and reads as zero / writes as a no-op.  Arbitrary
+Handle 0 is the null sentinel and reads as zero / writes as a no-op. Arbitrary
 forged handles above the allocation frontier are outside this internal runtime
-contract.  A future free-list allocator can replace ordinal lookup with an
+contract. A future free-list allocator can replace ordinal lookup with an
 indirection table without changing frontend object semantics.
 """
 
@@ -22,22 +22,20 @@ from bfpacked import PackedU32Ref
 from bfpacked64 import PackedI64Core, PackedI64Ref
 
 
-# Metadata + payload + traveling lanes.  Extra AUX cells are local scratch for
-# source-compact packed-u32 countdown during direct ordinal lookup.
 BLOCK_STRIDE = 48
 MARKER = 0
-HANDLE = 1          # 4 bytes: 1..4
-TYPE = 5            # one byte
-LENGTH = 6          # 4 packed bytes: 6..9
-CAPACITY = 10       # 4 packed bytes: 10..13
-NEXT = 14           # 4-byte handle: 14..17
-PAYLOAD = 18        # 8 bytes: 18..25
-CARRIER = 26        # 4-byte traveling ordinal countdown: 26..29
-LOCAL0 = 30         # traveling walker control
-LOCAL1 = 31         # found flag
-LOCAL2 = 32         # continue flag
-LOCAL3 = 33         # current-block marker gate
-RESULT = 34         # 8-byte traveling read/write payload: 34..41
+HANDLE = 1
+TYPE = 5
+LENGTH = 6
+CAPACITY = 10
+NEXT = 14
+PAYLOAD = 18
+CARRIER = 26
+LOCAL0 = 30
+LOCAL1 = 31
+LOCAL2 = 32
+LOCAL3 = 33
+RESULT = 34
 AUX0 = 42
 AUX1 = 43
 AUX2 = 44
@@ -167,7 +165,6 @@ class HeapBlockArena:
     # allocation
     # ------------------------------------------------------------------
     def _forward_walk_body(self) -> str:
-        """Move the issued handle to the bump frontier."""
         r = _RelativeBuilder()
         for i in range(4):
             r.transfer(CARRIER + i, BLOCK_STRIDE + CARRIER + i)
@@ -210,7 +207,6 @@ class HeapBlockArena:
         tmp: int,
         helper: int,
     ) -> None:
-        """result = 1 iff four-byte value at base is zero, preserving it."""
         r.clear(result)
         r.add(result, 1)
         for i in range(4):
@@ -221,24 +217,6 @@ class HeapBlockArena:
             r.clear(result)
             r.move(tmp)
             r.parts.append("]")
-
-    def _relative_decrement_u32(self, r: _RelativeBuilder, base: int) -> None:
-        """Decrement a positive packed-u32 value in the current block."""
-        borrow, gate, tmp, helper = AUX0, AUX1, AUX2, AUX3
-        r.clear(borrow)
-        r.add(borrow, 1)
-        for i in range(4):
-            # A destructive transfer is enough: borrow is consumed before this
-            # byte and recomputed from the byte's pre-decrement zero state.
-            r.transfer(borrow, gate)
-            r.move(gate)
-            r.parts.append("[")
-            r.add(gate, -1)
-            self._relative_is_zero_u32_byte(r, base + i, borrow, tmp, helper)
-            r.add(base + i, -1)
-            r.move(gate)
-            r.parts.append("]")
-        r.clear(borrow)  # discard final underflow (positive inputs cannot use it)
 
     def _relative_is_zero_u32_byte(
         self,
@@ -258,32 +236,39 @@ class HeapBlockArena:
         r.move(tmp)
         r.parts.append("]")
 
-    def _direct_lookup_body(self, field: int, width: int, *, write: bool) -> str:
-        """One runtime walker iteration.
+    def _relative_decrement_u32(self, r: _RelativeBuilder, base: int) -> None:
+        borrow, gate, tmp, helper = AUX0, AUX1, AUX2, AUX3
+        r.clear(borrow)
+        r.add(borrow, 1)
+        for i in range(4):
+            r.transfer(borrow, gate)
+            r.move(gate)
+            r.parts.append("[")
+            r.add(gate, -1)
+            self._relative_is_zero_u32_byte(r, base + i, borrow, tmp, helper)
+            r.add(base + i, -1)
+            r.move(gate)
+            r.parts.append("]")
+        r.clear(borrow)
 
-        The outer Brainfuck loop is anchored at LOCAL0. Every iteration moves
-        the data pointer exactly one block right. If the decremented ordinal is
-        zero, this block is the target and the next block's LOCAL0 is left zero,
-        terminating the walker. Otherwise the remaining ordinal and a control 1
-        travel to the next block.
-        """
+    def _direct_lookup_body(self, field: int, width: int, *, write: bool) -> str:
         r = _RelativeBuilder(initial_pos=LOCAL0)
-        r.clear(LOCAL0)  # consume this iteration's control
+        r.clear(LOCAL0)
         r.clear(LOCAL1)
         r.clear(LOCAL2)
 
-        # Only allocated blocks participate. Compiler-generated handles always
-        # refer to allocated ordinals (or zero/null).
+        # Current block must be allocated. A zero marker is the frontier and
+        # therefore terminates an invalid internal ordinal without searching
+        # further to the right.
         r.copy_preserved(MARKER, LOCAL3, AUX5)
         r.move(LOCAL3)
         r.parts.append("[")
         r.add(LOCAL3, -1)
 
-        # Handle zero is null. A positive ordinal is decremented once at each
-        # visited block; zero after decrement means "this is the target".
+        # Null (0) is never a target. Positive handles count allocated blocks.
         self._relative_is_zero_u32(r, CARRIER, AUX4, AUX2, AUX5)
         r.clear(AUX1)
-        r.add(AUX1, 1)  # positive gate = not pre-zero
+        r.add(AUX1, 1)
         r.move(AUX4)
         r.parts.append("[")
         r.add(AUX4, -1)
@@ -291,6 +276,7 @@ class HeapBlockArena:
         r.move(AUX4)
         r.parts.append("]")
 
+        # Positive-handle gate.
         r.move(AUX1)
         r.parts.append("[")
         r.add(AUX1, -1)
@@ -308,8 +294,7 @@ class HeapBlockArena:
         r.move(AUX4)
         r.parts.append("]")
 
-        # Target operation. RESULT is preserved for writes because it must
-        # continue to the fixed sentinel after the dynamic pointer walk.
+        # Target operation.
         r.move(LOCAL1)
         r.parts.append("[")
         r.add(LOCAL1, -1)
@@ -321,7 +306,7 @@ class HeapBlockArena:
         r.move(LOCAL1)
         r.parts.append("]")
 
-        # Non-target positive ordinal: move countdown and arm next block.
+        # Non-target: move remaining ordinal and arm next block.
         r.move(LOCAL2)
         r.parts.append("[")
         r.add(LOCAL2, -1)
@@ -331,18 +316,20 @@ class HeapBlockArena:
         r.move(LOCAL2)
         r.parts.append("]")
 
+        # Close positive-handle gate before closing the marker gate.
+        r.move(AUX1)
+        r.parts.append("]")
         r.move(LOCAL3)
         r.parts.append("]")
 
-        # The return payload always advances one block so the outer ] can test
-        # next LOCAL0. On a hit that control is zero and the walker exits.
+        # RESULT always advances one block. On a hit, next LOCAL0 is zero so
+        # the outer walker exits at that next block.
         for i in range(width):
             r.transfer(RESULT + i, BLOCK_STRIDE + RESULT + i)
         r.move(BLOCK_STRIDE + LOCAL0)
         return r.code()
 
     def _return_result_from_after_target(self, width: int) -> str:
-        """Carry result from the block after target back to left_sentinel."""
         r = _RelativeBuilder(initial_pos=LOCAL0)
         for i in range(width):
             r.transfer(RESULT + i, -BLOCK_STRIDE + RESULT + i)
@@ -362,16 +349,11 @@ class HeapBlockArena:
     def _run_scan(self, handle: ObjectHandleRef, field: int, width: int, *, write: bool) -> None:
         if not 1 <= width <= RESULT_BYTES:
             raise ValueError("scan width must be in 1..8")
-
-        # write callers place the payload in first-block RESULT after scan_start.
         self.bf.set_const(self.first_block.marker + LOCAL0, 1)
         self.bf.move(self.first_block.marker + LOCAL0)
         self.bf.emit("[")
         self.bf.emit(self._direct_lookup_body(field, width, write=write))
         self.bf.emit("]")
-
-        # Pointer is one block past the target. Return RESULT over the marker
-        # chain and recover a statically known compiler pointer.
         self.bf.emit(self._return_result_from_after_target(width))
         self.bf.ptr = self.left_sentinel
 
