@@ -1,6 +1,7 @@
 from bf_runtime import run_bf
 from bfcore import BFEmitter
 from bfopt import optimize_bf
+from bfpacked64 import PackedI64Ref
 from bfquad import Quad64Core, Quad64Ref
 from bfquadbackend import QuadBinaryStringListIO
 
@@ -94,3 +95,26 @@ def test_hybrid_quad_alias_operands_are_well_defined():
     assert result.memory[eq] == 1
     assert result.memory[lt] == 0
     assert result.memory[ge] == 1
+
+
+def test_packed_to_quad_destructive_conversion_boundaries():
+    bf = BFEmitter()
+    backend = QuadBinaryStringListIO(bf, scratch_base=700)
+    backend.set_quad_workspace(400)
+
+    values = [0, 1, -1, (1 << 63) - 1, -(1 << 63)]
+    packed = [PackedI64Ref(i * 8) for i in range(len(values))]
+    quad = [Quad64Ref(100 + i * 100) for i in range(len(values))]
+
+    for src, value in zip(packed, values):
+        backend.packed64.set_u64(src, value)
+    for dst, src in zip(quad, packed):
+        backend.copy64(dst, src)
+
+    code = optimize_bf(bf.code())
+    result = run_bf(code, memory_size=1000, step_limit=300_000_000)
+    assert [_s64(result.memory, ref) for ref in quad] == values
+    # The fast path is deliberately destructive because list traversal results
+    # are dead immediately after expansion.
+    for src in packed:
+        assert all(result.memory[src.byte(i)] == 0 for i in range(8))
