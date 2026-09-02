@@ -51,8 +51,16 @@ Acceptance direction:
 
 - 8-bit wrapping tape cells.
 - Tape is zero-initialized before execution; compiler may rely on this to omit redundant clear operations.
-- Sufficient rightward tape is required.
+- Sufficient rightward tape is required by the abstract ABI.
 - Standard byte I/O via `,` / `.`.
+
+### [MILESTONE: AtCoder runtime validation] Tritium tape reality
+
+AtCoder currently runs Brainfuck with **Tritium 1.2.73** using `tritium -b -e Main.bf`.
+
+Upstream Tritium on normal 64-bit Linux enables its huge-tape path when `mmap`/signal support is available. That implementation maps tape with `MAP_NORESERVE`; for byte cells the 64-bit path requests a multi-gigabyte virtual region rather than the fallback 1 Mi-cell allocation. Therefore a runtime sequence using millions of cells is technically plausible on AtCoder and should not be rejected merely because it exceeds 1 Mi cells.
+
+Retention condition: keep until an actual AtCoder submission or exact AtCoder Tritium build inspection confirms the large-tape behavior. Runtime time and resident-memory usage remain practical constraints even if virtual address space is large.
 
 ### [PERMANENT] Sorting
 
@@ -66,13 +74,33 @@ Acceptance direction:
 
 ### [MILESTONE: runtime-sized sequence] Numeric/storage layout
 
-Current compact scalar work uses `Quad64Ref` (32 two-bit lanes plus markers) while fixed `list[int]` stores packed 8-byte values. Boundary conversions are expensive.
+Current public compact scalar work uses `Quad64Ref` (32 two-bit lanes plus markers) while fixed `list[int]` stores packed 8-byte values. Boundary conversions are expensive, so this split representation is not the intended large-array ABI.
 
-Do **not** assume this split representation is the final large-array ABI. For large runtime arrays, prefer a representation where stored elements and arithmetic values share a runtime-walkable lane format, or otherwise make conversion source-size constant and local.
+`pybf/bfbase4.py` now prototypes a radix-4 int64 representation:
 
-Candidate direction under evaluation: a smaller digit-lane int64 representation (e.g. hexadecimal/base-16 lanes) that supports add/sub/compare with one runtime lane body.
+- 32 radix-4 digits;
+- one value cell plus one traversal marker per lane;
+- 66 cells/word versus 99 for Quad;
+- source-compact runtime-lane copy/add validated by arithmetic CI;
+- subtraction/unsigned-compare are being validated next.
 
-### [MILESTONE: runtime heap placement] Memory ordering
+Do not promote base-4 to the public ABI until add/sub/compare, signed behavior, decimal input/output, and sequence integration show acceptable runtime as well as source size. For a sequential record walker, per-value markers may later be avoidable because the record walker itself provides traversal state.
+
+### [MILESTONE: runtime-sized sequence] Sequential storage primitive
+
+`pybf/bfstreamseq.py::RuntimeByteSequence` is the first proven runtime-sized contiguous sequence primitive.
+
+It demonstrates:
+
+- no compile-time capacity/N parameter;
+- one BF loop body grows storage at runtime;
+- source size does not grow with input length;
+- a second BF pass can replay the stored records;
+- a reverse marker walk restores the pointer to a known static anchor.
+
+This byte version is an isolated scalability proof, not public Python `list` semantics. Extend the same structure to numeric records rather than enlarging the old fixed-64 list.
+
+### [MILESTONE: runtime heap placement] Memory ordering / layout planning
 
 Do not place huge runtime arrays between hot scalars/scratch/workspace. In Brainfuck, tape distance directly becomes emitted `<`/`>` characters.
 
@@ -87,7 +115,9 @@ compile-time temporary high-water region
 runtime heap / large sequences
 ```
 
-`pybf/bftemparena.py::PeakTempArena` exists to measure temporary high-water usage for this purpose. Next step is a final-compiler-only 2-pass layout; do not modify the historical shared `_TempArena` just to obtain this measurement.
+`PeakTempArena` is now wired only into the final public compiler through `compiler_layout.py`; legacy frontends retain `_TempArena`. `LayoutPlan` records the final temporary high-water boundary so runtime-sized storage can begin strictly after compile-time temporaries.
+
+Next step is using that measured boundary for actual runtime sequence/list placement. Do not expand a fixed-capacity list to 200000 static slots.
 
 ### [MILESTONE: shared IR]
 
@@ -132,10 +162,10 @@ If native code is later justified, first candidate is the large-string/optimizer
 
 Regression source is in `tests/test_compile_performance.py`.
 
-Latest stable pre-2-pass baseline after compact lowering:
+Latest stable compact-lowering baseline:
 
 - final BF: **825,690 bytes**
-- compile: about **0.9 s** on GitHub runner
+- compile: about **0.8-1.0 s** on GitHub runner
 - still fails only the 512 KiB gate; arithmetic/runtime/frontend shards are green.
 
 This program was later identified as an **ABC-B** solution, not ABC-C. Keep it as a useful lower-bound/regression fixture, but do not mistake passing it for ABC-C readiness.
@@ -187,16 +217,19 @@ Do not "fix" heap/runtime failures by only increasing step limits. A temporary 1
 - Public list semantics still rely on fixed-capacity storage for many paths.
 - CI is sharded (`arithmetic`, `runtime`, `frontend`, `contest`) and uses xdist inside jobs.
 - Current expected failure is the contest 512 KiB gate; other shards should remain green.
-- `PeakTempArena` exists as a safe isolated helper but is not yet wired into the final compiler.
+- Final public compilation is routed through `compiler_layout.py` and high-water-aware `PeakTempArena`.
+- Runtime-sized byte sequence prototype is green and proves N-independent emitted source for contiguous runtime growth/replay.
+- Base-4 compact numeric prototype has green copy/add tests; sub/compare validation is in progress.
 
 Next implementation order:
 
-1. Wire `PeakTempArena` only into the final Quad/stream compiler; add high-water tests.
-2. Implement or prototype 2-pass layout so runtime heap starts after measured compile-time temp space.
-3. Define a runtime-sized integer-sequence primitive whose emitted source is capacity-independent.
-4. Add scale tests representing N up to 200,000 without allocating/expanding 200,000 code copies.
-5. Migrate list input / sequential iteration onto that runtime sequence.
-6. Only then resume features such as dynamic list aliases and `list.sort()` on top of scalable storage.
+1. Finish base-4 add/sub/compare validation and reject it if runtime costs are poor.
+2. Build a runtime-sized numeric sequence on the contiguous record walker, using a representation that avoids per-element public-Quad conversion.
+3. Add scale/source-shape tests representing N up to 200000 without emitting N copies of code.
+4. Add decimal-token input directly into the scalable numeric sequence.
+5. Add sequential iteration/reduction over that sequence; then handle multi-pass cases such as the ABC-B fixture.
+6. Migrate ordinary Python `list(map(int, input().split()))` to scalable storage when safe/final semantics are ready.
+7. Only after scalable storage is stable, resume alias/deepcopy/sort work on top of it.
 
 ---
 
