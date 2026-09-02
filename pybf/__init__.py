@@ -17,7 +17,7 @@ if _PACKAGE_DIR not in sys.path:
     sys.path.insert(0, _PACKAGE_DIR)
 
 from abi import INT_BITS, LIST_CAPACITY, STRING_CAPACITY  # noqa: E402
-from compiler import compile_source as _compile_source  # noqa: E402
+from compiler_strings import compile_source as _compile_source  # noqa: E402
 from transpiler_v2 import CompileError  # noqa: E402
 
 
