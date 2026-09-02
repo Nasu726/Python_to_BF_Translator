@@ -5,8 +5,8 @@ Storage is deliberately compact:
     [length: one byte][element 0: 8 bytes]...[element N-1: 8 bytes]
 
 Python-facing arithmetic still uses the existing 64 Boolean-cell int64
-representation.  List storage uses packed little-endian bytes and only expands
-one selected element when it is actually consumed.  This avoids emitting 64
+representation. List storage uses packed little-endian bytes and only expands
+one selected element when it is actually consumed. This avoids emitting 64
 copies of the full 64-bit runtime for dynamic indexing/append.
 """
 
@@ -45,8 +45,22 @@ class BinaryListIO(BinaryTokenIO):
         super().__init__(bf, scratch_base=scratch_base)
         self.packed64 = PackedI64Core(bf, scratch_base)
 
+    def copy64(self, dst, src) -> None:
+        """Compatibility bridge between arithmetic words and packed list slots."""
+        if isinstance(dst, PackedI64Ref):
+            if isinstance(src, PackedI64Ref):
+                self.packed64.copy(dst, src)
+                return
+            if isinstance(src, Int64Ref):
+                self.packed64.from_int64(dst, src)
+                return
+        if isinstance(dst, Int64Ref) and isinstance(src, PackedI64Ref):
+            self.packed64.to_int64(dst, src)
+            return
+        super().copy64(dst, src)
+
     def clear_list(self, ref: IntListRef) -> None:
-        # Logical clearing only needs to reset length.  Stale bytes past length
+        # Logical clearing only needs to reset length. Stale bytes past length
         # are unreachable and are overwritten before append exposes them.
         self.bf.clear(ref.length_cell)
 
@@ -63,7 +77,7 @@ class BinaryListIO(BinaryTokenIO):
             raise ValueError("destination list capacity is smaller than source")
         self.clear_list(dst)
         self.copy_cell(src.length_cell, dst.length_cell, self.s0)
-        # Current value-copy semantics copy all physical slots.  Each slot is
+        # Current value-copy semantics copy all physical slots. Each slot is
         # only eight bytes now, so this remains compact until alias semantics
         # move lists to the heap-backed object model.
         for i in range(src.capacity):
@@ -113,7 +127,7 @@ class BinaryListIO(BinaryTokenIO):
     ) -> None:
         """Load a runtime index without duplicating 64-bit unpack per slot.
 
-        A single signed bounds comparison validates the int64 index.  Selection
+        A single signed bounds comparison validates the int64 index. Selection
         is then performed on its low byte using compact eight-byte copies; only
         the selected packed value is expanded to the normal int64 layout.
         """
@@ -183,10 +197,18 @@ class BinaryListIO(BinaryTokenIO):
         value: Int64Ref,
         length_copy: int,
         match: int,
-        packed_tmp: PackedI64Ref,
+        packed_tmp: PackedI64Ref | None = None,
     ) -> None:
-        """Append using one int64->packed conversion for all candidate slots."""
+        """Append using one int64->packed conversion for all candidate slots.
+
+        ``packed_tmp`` is optional for compatibility with existing frontend
+        callers. Those callers allocate ``length_copy`` and ``match`` as the
+        final temporaries of the operation, so the eight cells immediately
+        after ``match`` are a private ephemeral region.
+        """
         bf = self.bf
+        if packed_tmp is None:
+            packed_tmp = PackedI64Ref(match + 1)
         self.packed64.from_int64(packed_tmp, value)
         self.copy_cell(ref.length_cell, length_copy, self.s0)
         for i in range(ref.capacity):
@@ -212,9 +234,9 @@ class BinaryListIO(BinaryTokenIO):
         """Implement ``list(map(int, input().split()))`` with one parser body.
 
         The old implementation emitted the full signed-decimal parser once per
-        list capacity slot.  Here one parser sits inside a Brainfuck runtime
-        loop and appends each token.  Extra tokens after capacity are still
-        consumed so the following ``input()`` begins on the next physical line.
+        list capacity slot. Here one parser sits inside a Brainfuck runtime loop
+        and appends each token. Extra tokens after capacity are still consumed
+        so the following ``input()`` begins on the next physical line.
         """
         bf = self.bf
         self.clear_list(ref)
