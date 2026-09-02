@@ -1,14 +1,9 @@
 """Source-compact decimal parsing directly into packed int64 storage.
 
-The legacy scalar parser accumulates every decimal digit in the 64 Boolean-cell
-arithmetic representation.  That is correct but very expensive in generated
-Brainfuck source because ``x = x * 10 + digit`` expands several full-word
-copies/shifts/additions.
-
-This module keeps the same modulo-2**64 integer ABI while accumulating directly
-in eight little-endian byte cells.  It is primarily used by
-``list(map(int, input().split()))`` so input can travel directly from decimal
-text to the packed list slot without an intermediate 64-cell word.
+The packed parser deliberately spends Brainfuck runtime work to keep emitted
+source small.  Decimal accumulation uses eight base-256 bytes and a parallel
+marker/carry lane, so ``x = x*10 + digit`` needs one repeated byte-lane body
+instead of eight Python-unrolled copies.
 """
 
 from __future__ import annotations
@@ -16,6 +11,44 @@ from __future__ import annotations
 from bfcore import WORD_BITS
 from bfpacked64 import PackedI64Ref
 from bftokens import BinaryTokenIO
+
+
+class _Rel:
+    """Tiny relative Brainfuck builder used by the packed byte walker."""
+
+    def __init__(self) -> None:
+        self.pos = 0
+        self.parts: list[str] = []
+
+    def move(self, target: int) -> None:
+        delta = target - self.pos
+        if delta > 0:
+            self.parts.append(">" * delta)
+        elif delta < 0:
+            self.parts.append("<" * -delta)
+        self.pos = target
+
+    def emit(self, code: str) -> None:
+        self.parts.append(code)
+
+    def clear(self, target: int) -> None:
+        self.move(target)
+        self.emit("[-]")
+
+    def add(self, target: int, value: int) -> None:
+        self.move(target)
+        value %= 256
+        if value <= 128:
+            self.emit("+" * value)
+        else:
+            self.emit("-" * (256 - value))
+
+    def set_const(self, target: int, value: int) -> None:
+        self.clear(target)
+        self.add(target, value)
+
+    def code(self) -> str:
+        return "".join(self.parts)
 
 
 class PackedBinaryTokenIO(BinaryTokenIO):
@@ -37,6 +70,38 @@ class PackedBinaryTokenIO(BinaryTokenIO):
         bf.clear(result)
         bf.end_while(tmp)
 
+    @staticmethod
+    def _rel_zero_preserved(
+        r: _Rel,
+        result: int,
+        src: int,
+        tmp: int,
+        helper: int,
+    ) -> None:
+        """Relative equivalent of _packed_is_zero_byte."""
+        r.set_const(result, 1)
+        r.clear(tmp)
+        r.clear(helper)
+        r.move(src)
+        r.emit("[")
+        r.emit("-")
+        r.add(tmp, 1)
+        r.add(helper, 1)
+        r.move(src)
+        r.emit("]")
+        r.move(helper)
+        r.emit("[")
+        r.emit("-")
+        r.add(src, 1)
+        r.move(helper)
+        r.emit("]")
+        r.move(tmp)
+        r.emit("[")
+        r.clear(tmp)
+        r.clear(result)
+        r.move(tmp)
+        r.emit("]")
+
     def _packed_mul10_add_ascii_digit(
         self,
         dst: PackedI64Ref,
@@ -45,78 +110,107 @@ class PackedBinaryTokenIO(BinaryTokenIO):
     ) -> None:
         """dst = dst*10 + (ch-'0') modulo 2**64; consume ch.
 
-        Runtime work is intentionally traded for compact source.  Each byte is
-        multiplied by ten with nested BF loops, carrying overflow to the next
-        byte.  Only eight byte lanes are emitted statically instead of several
-        64-bit Boolean-cell primitives per input digit.
+        Eight byte lanes execute one emitted body.  Parallel control arrays are
+        intentionally placed in the otherwise-dead low portion of the shared
+        arithmetic workspace; marker[i] and byte[i] therefore have a constant
+        relative offset even though the packed value bytes are contiguous.
         """
         bf = self.bf
-        count = workspace_base
-        ten = workspace_base + 1
-        carry = workspace_base + 2
-        next_carry = workspace_base + 3
-        zero = workspace_base + 4
-        tmp = workspace_base + 5
-        helper = workspace_base + 6
 
-        for cell in (count, ten, carry, next_carry, zero, tmp, helper):
-            bf.clear(cell)
+        # ``workspace_base`` here is the token reader's arithmetic sub-workspace
+        # (global shared workspace + 144).  Negative offsets remain inside that
+        # same reserved shared region and are dead between backend calls.
+        marker_base = workspace_base - 120  # 9 cells, last is sentinel
+        carry_base = marker_base + 9        # 9 cells, last is overflow sink
+        ten_base = carry_base + 9           # 8 parallel scratch cells
+        zero_base = ten_base + 8
+        tmp_base = zero_base + 8
+        helper_base = tmp_base + 8
 
-        # Valid contest input guarantees an ASCII decimal digit here.
+        # Arm eight lanes and a zero sentinel.  Contiguous initialization is
+        # tiny; the expensive per-byte arithmetic lives only in the runtime body.
+        for i in range(8):
+            bf.set_const(marker_base + i, 1)
+            bf.clear(carry_base + i)
+        bf.clear(marker_base + 8)
+        bf.clear(carry_base + 8)
+
         bf.add_const(ch, -ord("0"))
         bf.begin_while(ch)
         bf.add_const(ch, -1)
-        bf.add_const(carry, 1)
+        bf.add_const(carry_base, 1)
         bf.end_while(ch)
 
-        for byte_index in range(8):
-            byte = dst.byte(byte_index)
+        byte_delta = dst.base - marker_base
+        carry_delta = carry_base - marker_base
+        ten_delta = ten_base - marker_base
+        zero_delta = zero_base - marker_base
+        tmp_delta = tmp_base - marker_base
+        helper_delta = helper_base - marker_base
 
-            # Move the old byte value to count, leaving the output byte at zero.
-            bf.clear(count)
-            bf.begin_while(byte)
-            bf.add_const(byte, -1)
-            bf.add_const(count, 1)
-            bf.end_while(byte)
-            bf.clear(next_carry)
+        r = _Rel()
+        marker = 0
+        byte = byte_delta
+        carry = carry_delta
+        next_carry = carry_delta + 1
+        ten = ten_delta
+        zero = zero_delta
+        tmp = tmp_delta
+        helper = helper_delta
 
-            # byte = old_byte * 10 (mod 256), recording every wrap.
-            bf.begin_while(count)
-            bf.add_const(count, -1)
-            bf.set_const(ten, 10)
-            bf.begin_while(ten)
-            bf.add_const(ten, -1)
-            bf.add_const(byte, 1)
-            self._packed_is_zero_byte(zero, byte, tmp, helper)
-            bf.begin_while(zero)
-            bf.add_const(zero, -1)
-            bf.add_const(next_carry, 1)
-            bf.end_while(zero)
-            bf.end_while(ten)
-            bf.end_while(count)
+        # Consume this lane's one-shot outer marker, then reuse it as the old
+        # byte count while reconstructing the destination byte from zero.
+        r.clear(marker)
+        r.clear(next_carry)
+        r.move(byte)
+        r.emit("[")
+        r.emit("-")
+        r.add(marker, 1)
+        r.move(byte)
+        r.emit("]")
 
-            # Add the carry from the previous byte (the decimal digit for lane
-            # zero).  This is at most nine, and can overflow this byte at most
-            # once.
-            bf.begin_while(carry)
-            bf.add_const(carry, -1)
-            bf.add_const(byte, 1)
-            self._packed_is_zero_byte(zero, byte, tmp, helper)
-            bf.begin_while(zero)
-            bf.add_const(zero, -1)
-            bf.add_const(next_carry, 1)
-            bf.end_while(zero)
-            bf.end_while(carry)
+        r.move(marker)
+        r.emit("[")
+        r.emit("-")
+        r.set_const(ten, 10)
+        r.move(ten)
+        r.emit("[")
+        r.emit("-")
+        r.add(byte, 1)
+        self._rel_zero_preserved(r, zero, byte, tmp, helper)
+        r.move(zero)
+        r.emit("[")
+        r.emit("-")
+        r.add(next_carry, 1)
+        r.move(zero)
+        r.emit("]")
+        r.move(ten)
+        r.emit("]")
+        r.move(marker)
+        r.emit("]")
 
-            # Carry becomes the next lane's input.
-            bf.begin_while(next_carry)
-            bf.add_const(next_carry, -1)
-            bf.add_const(carry, 1)
-            bf.end_while(next_carry)
+        # Add incoming base-256 carry (digit for lane zero, at most nine).
+        r.move(carry)
+        r.emit("[")
+        r.emit("-")
+        r.add(byte, 1)
+        self._rel_zero_preserved(r, zero, byte, tmp, helper)
+        r.move(zero)
+        r.emit("[")
+        r.emit("-")
+        r.add(next_carry, 1)
+        r.move(zero)
+        r.emit("]")
+        r.move(carry)
+        r.emit("]")
 
-        # Overflow past byte seven is discarded by the fixed-width ABI.
-        for cell in (count, ten, carry, next_carry, zero, tmp, helper):
-            bf.clear(cell)
+        # The matching outer ']' tests marker[i+1].
+        r.move(1)
+
+        bf.move(marker_base)
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = marker_base + 8
+        bf.clear(carry_base + 8)  # discard overflow past bit 63
 
     def _packed_negate_inplace(self, dst: PackedI64Ref, workspace_base: int) -> None:
         """Two's-complement negate one packed 64-bit word in place."""
@@ -128,7 +222,6 @@ class PackedBinaryTokenIO(BinaryTokenIO):
         tmp = workspace_base + 4
         helper = workspace_base + 5
 
-        # Bitwise NOT byte-wise: byte = 255 - byte.
         for byte_index in range(8):
             byte = dst.byte(byte_index)
             bf.clear(count)
@@ -142,7 +235,6 @@ class PackedBinaryTokenIO(BinaryTokenIO):
             bf.add_const(byte, -1)
             bf.end_while(count)
 
-        # Add one, propagating a one-shot carry across byte lanes.
         bf.set_const(carry, 1)
         for byte_index in range(8):
             byte = dst.byte(byte_index)
@@ -168,12 +260,7 @@ class PackedBinaryTokenIO(BinaryTokenIO):
         end_line: int,
         workspace_base: int,
     ) -> None:
-        """Read one signed integer from the current line directly into 8 bytes.
-
-        The delimiter is consumed.  Leading horizontal whitespace is skipped,
-        but the operation never crosses a newline.  ``has_token`` and
-        ``end_line`` match ``read_s64_line_token``.
-        """
+        """Read one signed integer from the current line directly into 8 bytes."""
         bf = self.bf
         control_base = workspace_base + WORD_BITS * 2
         ch = control_base
