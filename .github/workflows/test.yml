@@ -23,6 +23,7 @@ jobs:
               tests/test_bfcompare.py
               tests/test_bfcore.py
               tests/test_bfio.py
+              tests/test_bfquad.py
               tests/test_bfsigned.py
               tests/test_bfwordops.py
           - suite: runtime
