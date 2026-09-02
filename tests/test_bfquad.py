@@ -46,6 +46,25 @@ def test_quad_add_sub_and_unsigned_compare():
     assert result.memory[ge] == 1
 
 
+def test_quad_runtime_shifts_cross_all_lane_boundaries():
+    bf = BFEmitter()
+    core = Quad64Core(bf)
+    left = Quad64Ref(0)
+    right = Quad64Ref(120)
+    value = 0x8123456789ABCDEF
+
+    core.set_u64(left, value)
+    core.set_u64(right, value)
+    core.shl1_inplace(left)
+    core.shr1_inplace(right)
+
+    code = optimize_bf(bf.code())
+    assert len(code) < 20_000
+    result = run_bf(code, memory_size=400, step_limit=20_000_000)
+    assert _u64(result.memory, left) == (value << 1) & MASK64
+    assert _u64(result.memory, right) == value >> 1
+
+
 def test_hybrid_quad_signed_compare_increment_and_negate():
     bf = BFEmitter()
     backend = QuadBinaryStringListIO(bf, scratch_base=700)
