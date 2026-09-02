@@ -149,19 +149,23 @@ class BinaryListIO(PackedBinaryTokenIO):
             return
         super().copy64(dst, src)
 
-    def _back_init_body(self) -> str:
-        """Return one runtime body that arms the next slot's reverse marker.
-
-        The current WALK cell stores the number of slots still to cross.  One
-        outer iteration advances exactly one slot while an inner transfer moves
-        the remaining count into the next WALK cell.  The emitted source is
-        independent of list capacity; only runtime work grows with capacity.
-        """
+    def _metadata_init_body(self) -> str:
+        """Scrub one list slot and move the remaining-count marker forward."""
         r = _RelativeBuilder(initial_pos=SLOT_WALK)
         r.add(SLOT_WALK, -1)
-        r.clear(SLOT_STRIDE + SLOT_BACK)
-        r.add(SLOT_STRIDE + SLOT_BACK, 1)
 
+        # Every visited slot becomes clean reusable traversal state.  BACK is
+        # initially armed for all real slots; BACK[0] is cleared after the
+        # deterministic full-capacity walk so reverse traversal terminates.
+        r.clear(SLOT_BACK)
+        r.add(SLOT_BACK, 1)
+        r.clear(SLOT_TARGET)
+        for i in range(I64_BYTES):
+            r.clear(SLOT_RESULT + i)
+
+        # Do not assume the next WALK cell was clean.  Clearing it here makes
+        # clear_list robust even after a partially traversed temporary list.
+        r.clear(SLOT_STRIDE + SLOT_WALK)
         r.move(SLOT_WALK)
         r.parts.append("[")
         r.add(SLOT_WALK, -1)
@@ -172,35 +176,24 @@ class BinaryListIO(PackedBinaryTokenIO):
         r.move(SLOT_STRIDE + SLOT_WALK)
         return r.code()
 
-    def _init_back_markers(self, ref: IntListRef) -> None:
-        """Establish BACK[0]=0 and BACK[1:]=1 with constant emitted source."""
+    def _init_metadata(self, ref: IntListRef) -> None:
+        """Reset all traversal metadata with one capacity-independent BF body."""
         bf = self.bf
-        bf.clear(ref.back_cell(0))
-        if ref.capacity <= 1:
-            bf.clear(ref.walk_cell(0))
-            return
-
-        bf.set_const(ref.walk_cell(0), ref.capacity - 1)
+        bf.set_const(ref.walk_cell(0), ref.capacity)
         bf.move(ref.walk_cell(0))
         bf.emit("[")
-        bf.emit(self._back_init_body())
+        bf.emit(self._metadata_init_body())
         bf.emit("]")
-        # The runtime loop deterministically exits at the final real slot.
-        bf.ptr = ref.walk_cell(ref.capacity - 1)
+        # Exactly ``capacity`` iterations leave the pointer on the owned zero
+        # sentinel.  BFEmitter cannot infer movement inside raw emitted bodies,
+        # so update its compile-time pointer model explicitly.
+        bf.ptr = ref.sentinel_walk
+        bf.clear(ref.back_cell(0))
 
     def clear_list(self, ref: IntListRef) -> None:
-        """Reset logical state without statically touching every list slot.
-
-        WALK/TARGET/RESULT cells are transactional scratch: every completed
-        list operation consumes the cells it visits.  Therefore clearing a
-        list only needs to reset its logical length and rebuild persistent BACK
-        markers.  BACK initialization itself is one runtime walker rather than
-        ``capacity`` copies of a Python-emitted body.
-        """
-        bf = self.bf
-        bf.clear(ref.length_cell)
-        self._init_back_markers(ref)
-        bf.clear(ref.sentinel_walk)
+        """Reset logical and traversal state with source size O(1) in capacity."""
+        self.bf.clear(ref.length_cell)
+        self._init_metadata(ref)
 
     def set_list_literal(self, ref: IntListRef, values: list[int]) -> None:
         if len(values) > ref.capacity:
