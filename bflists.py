@@ -128,10 +128,12 @@ class BinaryListIO(BinaryTokenIO):
     ) -> None:
         """Append when capacity remains; a full list currently ignores append."""
         bf = self.bf
-        # Comparing the compact length byte to each constant is much cheaper
-        # than converting length to a 64-bit word for append.
+        # Snapshot the original length.  Comparing against ref.length_cell
+        # directly would cascade after the increment and fill every remaining
+        # slot during one append call.
+        self.copy_cell(ref.length_cell, length_copy, self.s0)
         for i in range(ref.capacity):
-            self._eq_byte_const(match, ref.length_cell, i)
+            self._eq_byte_const(match, length_copy, i)
             bf.begin_while(match)
             bf.add_const(match, -1)
             self.copy64(ref.item(i), value)
