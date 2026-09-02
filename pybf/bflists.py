@@ -153,18 +153,12 @@ class BinaryListIO(PackedBinaryTokenIO):
         """Scrub one list slot and move the remaining-count marker forward."""
         r = _RelativeBuilder(initial_pos=SLOT_WALK)
         r.add(SLOT_WALK, -1)
-
-        # Every visited slot becomes clean reusable traversal state.  BACK is
-        # initially armed for all real slots; BACK[0] is cleared after the
-        # deterministic full-capacity walk so reverse traversal terminates.
         r.clear(SLOT_BACK)
         r.add(SLOT_BACK, 1)
         r.clear(SLOT_TARGET)
         for i in range(I64_BYTES):
             r.clear(SLOT_RESULT + i)
 
-        # Do not assume the next WALK cell was clean.  Clearing it here makes
-        # clear_list robust even after a partially traversed temporary list.
         r.clear(SLOT_STRIDE + SLOT_WALK)
         r.move(SLOT_WALK)
         r.parts.append("[")
@@ -184,9 +178,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         bf.emit("[")
         bf.emit(self._metadata_init_body())
         bf.emit("]")
-        # Exactly ``capacity`` iterations leave the pointer on the owned zero
-        # sentinel.  BFEmitter cannot infer movement inside raw emitted bodies,
-        # so update its compile-time pointer model explicitly.
         bf.ptr = ref.sentinel_walk
         bf.clear(ref.back_cell(0))
 
@@ -225,12 +216,12 @@ class BinaryListIO(PackedBinaryTokenIO):
     def get_const(self, dst: Int64Ref, ref: IntListRef, index: int) -> None:
         if not 0 <= index < ref.capacity:
             raise IndexError(index)
-        self.packed64.to_int64(dst, ref.item(index))
+        self.copy64(dst, ref.item(index))
 
     def set_const(self, ref: IntListRef, index: int, value: Int64Ref) -> None:
         if not 0 <= index < ref.capacity:
             raise IndexError(index)
-        self.packed64.from_int64(ref.item(index), value)
+        self.copy64(ref.item(index), value)
 
     def _int64_low_byte(self, dst: int, src: Int64Ref) -> None:
         bf = self.bf
@@ -328,7 +319,7 @@ class BinaryListIO(PackedBinaryTokenIO):
         self._run_walk(ref, write=False)
         bf.end_while(match)
 
-        self.packed64.to_int64(dst, ref.result(0))
+        self.copy64(dst, ref.result(0))
         self.packed64.clear(ref.result(0))
         bf.clear(index_byte)
         bf.clear(match)
@@ -351,7 +342,7 @@ class BinaryListIO(PackedBinaryTokenIO):
 
         bf.begin_while(match)
         bf.add_const(match, -1)
-        self.packed64.from_int64(ref.result(0), value)
+        self.copy64(ref.result(0), value)
         self._arm_walk_from_byte(ref, index_byte)
         self._run_walk(ref, write=True)
         bf.end_while(match)
