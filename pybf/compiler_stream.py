@@ -67,6 +67,42 @@ def _literal_int(node: ast.AST) -> int | None:
     return None
 
 
+def _self_min_abs_assignment(node: ast.stmt) -> tuple[str, ast.AST] | None:
+    """Recognize ``x = min(x, abs(fresh_binary_expression))``.
+
+    Restricting the absolute-value operand to a BinOp guarantees that evaluating
+    it returns a fresh compiler temporary; the optimizer may then negate that
+    value in place without mutating a user variable.  The general min/abs paths
+    remain available for every other AST shape.
+    """
+    if not (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "min"
+        and len(node.value.args) == 2
+        and not node.value.keywords
+    ):
+        return None
+
+    target = node.targets[0].id
+    first, second = node.value.args
+    if not isinstance(first, ast.Name) or first.id != target:
+        return None
+    if not (
+        isinstance(second, ast.Call)
+        and isinstance(second.func, ast.Name)
+        and second.func.id == "abs"
+        and len(second.args) == 1
+        and not second.keywords
+        and isinstance(second.args[0], ast.BinOp)
+    ):
+        return None
+    return target, second.args[0]
+
+
 class PythonToBFStream(PythonToBFQuad):
     """Quad-scalar compact compiler plus proven-safe contest lowering."""
 
@@ -87,6 +123,37 @@ class PythonToBFStream(PythonToBFQuad):
                 return result
 
         return super().compile_expr(node)
+
+    def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        fused = _self_min_abs_assignment(node)
+        if fused is not None:
+            target_name, magnitude_expr = fused
+            if target_name not in self.variables:
+                return super()._compile_stmt_inner(node)
+
+            # Generic lowering materializes three avoidable full Quad copies:
+            # abs(expr), min-result, and assignment-back-to-target.  Here the
+            # BinOp result is already a fresh temporary.  Take its magnitude in
+            # place, compare directly against the live target, and overwrite
+            # only when the candidate is smaller.
+            candidate = self.compile_expr(magnitude_expr)
+            sign = self.temps.cell()
+            self.backend.copy_cell(candidate.bit(63), sign, self.backend.s0)
+            self.bf.begin_while(sign)
+            self.bf.add_const(sign, -1)
+            self.backend._neg64_inplace(candidate)
+            self.bf.end_while(sign)
+
+            dst = self._var(ast.Name(id=target_name, ctx=ast.Load()))
+            choose = self.temps.cell()
+            self.backend.slt64(choose, candidate, dst)
+            self.bf.begin_while(choose)
+            self.bf.add_const(choose, -1)
+            self.backend.copy64(dst, candidate)
+            self.bf.end_while(choose)
+            return
+
+        return super()._compile_stmt_inner(node)
 
     def _list_index_word(self, node: ast.AST, ref):
         proven = getattr(self, "_proven_nonnegative_indices", set())
