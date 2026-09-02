@@ -219,25 +219,52 @@ class PythonToBFQuad(PythonToBFCompact):
         ):
             dst = self._var(node.target)
             ref = self.lists[node.value.value.id]
-            index, constant = self._list_index_word(node.value.slice, ref)
             rhs = self.backend._qtmp(0)
 
-            if constant is not None:
-                if constant >= ref.capacity:
-                    raise self._error(
-                        node.value, "constant list index exceeds configured capacity"
-                    )
-                self.backend.get_const(rhs, ref, constant)
-            else:
-                workspace_word = self.backend._qtmp(1)
-                match = self.temps.cell()
-                self.backend.get_dynamic(
-                    rhs,
-                    ref,
-                    index,
-                    workspace_word,
-                    match,
+            # A compact range loop may expose a private one-byte induction
+            # shadow.  It is semantically redundant with the Python-visible
+            # int64 target but is exactly the representation the list walker
+            # wants.  Using it avoids both a full-width ``index < capacity``
+            # comparison and a Quad->byte conversion on every access.
+            shadow = None
+            if isinstance(node.value.slice, ast.Name):
+                shadow = getattr(self, "_range_index_shadows", {}).get(
+                    node.value.slice.id
                 )
+
+            if shadow is not None:
+                index_byte, valid = shadow
+                gate = self.temps.cell()
+                self.backend.packed64.clear(ref.result(0))
+                self.backend.copy_cell(valid, gate, self.backend.s0)
+                self.bf.begin_while(gate)
+                self.bf.add_const(gate, -1)
+                self.backend._arm_walk_from_byte(ref, index_byte)
+                self.backend._run_walk(ref, write=False)
+                self.bf.end_while(gate)
+                self.backend.copy64(rhs, ref.result(0))
+                self.backend.packed64.clear(ref.result(0))
+                self.bf.clear(gate)
+                self.backend._clear_scratch()
+            else:
+                index, constant = self._list_index_word(node.value.slice, ref)
+                if constant is not None:
+                    if constant >= ref.capacity:
+                        raise self._error(
+                            node.value,
+                            "constant list index exceeds configured capacity",
+                        )
+                    self.backend.get_const(rhs, ref, constant)
+                else:
+                    workspace_word = self.backend._qtmp(1)
+                    match = self.temps.cell()
+                    self.backend.get_dynamic(
+                        rhs,
+                        ref,
+                        index,
+                        workspace_word,
+                        match,
+                    )
 
             if not add64_inplace(self.backend, dst, rhs):
                 raise RuntimeError("unexpected alias in fused list augmented assignment")
