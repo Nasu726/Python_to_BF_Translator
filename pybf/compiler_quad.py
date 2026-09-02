@@ -21,6 +21,7 @@ from bfstrings import StringRef
 from compiler import CompileError, _infer_int_list_names, _infer_string_list_names
 from compiler_compact import PythonToBFCompact, _compact_char_names
 from compiler_strings import _infer_scalar_string_loop_targets
+from transpiler import _is_list_map_int_input_split
 from transpiler_full import _LoopContext
 from transpiler_inputs import infer_split_string_names
 from transpiler_v2 import MASK64, _TempArena
@@ -200,6 +201,36 @@ class PythonToBFQuad(PythonToBFCompact):
 
         self.backend.drain_to_line_end(line_open, self.workspace_base)
         self.backend.packed64.clear(token)
+
+    def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        # Avoid materializing a temporary fixed-capacity list only to copy all
+        # of its packed slots into the final variable.  For the common contest
+        # form ``A = list(map(int, input().split()))`` the destination is known
+        # statically, so parse the line directly into A.  This preserves the
+        # established truncation/drain semantics while removing a capacity-wide
+        # emitted copy from every such assignment.
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self.lists
+            and _is_list_map_int_input_split(node.value)
+        ):
+            active = self.temps.cell()
+            gate = self.temps.cell()
+            has_token = self.temps.cell()
+            end_line = self.temps.cell()
+            self.backend.read_int_list_line(
+                self.lists[node.targets[0].id],
+                self.workspace_base,
+                active,
+                gate,
+                has_token,
+                end_line,
+            )
+            return
+
+        return super()._compile_stmt_inner(node)
 
 
 __all__ = ["PythonToBFQuad"]
