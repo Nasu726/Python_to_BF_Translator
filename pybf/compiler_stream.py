@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
-from compiler_compact import CompileError
+from compiler_compact import CompileError, _body_rebinds
 from compiler_quad import PythonToBFQuad
 from transpiler_full import _LoopContext
 from transpiler_v2 import clean_bf
@@ -53,6 +53,20 @@ def _positive_power_of_two_constant(node: ast.AST) -> int | None:
     return value.bit_length() - 1
 
 
+def _literal_int(node: ast.AST) -> int | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int)
+    ):
+        value = node.operand.value
+        return -value if isinstance(node.op, ast.USub) else value
+    return None
+
+
 class PythonToBFStream(PythonToBFQuad):
     """Quad-scalar compact compiler plus proven-safe contest lowering."""
 
@@ -73,6 +87,41 @@ class PythonToBFStream(PythonToBFQuad):
                 return result
 
         return super().compile_expr(node)
+
+    def _list_index_word(self, node: ast.AST, ref):
+        proven = getattr(self, "_proven_nonnegative_indices", set())
+        if isinstance(node, ast.Name) and node.id in proven:
+            # Positive-step range induction variables that start nonnegative and
+            # are not rebound in the loop body can never need Python's
+            # ``len(list) + negative_index`` normalization. Returning the live
+            # scalar directly also avoids an otherwise redundant Quad copy.
+            return self.compile_expr(node), None
+        return super()._list_index_word(node, ref)
+
+    def _compile_for_range_control(self, node: ast.For) -> None:
+        target, start, _stop, step = self._range_parts(node)
+        name = target.id if isinstance(target, ast.Name) else None
+        start_value = _literal_int(start)
+        safe = (
+            name is not None
+            and step > 0
+            and start_value is not None
+            and start_value >= 0
+            and not _body_rebinds(name, node.body)
+        )
+
+        proven = getattr(self, "_proven_nonnegative_indices", None)
+        if proven is None:
+            proven = set()
+            self._proven_nonnegative_indices = proven
+        already = name in proven if name is not None else False
+        if safe and name is not None:
+            proven.add(name)
+        try:
+            super()._compile_for_range_control(node)
+        finally:
+            if safe and name is not None and not already:
+                proven.remove(name)
 
     def compile_stmt(self, node: ast.stmt) -> None:
         """Delegate normally while attributing nested statement source size."""
