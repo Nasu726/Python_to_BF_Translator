@@ -149,15 +149,57 @@ class BinaryListIO(PackedBinaryTokenIO):
             return
         super().copy64(dst, src)
 
+    def _back_init_body(self) -> str:
+        """Return one runtime body that arms the next slot's reverse marker.
+
+        The current WALK cell stores the number of slots still to cross.  One
+        outer iteration advances exactly one slot while an inner transfer moves
+        the remaining count into the next WALK cell.  The emitted source is
+        independent of list capacity; only runtime work grows with capacity.
+        """
+        r = _RelativeBuilder(initial_pos=SLOT_WALK)
+        r.add(SLOT_WALK, -1)
+        r.clear(SLOT_STRIDE + SLOT_BACK)
+        r.add(SLOT_STRIDE + SLOT_BACK, 1)
+
+        r.move(SLOT_WALK)
+        r.parts.append("[")
+        r.add(SLOT_WALK, -1)
+        r.add(SLOT_STRIDE + SLOT_WALK, 1)
+        r.move(SLOT_WALK)
+        r.parts.append("]")
+
+        r.move(SLOT_STRIDE + SLOT_WALK)
+        return r.code()
+
+    def _init_back_markers(self, ref: IntListRef) -> None:
+        """Establish BACK[0]=0 and BACK[1:]=1 with constant emitted source."""
+        bf = self.bf
+        bf.clear(ref.back_cell(0))
+        if ref.capacity <= 1:
+            bf.clear(ref.walk_cell(0))
+            return
+
+        bf.set_const(ref.walk_cell(0), ref.capacity - 1)
+        bf.move(ref.walk_cell(0))
+        bf.emit("[")
+        bf.emit(self._back_init_body())
+        bf.emit("]")
+        # The runtime loop deterministically exits at the final real slot.
+        bf.ptr = ref.walk_cell(ref.capacity - 1)
+
     def clear_list(self, ref: IntListRef) -> None:
-        """Reset length and establish persistent reverse-walk markers."""
+        """Reset logical state without statically touching every list slot.
+
+        WALK/TARGET/RESULT cells are transactional scratch: every completed
+        list operation consumes the cells it visits.  Therefore clearing a
+        list only needs to reset its logical length and rebuild persistent BACK
+        markers.  BACK initialization itself is one runtime walker rather than
+        ``capacity`` copies of a Python-emitted body.
+        """
         bf = self.bf
         bf.clear(ref.length_cell)
-        for i in range(ref.capacity):
-            bf.clear(ref.walk_cell(i))
-            bf.clear(ref.target_cell(i))
-            bf.set_const(ref.back_cell(i), 0 if i == 0 else 1)
-            self.packed64.clear(ref.result(i))
+        self._init_back_markers(ref)
         bf.clear(ref.sentinel_walk)
 
     def set_list_literal(self, ref: IntListRef, values: list[int]) -> None:
