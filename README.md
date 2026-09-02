@@ -65,16 +65,23 @@ Python本来の任意精度int、動的長string/list、完全なobject alias se
 
 ## 入力
 
-`input()` はPython同様、1行を1つの論理入力として扱います。`input().split()` のtokenizationも生成Brainfuck自身が行い、通常の空白区切り入力をそのまま書けます。
+通常の競技プログラミング向けPythonと同じ書き方を使えます。
 
 ```python
+n = int(input())
 a, b = map(int, input().split())
 name, country = input().split()
 A = list(map(int, input().split()))
 words = input().split()
 ```
 
-固定長ABIのため、`list`容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。現在はPythonの`ValueError`等の例外再現までは行いません。
+各 `input()` はBrainfuck実行時にも **1行単位** です。整数化・空白tokenize・string/listへの格納・newline管理はすべて生成Brainfuck自身が行います。
+
+`int(input())` は最初の整数tokenを読み、同じ物理行に残りがあってもその行を最後まで消費してから次の `input()` へ進みます。`input().split()` 系もnewlineを越えて次行のtokenを盗みません。
+
+固定長ABIのため、list容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。現時点ではPythonの`ValueError`等の例外再現までは行いません。固定数unpackで値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する固定runtime仕様です。
+
+整数入力の実例は `examples/input_patterns.py` にあります。
 
 ## 主な対応構文
 

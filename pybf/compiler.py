@@ -1,8 +1,8 @@
 """Current fixed-ABI compiler frontend.
 
-This module is the final lowering layer used by the public ``pybf`` API.  It
-keeps all ``input().split()`` forms line-scoped, including integer and string
-unpacking, and resolves the final fixed-runtime type layout.
+This module is the final lowering layer used by the public ``pybf`` API. It
+combines strict one-line ``int(input())`` semantics with generic line-scoped
+``input().split()`` lowering for integer and string tokens.
 """
 
 from __future__ import annotations
@@ -28,6 +28,21 @@ from transpiler_v2 import CompileError, _TempArena
 from transpiler_v3 import infer_string_names
 
 
+def _is_int_input_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "int"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Call)
+        and isinstance(node.args[0].func, ast.Name)
+        and node.args[0].func.id == "input"
+        and not node.args[0].args
+        and not node.args[0].keywords
+    )
+
+
 def _string_list_expr(node: ast.AST, names: set[str]) -> bool:
     if _is_input_split(node):
         return True
@@ -38,8 +53,8 @@ def _string_list_expr(node: ast.AST, names: set[str]) -> bool:
     if isinstance(node, ast.Name):
         return node.id in names
     if isinstance(node, ast.List):
-        # An empty list has no element-type evidence.  Preserve the pre-existing
-        # compiler convention and let the int-list inference own ``[]``.
+        # An empty list has no element-type evidence. Preserve the established
+        # convention and let int-list inference own ``[]``.
         return bool(node.elts) and all(
             isinstance(x, ast.Constant) and isinstance(x.value, str)
             for x in node.elts
@@ -152,6 +167,22 @@ class PythonToBFCompiler(PythonToBFInputs):
         self.bf.clear(line_open)
         self.bf.end_while(gate)
 
+    def _read_single_int_line(self, dst: Int64Ref) -> None:
+        """Lower ``int(input())`` while consuming exactly one logical line."""
+        has_token = self.temps.cell()
+        end_line = self.temps.cell()
+        line_open = self.temps.cell()
+        self.bf.set_const(line_open, 1)
+
+        self.backend.read_s64_line_token(
+            dst, has_token, end_line, self.workspace_base
+        )
+        self._close_line_if_end(line_open, end_line)
+
+        # ``int(input())`` owns the entire line. If the first token ended on
+        # horizontal whitespace, discard the remainder before later input().
+        self.backend.drain_to_line_end(line_open, self.workspace_base)
+
     def _read_int_unpack_line(self, targets: list[ast.AST], node: ast.AST) -> None:
         """Lower fixed-arity ``map(int, input().split())`` without line bleed."""
         if not targets or not all(isinstance(t, ast.Name) for t in targets):
@@ -173,7 +204,7 @@ class PythonToBFCompiler(PythonToBFInputs):
 
             dst = self._var(target)
             # If the line ended before this target, leave the fixed-runtime
-            # fallback value at zero and, critically, do not consume next line.
+            # fallback value at zero and never consume the next line.
             self.backend._clear_word(dst)
             gate = self.temps.cell()
             self.backend.copy_cell(line_open, gate, self.backend.s0)
@@ -185,8 +216,8 @@ class PythonToBFCompiler(PythonToBFInputs):
             self._close_line_if_end(line_open, end_line)
             self.bf.end_while(gate)
 
-        # Extra tokens are invalid for Python unpacking, but exceptions are not
-        # implemented yet.  Drain them so the following input() starts cleanly.
+        # Extra tokens would raise ValueError in CPython. Exceptions are not
+        # implemented yet, so discard them while preserving the next line.
         self.backend.drain_to_line_end(line_open, self.workspace_base)
 
     def _read_string_unpack_line(self, targets: list[ast.AST], node: ast.AST) -> None:
@@ -218,6 +249,15 @@ class PythonToBFCompiler(PythonToBFInputs):
 
         self.backend.drain_to_line_end(line_open, self.workspace_base)
 
+    def compile_expr(self, node: ast.AST) -> Int64Ref:
+        # Preserve PR #2 semantics after the split/string frontend is layered on
+        # top: int(input()) must consume exactly one source-level input line.
+        if _is_int_input_call(node):
+            result = self._new_word()
+            self._read_single_int_line(result)
+            return result
+        return super().compile_expr(node)
+
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         if (
             isinstance(node, ast.Assign)
@@ -248,3 +288,6 @@ def compile_source(
         string_capacity=string_capacity,
         list_capacity=list_capacity,
     ).compile_module(tree)
+
+
+__all__ = ["CompileError", "PythonToBFCompiler", "compile_source"]
