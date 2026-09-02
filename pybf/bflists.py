@@ -9,10 +9,11 @@ Layout::
 
     [length]
     [walk back target payload:8 result:8] * capacity
+    [walk sentinel]
 
-The extra cells trade a small amount of tape for a major source-size win:
-``get_dynamic``/``set_dynamic``/``append`` are independent of list capacity
-apart from marker initialization and the numeric bounds check.
+The final zero sentinel is physically owned by the list.  Without it, walking
+to the last valid slot would test the first cell of the following allocation as
+if it were the next slot's WALK marker.
 """
 
 from __future__ import annotations
@@ -62,8 +63,12 @@ class IntListRef:
         return PackedI64Ref(self.slot(index) + SLOT_RESULT)
 
     @property
+    def sentinel_walk(self) -> int:
+        return self.base + 1 + self.capacity * SLOT_STRIDE
+
+    @property
     def cells(self) -> int:
-        return 1 + self.capacity * SLOT_STRIDE
+        return 2 + self.capacity * SLOT_STRIDE
 
 
 class _RelativeBuilder:
@@ -144,9 +149,6 @@ class BinaryListIO(PackedBinaryTokenIO):
             return
         super().copy64(dst, src)
 
-    # ------------------------------------------------------------------
-    # list layout / invariants
-    # ------------------------------------------------------------------
     def clear_list(self, ref: IntListRef) -> None:
         """Reset length and establish persistent reverse-walk markers."""
         bf = self.bf
@@ -156,6 +158,7 @@ class BinaryListIO(PackedBinaryTokenIO):
             bf.clear(ref.target_cell(i))
             bf.set_const(ref.back_cell(i), 0 if i == 0 else 1)
             self.packed64.clear(ref.result(i))
+        bf.clear(ref.sentinel_walk)
 
     def set_list_literal(self, ref: IntListRef, values: list[int]) -> None:
         if len(values) > ref.capacity:
@@ -175,7 +178,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         self._clear_scratch()
 
     def list_length(self, dst: Int64Ref, ref: IntListRef, tmp: int) -> None:
-        """Convert the compact byte length to a normal uint64 word."""
         bf = self.bf
         self._clear_word(dst)
         self.copy_cell(ref.length_cell, tmp, self.s0)
@@ -195,11 +197,7 @@ class BinaryListIO(PackedBinaryTokenIO):
             raise IndexError(index)
         self.packed64.from_int64(ref.item(index), value)
 
-    # ------------------------------------------------------------------
-    # source-compact runtime slot walk
-    # ------------------------------------------------------------------
     def _int64_low_byte(self, dst: int, src: Int64Ref) -> None:
-        """Pack src bits 0..7 into one byte while preserving src."""
         bf = self.bf
         bf.clear(dst)
         for bit_index in range(8):
@@ -211,24 +209,15 @@ class BinaryListIO(PackedBinaryTokenIO):
         self._clear_scratch()
 
     def _arm_walk_from_byte(self, ref: IntListRef, index_byte: int) -> None:
-        """Set slot-0 walk counter to index+1 (valid indices are <=254)."""
         self.copy_cell(index_byte, ref.walk_cell(0), self.s0)
         self.bf.add_const(ref.walk_cell(0), 1)
 
     def _walk_body(self, *, write: bool) -> str:
-        """One runtime lane body; starts at current WALK and ends at next WALK."""
         r = _RelativeBuilder(initial_pos=SLOT_WALK)
-
-        # The counter stores remaining_index+1.  After the first decrement,
-        # zero means this is the selected slot.
         r.add(SLOT_WALK, -1)
         r.clear(SLOT_TARGET)
         r.add(SLOT_TARGET, 1)
 
-        # Non-target path.  Consume the remaining counter into the next slot,
-        # carry the packed value/result corridor forward once, and clear the
-        # target flag.  Repeating the inner loop for counter>1 only moves zeros
-        # after the first transfer, which keeps the emitted source tiny.
         r.move(SLOT_WALK)
         r.parts.append("[")
         r.add(SLOT_WALK, -1)
@@ -239,8 +228,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         r.move(SLOT_WALK)
         r.parts.append("]")
 
-        # Selected-slot operation. WALK is zero here and is safe as the
-        # temporary cell required by preserved byte copies.
         r.move(SLOT_TARGET)
         r.parts.append("[")
         r.add(SLOT_TARGET, -1)
@@ -257,7 +244,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         return r.code()
 
     def _reverse_result_body(self) -> str:
-        """Move selected RESULT one slot left; starts/ends on BACK markers."""
         r = _RelativeBuilder(initial_pos=0)
         current_result = SLOT_RESULT - SLOT_BACK
         previous_result = current_result - SLOT_STRIDE
@@ -267,13 +253,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         return r.code()
 
     def _return_to_first(self, ref: IntListRef, *, carry_result: bool) -> None:
-        """Return from the dynamic target to slot 0 using persistent BACK bits.
-
-        The forward walker exits on the WALK cell immediately after the target.
-        Moving back by ``SLOT_STRIDE-SLOT_BACK`` lands on the target BACK bit.
-        BACK is zero for slot 0 and one for every later slot, so a loop whose
-        body ends on the previous BACK bit naturally walks to a fixed address.
-        """
         bf = self.bf
         bf.emit("<" * (SLOT_STRIDE - SLOT_BACK))
         bf.emit("[")
@@ -286,13 +265,11 @@ class BinaryListIO(PackedBinaryTokenIO):
 
     def _run_walk(self, ref: IntListRef, *, write: bool) -> None:
         bf = self.bf
+        bf.clear(ref.sentinel_walk)
         bf.move(ref.walk_cell(0))
         bf.emit("[")
         bf.emit(self._walk_body(write=write))
         bf.emit("]")
-        # The runtime pointer is now at the WALK cell after the dynamic target;
-        # BFEmitter cannot infer that address, so return with a relative lane
-        # walk before restoring its compile-time pointer model.
         self._return_to_first(ref, carry_result=not write)
 
     def get_dynamic(
@@ -303,7 +280,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         workspace_word: Int64Ref,
         match: int,
     ) -> None:
-        """Load a runtime index with one emitted slot-walking body."""
         bf = self.bf
         index_byte = workspace_word.base
 
@@ -331,7 +307,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         workspace_word: Int64Ref,
         match: int,
     ) -> None:
-        """Store through a runtime index with one emitted slot-walking body."""
         bf = self.bf
         index_byte = workspace_word.base
 
@@ -351,9 +326,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         bf.clear(match)
         self._clear_scratch()
 
-    # ------------------------------------------------------------------
-    # append / input
-    # ------------------------------------------------------------------
     def append_packed(
         self,
         ref: IntListRef,
@@ -361,11 +333,7 @@ class BinaryListIO(PackedBinaryTokenIO):
         length_copy: int,
         match: int,
     ) -> None:
-        """Append packed data through the same capacity-independent walker."""
         bf = self.bf
-
-        # active = length != capacity.  A full fixed-capacity list remains
-        # unchanged; callers such as input parsing continue consuming tokens.
         self._eq_byte_const(match, ref.length_cell, ref.capacity)
         self._toggle_bit(match, self.s0)
         self._clear_scratch()
@@ -391,7 +359,6 @@ class BinaryListIO(PackedBinaryTokenIO):
         match: int,
         packed_tmp: PackedI64Ref | None = None,
     ) -> None:
-        """Pack once, then append with the runtime lane walker."""
         if packed_tmp is None:
             packed_tmp = PackedI64Ref(match + 1)
         self.packed64.from_int64(packed_tmp, value)
@@ -408,20 +375,12 @@ class BinaryListIO(PackedBinaryTokenIO):
         has_token: int,
         end_line: int,
     ) -> None:
-        """Implement ``list(map(int, input().split()))`` with compact runtime loops.
-
-        Decimal tokens are parsed directly into packed int64 bytes.  Appending
-        a token no longer statically emits one branch per list-capacity slot;
-        the same runtime lane walker handles every destination index.  Excess
-        tokens are still consumed through the line terminator.
-        """
+        """Implement ``list(map(int, input().split()))`` with compact runtime loops."""
         bf = self.bf
         self.clear_list(ref)
         for c in (active, gate, has_token, end_line):
             bf.clear(c)
 
-        # Packed parser controls occupy workspace_base+128..+151.  Keep the
-        # token and append scratch beyond that private region.
         token = PackedI64Ref(workspace_base + WORD_BITS * 2 + 32)
         length_copy = token.base + I64_BYTES
         append_match = length_copy + 1
