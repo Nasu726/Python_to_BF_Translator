@@ -43,3 +43,15 @@ def test_public_fused_dynamic_list_plus_equals_is_semantically_correct():
     )
     result = run_bf(code, step_limit=150_000_000)
     assert result.output == "7\n"
+
+
+def test_public_fused_self_min_abs_is_semantically_correct():
+    code = compile_source(
+        "ans = 10\n"
+        "s = 7\n"
+        "left = 5\n"
+        "ans = min(ans, abs(s - 2 * left))\n"
+        "print(ans)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "3\n"
