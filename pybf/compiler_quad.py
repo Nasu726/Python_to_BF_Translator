@@ -202,9 +202,12 @@ class PythonToBFQuad(PythonToBFCompact):
         self.backend.packed64.clear(token)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
-        # The common reduction pattern ``sum += values[i]`` does not need the
-        # generic augmented-assignment result word. Load the list item once and
-        # update the scalar directly with a runtime two-bit-lane ripple adder.
+        # Common reduction ``sum += values[i]``.  Do not lower the subscript as
+        # a general expression: that would allocate a distant compiler temp for
+        # the loaded Quad value and another temp for the bounds workspace.  The
+        # two reserved Quad words are dead at this statement boundary, so use
+        # them as the load destination and bounds workspace, then add directly
+        # into the live scalar.
         if (
             isinstance(node, ast.AugAssign)
             and isinstance(node.op, ast.Add)
@@ -215,10 +218,28 @@ class PythonToBFQuad(PythonToBFCompact):
             and node.value.value.id in self.lists
         ):
             dst = self._var(node.target)
-            rhs = self.compile_expr(node.value)
-            if not isinstance(rhs, Quad64Ref) or not add64_inplace(
-                self.backend, dst, rhs
-            ):
+            ref = self.lists[node.value.value.id]
+            index, constant = self._list_index_word(node.value.slice, ref)
+            rhs = self.backend._qtmp(0)
+
+            if constant is not None:
+                if constant >= ref.capacity:
+                    raise self._error(
+                        node.value, "constant list index exceeds configured capacity"
+                    )
+                self.backend.get_const(rhs, ref, constant)
+            else:
+                workspace_word = self.backend._qtmp(1)
+                match = self.temps.cell()
+                self.backend.get_dynamic(
+                    rhs,
+                    ref,
+                    index,
+                    workspace_word,
+                    match,
+                )
+
+            if not add64_inplace(self.backend, dst, rhs):
                 raise RuntimeError("unexpected alias in fused list augmented assignment")
             return
 
