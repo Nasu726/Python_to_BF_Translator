@@ -55,3 +55,14 @@ def test_public_fused_self_min_abs_is_semantically_correct():
     )
     result = run_bf(code, step_limit=150_000_000)
     assert result.output == "3\n"
+
+
+def test_public_compact_range_increment_preserves_final_loop_target():
+    code = compile_source(
+        "s = 0\n"
+        "for i in range(4):\n"
+        "    s += i\n"
+        "print(s, i)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "6 3\n"
