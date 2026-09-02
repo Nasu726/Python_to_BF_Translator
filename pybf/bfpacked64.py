@@ -1,9 +1,9 @@
-"""Eight-byte heap representation for signed/int64 values.
+"""Eight-byte storage representation for signed/int64 values.
 
 Python-facing arithmetic still uses the existing 64 Boolean-cell two's
-complement representation.  Heap/list storage uses eight ordinary bytes to
-keep object blocks compact.  These primitives convert losslessly between the
-two representations without Python runtime help.
+complement representation. Heap/list storage uses eight ordinary bytes to keep
+containers compact. These primitives convert losslessly between the two
+representations without Python runtime help.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from bfcore import BFEmitter, Int64Ref, WORD_BITS
 
 
 I64_BYTES = 8
+MASK64 = (1 << 64) - 1
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,13 @@ class PackedI64Core:
             self.bf.clear(ref.byte(i))
         self._clear_scratch()
 
+    def set_u64(self, ref: PackedI64Ref, value: int) -> None:
+        """Initialize a packed value directly from a compile-time integer."""
+        value &= MASK64
+        for i in range(I64_BYTES):
+            self.bf.set_const(ref.byte(i), (value >> (8 * i)) & 0xFF)
+        self._clear_scratch()
+
     def copy(self, dst: PackedI64Ref, src: PackedI64Ref) -> None:
         if dst == src:
             return
@@ -100,17 +108,17 @@ class PackedI64Core:
             bf.begin_while(gate)
             bf.add_const(gate, -1)
 
-            # Boolean bit + carry.  helper selects the zero-bit path.
-            bf.set_const(helper, 1)
+            helper_flag = helper
+            bf.set_const(helper_flag, 1)
             bf.begin_while(bit)
             bf.add_const(bit, -1)
             bf.add_const(carry, 1)
-            bf.clear(helper)
+            bf.clear(helper_flag)
             bf.end_while(bit)
-            bf.begin_while(helper)
-            bf.add_const(helper, -1)
+            bf.begin_while(helper_flag)
+            bf.add_const(helper_flag, -1)
             bf.add_const(bit, 1)
-            bf.end_while(helper)
+            bf.end_while(helper_flag)
 
             bf.end_while(gate)
 
