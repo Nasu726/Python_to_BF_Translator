@@ -1,12 +1,13 @@
 """Semantics-preserving Brainfuck source-size optimization.
 
 The generated runtime targets 8-bit wrapping cells and a zero-initialized tape.
-This optimizer intentionally relies only on those ABI guarantees.  It removes
+This optimizer intentionally relies only on those ABI guarantees. It removes
 redundant clears of cells proven to be zero, drops loops whose control cell is
 proven zero, and canonicalizes adjacent pointer/value runs.
 
-It does *not* introduce non-standard Brainfuck commands or require a special
-interpreter.
+Large compiler outputs are first canonicalized as a streaming string pass. That
+avoids materializing millions of individual Python character objects merely to
+cancel adjacent ``><`` / ``+-`` runs.
 """
 
 from __future__ import annotations
@@ -22,8 +23,61 @@ class _Loop:
     body: tuple[object, ...]
 
 
+def _precanonicalize_text(code: str) -> str:
+    """Fold straight-line move/add runs before building the loop tree."""
+    out: list[str] = []
+    move = 0
+    add = 0
+
+    def flush_move() -> None:
+        nonlocal move
+        if move > 0:
+            out.append(">" * move)
+        elif move < 0:
+            out.append("<" * -move)
+        move = 0
+
+    def flush_add() -> None:
+        nonlocal add
+        value = add % 256
+        if value <= 128:
+            if value:
+                out.append("+" * value)
+        else:
+            out.append("-" * (256 - value))
+        add = 0
+
+    for ch in code:
+        if ch not in BF_COMMANDS:
+            continue
+        if ch == ">":
+            flush_add()
+            move += 1
+            continue
+        if ch == "<":
+            flush_add()
+            move -= 1
+            continue
+        if ch == "+":
+            flush_move()
+            add += 1
+            continue
+        if ch == "-":
+            flush_move()
+            add -= 1
+            continue
+        flush_move()
+        flush_add()
+        out.append(ch)
+
+    flush_move()
+    flush_add()
+    return "".join(out)
+
+
 def _parse(code: str) -> tuple[object, ...]:
-    filtered = [ch for ch in code if ch in BF_COMMANDS]
+    # ``code`` has already been filtered/canonicalized by the streaming pass.
+    filtered = code
 
     def parse_from(pos: int, nested: bool) -> tuple[list[object], int]:
         out: list[object] = []
@@ -75,7 +129,6 @@ def _canonicalize(nodes: tuple[object, ...] | list[object]) -> tuple[object, ...
 
     def flush_add() -> None:
         nonlocal add
-        # Cells wrap modulo 256.  Choose the shorter equivalent direction.
         value = add % 256
         if value <= 128:
             out.extend("+" for _ in range(value))
@@ -105,7 +158,6 @@ def _canonicalize(nodes: tuple[object, ...] | list[object]) -> tuple[object, ...
         flush_add()
         if isinstance(node, _Loop):
             body = _canonicalize(node.body)
-            # In 8-bit wrapping Brainfuck, [+] and [-] are both clear loops.
             if body in (("+",), ("-",)):
                 body = ("-",)
             out.append(_Loop(body))
@@ -118,7 +170,6 @@ def _canonicalize(nodes: tuple[object, ...] | list[object]) -> tuple[object, ...
 
 
 def _effects(nodes: tuple[object, ...], start: int = 0) -> tuple[int, set[int], bool]:
-    """Return (net pointer delta, modified offsets, all loops balanced)."""
     ptr = start
     touched: set[int] = set()
     balanced = True
@@ -135,8 +186,6 @@ def _effects(nodes: tuple[object, ...], start: int = 0) -> tuple[int, set[int], 
             if nested_delta != ptr:
                 balanced = False
             balanced = balanced and nested_balanced
-            # A balanced generated loop returns to the cell where it started.
-        # '.' has no memory effect.
     return ptr, touched, balanced
 
 
@@ -155,19 +204,12 @@ def _all_loops_balanced(nodes: tuple[object, ...]) -> bool:
 
 
 def _eliminate_known_zero(nodes: tuple[object, ...]) -> tuple[object, ...]:
-    """Optimize top-level straight-line state using zero-initialized tape facts.
-
-    General loop bodies are left dataflow-conservative because they can execute
-    multiple times.  We still use the fact that a terminating BF loop exits
-    with its controlling cell equal to zero.
-    """
     values: dict[int, int | None] = {}
     logical_ptr = 0
     emitted_ptr = 0
     out: list[object] = []
 
     def value_at(cell: int) -> int | None:
-        # An untouched cell is zero by the public runtime ABI.
         return values.get(cell, 0)
 
     def flush_move() -> None:
@@ -214,8 +256,6 @@ def _eliminate_known_zero(nodes: tuple[object, ...]) -> tuple[object, ...]:
         current = value_at(logical_ptr)
 
         if current == 0:
-            # The loop is skipped.  Crucially, do not flush a pointer movement
-            # whose only purpose was reaching this redundant operation.
             continue
 
         flush_move()
@@ -224,32 +264,22 @@ def _eliminate_known_zero(nodes: tuple[object, ...]) -> tuple[object, ...]:
             values[logical_ptr] = 0
             continue
 
-        # Keep the loop, but invalidate every cell it may mutate because the
-        # body can run an input-dependent number of times.
         end, touched, balanced = _effects(body, logical_ptr)
         if not balanced or end != logical_ptr:
-            # This optimizer is only enabled for the compiler's balanced-loop
-            # output.  The caller falls back before reaching this branch.
             raise ValueError("cannot dataflow-optimize an unbalanced BF loop")
         out.append(_Loop(body))
         for cell in touched:
             values[cell] = None
-        # If the loop terminates, its controlling cell is zero whether it was
-        # skipped or executed one or more times.
         values[logical_ptr] = 0
 
-    # Preserve the compiler's final pointer location.  This is not observable
-    # after program termination, so omitting a trailing pure move is safe and
-    # smaller.  Therefore intentionally do not flush here.
     return tuple(out)
 
 
 def optimize_bf(code: str) -> str:
     """Return smaller standard Brainfuck with identical observable behavior."""
-    nodes = _canonicalize(_parse(code))
+    compact_text = _precanonicalize_text(code)
+    nodes = _canonicalize(_parse(compact_text))
     if not _all_loops_balanced(nodes):
-        # Generated code should never hit this path, but do not risk changing
-        # semantics if optimize_bf is used on arbitrary handwritten BF.
         return _stringify(nodes)
     nodes = _eliminate_known_zero(nodes)
     nodes = _canonicalize(nodes)
