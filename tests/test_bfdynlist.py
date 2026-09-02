@@ -3,6 +3,7 @@ from bfcore import BFEmitter, Binary64Core, Int64Ref
 from bfdynlist import DynamicIntListRootRuntime, DynamicIntListRuntime
 from bfheap import HeapBlockArena
 from bfobjects import ObjectHandleCore, ObjectHandleRef
+from bfopt import optimize_bf
 from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Core, PackedI64Ref
 
@@ -16,6 +17,10 @@ def _u32(memory: list[int], ref: PackedU32Ref) -> int:
 
 def _u64_bytes(memory: list[int], ref: PackedI64Ref) -> int:
     return sum(memory[ref.byte(i)] << (8 * i) for i in range(8))
+
+
+def _run(bf: BFEmitter, *, memory_size: int, step_limit: int):
+    return run_bf(optimize_bf(bf.code()), memory_size=memory_size, step_limit=step_limit)
 
 
 def test_dynamic_list_root_assignment_is_alias_not_value_copy():
@@ -55,7 +60,7 @@ def test_dynamic_list_root_assignment_is_alias_not_value_copy():
     lists.read_length(observed_after_clear, b)
     lists.read_length(separate_length, c)
 
-    result = run_bf(bf.code(), memory_size=512, step_limit=150_000_000)
+    result = _run(bf, memory_size=512, step_limit=150_000_000)
     assert _u32(result.memory, a) == 1
     assert _u32(result.memory, b) == 1
     assert _u32(result.memory, c) == 2
@@ -106,7 +111,6 @@ def test_dynamic_list_append_and_index_are_visible_through_alias():
     binary.set_u64(value0, 10)
     binary.set_u64(value1, -7)
 
-    # Mutate through b; reads through a must observe the same list object.
     lists.append_int64(b, value0)
     lists.append_int64(b, value1)
     packed.set_u32(index0, 0)
@@ -115,7 +119,7 @@ def test_dynamic_list_append_and_index_are_visible_through_alias():
     lists.get_packed(out1, a, index1)
     lists.read_length(length_out, a)
 
-    result = run_bf(bf.code(), memory_size=1_024, step_limit=300_000_000)
+    result = _run(bf, memory_size=1_024, step_limit=300_000_000)
     assert _u32(result.memory, a) == _u32(result.memory, b) == 1
     assert _u32(result.memory, length_out) == 2
     assert _u64_bytes(result.memory, out0) == 10
