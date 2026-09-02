@@ -104,6 +104,33 @@ def _add_preserved(
     r.emit("]")
 
 
+def _add_complement_preserved(
+    r: _RelativeBuilder,
+    src: int,
+    total: int,
+    tmp: int,
+) -> None:
+    """``total += 3-src`` for one radix-4 digit, preserving ``src``.
+
+    ``total`` is non-negative and receives three before ``src`` is subtracted,
+    so the temporary arithmetic never relies on wrapping-byte underflow.
+    """
+    r.add(total, 3)
+    r.move(src)
+    r.emit("[")
+    r.add(src, -1)
+    r.add(total, -1)
+    r.add(tmp, 1)
+    r.move(src)
+    r.emit("]")
+    r.move(tmp)
+    r.emit("[")
+    r.add(tmp, -1)
+    r.add(src, 1)
+    r.move(tmp)
+    r.emit("]")
+
+
 def _map_total_base4(
     r: _RelativeBuilder,
     total: int,
@@ -134,7 +161,7 @@ def _map_total_base4(
 
 
 class Base4I64Core:
-    """Source-compact copy/add primitives over radix-4 int64 lanes."""
+    """Source-compact copy/add/sub/compare primitives over radix-4 int64 lanes."""
 
     def __init__(self, bf: BFEmitter) -> None:
         self.bf = bf
@@ -220,6 +247,87 @@ class Base4I64Core:
         # Overflow beyond digit 31 is modulo-2**64 and therefore discarded.
         bf.clear(dst.marker(DIGITS))
         bf.clear(dst.value(DIGITS))
+
+    def _sub64_with_carry(
+        self,
+        dst: Base4I64Ref,
+        a: Base4I64Ref,
+        b: Base4I64Ref,
+    ) -> None:
+        """Compute a-b and leave unsigned no-borrow in dst's sentinel marker.
+
+        Radix-4 two's-complement subtraction is ``a + (3-b) + 1`` per digit.
+        The final carry is one exactly when unsigned ``a >= b``.
+        """
+        if len({dst.base, a.base, b.base}) != 3:
+            raise ValueError("base-4 sub64 currently requires distinct operands")
+
+        bf = self.bf
+        b_delta = b.base - a.base
+        d_delta = dst.base - a.base
+
+        for digit in range(DIGITS):
+            bf.set_const(a.marker(digit), 1)
+        bf.clear(a.marker(DIGITS))
+        # Initial +1 of radix complement subtraction.
+        bf.set_const(dst.marker(0), 1)
+
+        r = _RelativeBuilder()
+        marker = 0
+        a_value = 1
+        total = b_delta
+        b_value = b_delta + 1
+        carry_in = d_delta
+        out = d_delta + 1
+        carry_out = d_delta + STRIDE
+
+        r.clear(marker)
+        r.clear(total)
+        r.clear(out)
+        r.clear(carry_out)
+        r.transfer(carry_in, total)
+        _add_preserved(r, a_value, total, marker)
+        _add_complement_preserved(r, b_value, total, marker)
+        _map_total_base4(r, total, out, carry_out)
+        r.move(STRIDE)
+
+        bf.move(a.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = a.marker(DIGITS)
+        bf.clear(dst.value(DIGITS))
+        # Deliberately retain dst.marker(DIGITS) as the final no-borrow carry.
+
+    def sub64(
+        self,
+        dst: Base4I64Ref,
+        a: Base4I64Ref,
+        b: Base4I64Ref,
+    ) -> None:
+        """``dst = a - b (mod 2**64)`` preserving a/b value digits."""
+        self._sub64_with_carry(dst, a, b)
+        self.bf.clear(dst.marker(DIGITS))
+
+    def uge64(
+        self,
+        result: int,
+        a: Base4I64Ref,
+        b: Base4I64Ref,
+        tmp: Base4I64Ref,
+    ) -> None:
+        """Set one byte result to 1 iff unsigned ``a >= b``."""
+        if result in range(tmp.base, tmp.base + tmp.cells):
+            raise ValueError("result cell must not alias temporary word")
+
+        self._sub64_with_carry(tmp, a, b)
+        carry = tmp.marker(DIGITS)
+        self.bf.clear(result)
+        self.bf.move(carry)
+        self.bf.emit("[-")
+        self.bf.move(result)
+        self.bf.emit("+")
+        self.bf.move(carry)
+        self.bf.emit("]")
+        self.bf.clear(tmp.value(DIGITS))
 
 
 __all__ = [
