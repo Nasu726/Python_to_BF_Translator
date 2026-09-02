@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
+from bfquadinplace import inc64_inplace, neg64_inplace
 from compiler_compact import CompileError, _body_rebinds
 from compiler_quad import PythonToBFQuad
 from transpiler_full import _LoopContext
@@ -141,7 +142,8 @@ class PythonToBFStream(PythonToBFQuad):
             self.backend.copy_cell(candidate.bit(63), sign, self.backend.s0)
             self.bf.begin_while(sign)
             self.bf.add_const(sign, -1)
-            self.backend._neg64_inplace(candidate)
+            if not neg64_inplace(self.backend, candidate):
+                self.backend._neg64_inplace(candidate)
             self.bf.end_while(sign)
 
             dst = self.variables[target_name]
@@ -165,12 +167,29 @@ class PythonToBFStream(PythonToBFQuad):
         """Range loop without break/continue/else bookkeeping."""
         target_node, start_node, stop_node, step = self._range_parts(node)
         target = self._var(target_node)
-        start = self.compile_expr(start_node)
-        stop_value = self.compile_expr(stop_node)
-        current = self._copy_new(start)
-        stop = self._copy_new(stop_value)
-        control = self.temps.cell()
 
+        # Compile-time literal starts do not need a temporary source plus a full
+        # Quad copy.  Likewise a scalar stop name can be read directly when the
+        # body does not rebind it; range()'s snapshot semantics are then
+        # observationally identical to the live value.
+        start_literal = _literal_int(start_node)
+        if start_literal is not None:
+            current = self._new_word(start_literal)
+        else:
+            start = self.compile_expr(start_node)
+            current = self._copy_new(start)
+
+        if (
+            isinstance(stop_node, ast.Name)
+            and stop_node.id in self.variables
+            and not _body_rebinds(stop_node.id, node.body)
+        ):
+            stop = self.variables[stop_node.id]
+        else:
+            stop_value = self.compile_expr(stop_node)
+            stop = self._copy_new(stop_value)
+
+        control = self.temps.cell()
         if step > 0:
             self.backend.slt64(control, current, stop)
         else:
@@ -189,7 +208,8 @@ class PythonToBFStream(PythonToBFQuad):
             self.compile_stmt(stmt)
 
         if step == 1:
-            self.backend._inc64_inplace(current)
+            if not inc64_inplace(self.backend, current):
+                self.backend._inc64_inplace(current)
         else:
             assert step_word is not None and add_tmp is not None
             self.backend.add64(add_tmp, current, step_word)
