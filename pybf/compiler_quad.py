@@ -134,8 +134,6 @@ class PythonToBFQuad(PythonToBFCompact):
         return word
 
     def _packed_input_token(self) -> PackedI64Ref:
-        # Shared temporary outside the two Quad scratch words.  Input calls are
-        # sequential, so the same eight bytes are deliberately reused.
         return PackedI64Ref(self.workspace_base + 160)
 
     def _read_single_int_line(self, dst: Quad64Ref) -> None:
@@ -153,7 +151,7 @@ class PythonToBFQuad(PythonToBFCompact):
             end_line,
             self.workspace_base,
         )
-        self.backend.packed64.to_int64(dst, token)
+        self.backend.copy64(dst, token)
         self._close_line_if_end(line_open, end_line)
         self.backend.drain_to_line_end(line_open, self.workspace_base)
         self.backend.packed64.clear(token)
@@ -194,7 +192,7 @@ class PythonToBFQuad(PythonToBFCompact):
                 end_line,
                 self.workspace_base,
             )
-            self.backend.packed64.to_int64(dst, token)
+            self.backend.copy64(dst, token)
             self.backend.packed64.clear(token)
             self._close_line_if_end(line_open, end_line)
             self.bf.end_while(gate)
@@ -203,12 +201,6 @@ class PythonToBFQuad(PythonToBFCompact):
         self.backend.packed64.clear(token)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
-        # Avoid materializing a temporary fixed-capacity list only to copy all
-        # of its packed slots into the final variable.  For the common contest
-        # form ``A = list(map(int, input().split()))`` the destination is known
-        # statically, so parse the line directly into A.  This preserves the
-        # established truncation/drain semantics while removing a capacity-wide
-        # emitted copy from every such assignment.
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
