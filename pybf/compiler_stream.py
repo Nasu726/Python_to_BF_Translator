@@ -74,6 +74,16 @@ class PythonToBFStream(PythonToBFQuad):
 
         return super().compile_expr(node)
 
+    def compile_stmt(self, node: ast.stmt) -> None:
+        """Delegate normally while attributing nested statement source size."""
+        start = len(self.bf.parts)
+        super().compile_stmt(node)
+        if hasattr(self, "detail_sizes"):
+            emitted = sum(len(part) for part in self.bf.parts[start:])
+            self.detail_sizes.append(
+                (getattr(node, "lineno", 0), type(node).__name__, emitted)
+            )
+
     def _can_fuse_input_string_for(
         self,
         body: list[ast.stmt],
@@ -183,10 +193,8 @@ class PythonToBFStream(PythonToBFQuad):
         if not isinstance(tree, ast.Module):
             raise CompileError("expected ast.Module")
 
-        # Useful both for CI diagnostics and future optimizer decisions.  This
-        # is incremental over newly appended emitter chunks, so collecting the
-        # attribution is O(total emitted source), not O(statements*source).
         self.statement_sizes: list[tuple[int, str, int]] = []
+        self.detail_sizes: list[tuple[int, str, int]] = []
 
         i = 0
         while i < len(tree.body):
