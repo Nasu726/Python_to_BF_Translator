@@ -20,6 +20,32 @@ program.py --(Pythonでコンパイル)--> program.bf --(Brainfuck interpreter)-
 
 `pybf/` はコンパイラ内部実装、`tests/` はテスト、`legacy/` は旧実装です。通常は直接実行しません。
 
+## 入力
+
+通常の競技プログラミング向けPythonと同じ書き方を使えます。
+
+```python
+n = int(input())
+a, b = map(int, input().split())
+A = list(map(int, input().split()))
+```
+
+各 `input()` はBrainfuck実行時にも**1行単位**です。整数化・空白区切りtokenize・listへの格納・次行との境界管理はすべて生成Brainfuck自身が行います。
+
+例えば入力が
+
+```text
+3
+10 20
+4 5 6
+```
+
+なら上のコードでは `n == 3`, `a == 10`, `b == 20`, `A == [4, 5, 6]` になります。
+
+固定ABIのため、`list[int]` は最大64要素です。正常なPython/競プロ入力ではtoken数が代入先と一致することを前提にします。現時点では不正なunpack個数に対するPythonの `ValueError` までは再現せず、不足分は0、余剰分は同じ行内で破棄します。
+
+実例は `examples/input_patterns.py` にあります。
+
 ## Standalone Brainfuck contract
 
 生成物は標準Brainfuckの8命令だけから構成されます。
