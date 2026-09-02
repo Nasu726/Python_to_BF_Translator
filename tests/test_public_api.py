@@ -66,3 +66,15 @@ def test_public_compact_range_increment_preserves_final_loop_target():
     )
     result = run_bf(code, step_limit=150_000_000)
     assert result.output == "6 3\n"
+
+
+def test_public_range_shadow_reduction_is_semantically_correct():
+    code = compile_source(
+        "A = [7, -3, 11]\n"
+        "s = 0\n"
+        "for i in range(3):\n"
+        "    s += A[i]\n"
+        "print(s, i)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "15 2\n"
