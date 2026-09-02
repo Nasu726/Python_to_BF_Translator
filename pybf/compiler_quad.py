@@ -1,8 +1,8 @@
 """Quad-scalar allocation layer for the final compact compiler.
 
-The AST/frontend stack remains unchanged.  Only scalar physical storage and hot
+The AST/frontend stack remains unchanged. Only scalar physical storage and hot
 numeric primitives change: scalar values use ``Quad64Ref`` so add/sub/compare
-can execute one repeated Brainfuck lane body at runtime.  Strings and lists
+can execute one repeated Brainfuck lane body at runtime. Strings and lists
 retain their established fixed representations.
 """
 
@@ -16,6 +16,7 @@ from bfmemory import allocate_live_blocks
 from bfpacked64 import PackedI64Ref
 from bfquad import WORD_CELLS, Quad64Ref
 from bfquadbackend import QuadBinaryStringListIO
+from bfquadinplace import add64_inplace
 from bfstringlists import StringListRef
 from bfstrings import StringRef
 from compiler import CompileError, _infer_int_list_names, _infer_string_list_names
@@ -201,6 +202,26 @@ class PythonToBFQuad(PythonToBFCompact):
         self.backend.packed64.clear(token)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        # The common reduction pattern ``sum += values[i]`` does not need the
+        # generic augmented-assignment result word. Load the list item once and
+        # update the scalar directly with a runtime two-bit-lane ripple adder.
+        if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, ast.Add)
+            and isinstance(node.target, ast.Name)
+            and node.target.id in self.variables
+            and isinstance(node.value, ast.Subscript)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in self.lists
+        ):
+            dst = self._var(node.target)
+            rhs = self.compile_expr(node.value)
+            if not isinstance(rhs, Quad64Ref) or not add64_inplace(
+                self.backend, dst, rhs
+            ):
+                raise RuntimeError("unexpected alias in fused list augmented assignment")
+            return
+
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
