@@ -59,14 +59,75 @@ def test_base4_add64_matches_modulo_u64_boundaries():
         assert _decode(result.memory, dst) == ((a_value + b_value) & MASK64)
 
 
-def test_base4_add_emits_one_lane_body_not_32_static_adders():
+def test_base4_sub64_matches_modulo_u64_boundaries():
+    cases = [
+        (0, 0),
+        (7, 3),
+        (3, 7),
+        (0, 1),
+        (0x8000000000000000, 1),
+        (0x0123456789ABCDEF, 0x1111111111111111),
+    ]
+
+    for a_value, b_value in cases:
+        bf = BFEmitter()
+        core = Base4I64Core(bf)
+        a = Base4I64Ref(20)
+        b = Base4I64Ref(120)
+        dst = Base4I64Ref(220)
+
+        core.set_u64(a, a_value)
+        core.set_u64(b, b_value)
+        core.sub64(dst, a, b)
+        result = run_bf(bf.code(), memory_size=500, step_limit=120_000_000)
+
+        assert _decode(result.memory, a) == (a_value & MASK64)
+        assert _decode(result.memory, b) == (b_value & MASK64)
+        assert _decode(result.memory, dst) == ((a_value - b_value) & MASK64)
+
+
+def test_base4_unsigned_ge_uses_subtraction_final_carry():
+    cases = [
+        (0, 0, 1),
+        (1, 0, 1),
+        (0, 1, 0),
+        (0xFFFFFFFFFFFFFFFF, 0x7FFFFFFFFFFFFFFF, 1),
+        (0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0),
+    ]
+
+    for a_value, b_value, expected in cases:
+        bf = BFEmitter()
+        core = Base4I64Core(bf)
+        a = Base4I64Ref(20)
+        b = Base4I64Ref(120)
+        tmp = Base4I64Ref(220)
+        flag = 310
+
+        core.set_u64(a, a_value)
+        core.set_u64(b, b_value)
+        core.uge64(flag, a, b, tmp)
+        result = run_bf(bf.code(), memory_size=500, step_limit=120_000_000)
+
+        assert result.memory[flag] == expected
+        assert _decode(result.memory, a) == (a_value & MASK64)
+        assert _decode(result.memory, b) == (b_value & MASK64)
+
+
+def test_base4_arithmetic_emits_one_lane_body_not_32_static_adders():
     bf = BFEmitter()
     core = Base4I64Core(bf)
     a = Base4I64Ref(20)
     b = Base4I64Ref(120)
     dst = Base4I64Ref(220)
     core.add64(dst, a, b)
+    add_size = len(bf.code())
 
-    # This is a source-structure guard, not a micro-optimization target.  A
-    # regression back to 32 separately emitted full adders would be far larger.
-    assert len(bf.code()) < 20_000
+    bf2 = BFEmitter()
+    core2 = Base4I64Core(bf2)
+    core2.sub64(dst, a, b)
+    sub_size = len(bf2.code())
+
+    # Source-structure guards, not micro-optimization targets.  Regressing to
+    # 32 separately emitted full adders/subtractors would be far larger.
+    assert add_size < 20_000
+    assert sub_size < 20_000
