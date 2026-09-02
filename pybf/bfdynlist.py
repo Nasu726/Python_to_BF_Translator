@@ -1,10 +1,10 @@
 """Heap-backed dynamic ``list[int]`` primitives.
 
-A list variable stores only a 32-bit object handle.  The root object owns
+A list variable stores only a 32-bit object handle. The root object owns
 length/capacity/head/tail metadata; each current correctness-first element uses
-one heap block containing an eight-byte packed int64 payload.  This is not the
-final high-performance layout, but emitted Brainfuck source size is independent
-of runtime list length and Python assignment naturally aliases the same object.
+one heap block containing an eight-byte packed int64 payload. Emitted Brainfuck
+source size is independent of runtime list length and Python assignment aliases
+the same mutable object.
 
 Root layout conventions:
 - header ``NEXT``: first element-block handle (head)
@@ -13,8 +13,8 @@ Root layout conventions:
 - first four bytes of root ``PAYLOAD``: last element-block handle (tail)
 
 Element blocks use ``NEXT`` as the linked-list pointer and ``PAYLOAD`` as the
-packed int64 value.  A later chunked-block optimization can replace the
-one-element-per-block representation without changing frontend alias semantics.
+packed int64 value. A later chunked-block optimization can replace the
+one-element-per-block representation without changing frontend semantics.
 """
 
 from __future__ import annotations
@@ -62,22 +62,21 @@ class DynamicIntListRootRuntime:
         self.heap.write_capacity(ref, src)
 
     def clear(self, ref: ObjectHandleRef, zero: PackedU32Ref) -> None:
-        """Logical clear. Existing element blocks become unreachable for now."""
+        """Logical clear; old element blocks are unreachable until reuse exists."""
         self.packed.clear(zero)
         self.heap.write_length(ref, zero)
         self.heap.write_capacity(ref, zero)
         self.heap.write_next(ref, ObjectHandleRef(zero.base))
-        empty_tail = PackedI64Ref(zero.base)
-        self.heap.packed64.clear(empty_tail)
-        self.heap.write_payload_i64(ref, empty_tail)
+        # The old tail payload may remain stale: LENGTH==0 makes it unreachable,
+        # and the next append replaces both head and tail before exposing data.
 
 
 class DynamicIntListRuntime(DynamicIntListRootRuntime):
     """Append and indexed access for linked heap-backed integer lists.
 
-    ``workspace_base`` reserves a reusable private region.  No workspace state
-    escapes a public operation, so the same cells can be used on every runtime
-    call, including calls emitted inside Brainfuck loops.
+    ``workspace_base`` reserves a reusable private region. Public operands and
+    destinations must live outside this region. No workspace state escapes an
+    operation, so the same cells can be reused by calls emitted inside BF loops.
     """
 
     WORKSPACE_CELLS = 48
@@ -95,7 +94,6 @@ class DynamicIntListRuntime(DynamicIntListRootRuntime):
         self.packed64 = packed64
         self.workspace_base = workspace_base
 
-    # workspace views -------------------------------------------------
     @property
     def _node(self) -> ObjectHandleRef:
         return ObjectHandleRef(self.workspace_base)
@@ -144,6 +142,10 @@ class DynamicIntListRuntime(DynamicIntListRootRuntime):
     def _loop(self) -> int:
         return self.workspace_base + 39
 
+    @property
+    def _flag_gate(self) -> int:
+        return self.workspace_base + 40
+
     def _clear_workspace(self) -> None:
         for cell in range(self.workspace_base, self.workspace_base + self.WORKSPACE_CELLS):
             self.heap.bf.clear(cell)
@@ -155,76 +157,67 @@ class DynamicIntListRuntime(DynamicIntListRootRuntime):
         """dst = not src for a preserved Boolean src."""
         bf = self.heap.bf
         bf.set_const(dst, 1)
-        gate = self._loop
-        self._copy_flag(src, gate)
-        bf.begin_while(gate)
-        bf.add_const(gate, -1)
+        self._copy_flag(src, self._flag_gate)
+        bf.begin_while(self._flag_gate)
+        bf.add_const(self._flag_gate, -1)
         bf.clear(dst)
-        bf.end_while(gate)
+        bf.end_while(self._flag_gate)
 
-    def append_packed(self, ref: ObjectHandleRef, value: PackedI64Ref) -> None:
-        """Append one packed int64 value while preserving list identity."""
+    def _append_packed_body(self, ref: ObjectHandleRef, value: PackedI64Ref) -> None:
         bf = self.heap.bf
-        self._clear_workspace()
-
-        # Allocate and initialize the new data node before linking it.
         self.heap.allocate(self._node, type_tag=TYPE_LIST_INT_ELEMENT)
         self.heap.write_payload_i64(self._node, value)
 
         self.heap.read_length(self._length, ref)
         self.packed.is_zero(self._is_zero, self._length)
         self.heap.read_payload_i64(self._tail_payload, ref)
-
         self._copy_flag(self._is_zero, self._empty_gate)
         self._set_not_flag(self._nonempty_gate, self._is_zero)
 
-        # Empty list: root head becomes the new node.
         bf.begin_while(self._empty_gate)
         bf.add_const(self._empty_gate, -1)
         self.heap.write_next(ref, self._node)
         bf.end_while(self._empty_gate)
 
-        # Non-empty list: old tail points to the new node.
         bf.begin_while(self._nonempty_gate)
         bf.add_const(self._nonempty_gate, -1)
         self.heap.write_next(self._tail, self._node)
         bf.end_while(self._nonempty_gate)
 
-        # Root tail is always replaced by the new node.  Tail occupies the
-        # first four payload bytes; upper four bytes remain zero.
         self.packed64.clear(self._tail_payload)
         self.handles.copy(self._tail, self._node)
         self.heap.write_payload_i64(ref, self._tail_payload)
 
         self.packed.increment(self._length)
         self.heap.write_length(ref, self._length)
-        # With one block per element, allocated capacity equals length.
         self.heap.write_capacity(ref, self._length)
+
+    def append_packed(self, ref: ObjectHandleRef, value: PackedI64Ref) -> None:
+        """Append an external packed int64 while preserving list identity."""
+        self._clear_workspace()
+        self._append_packed_body(ref, value)
         self._clear_workspace()
 
     def append_int64(self, ref: ObjectHandleRef, value) -> None:
         """Pack a normal compiler int64 and append it."""
+        self._clear_workspace()
         self.packed64.from_int64(self._value_tmp, value)
-        self.append_packed(ref, self._value_tmp)
+        self._append_packed_body(ref, self._value_tmp)
+        self._clear_workspace()
 
-    def get_packed(
+    def _get_packed_body(
         self,
         dst: PackedI64Ref,
         ref: ObjectHandleRef,
         index: PackedU32Ref,
     ) -> None:
-        """Load a non-negative index; missing/out-of-range currently yields 0."""
         bf = self.heap.bf
-        self._clear_workspace()
         self.packed64.clear(dst)
-
         self.heap.read_next(self._current, ref)
         self.packed.copy(self._counter, index)
         self.packed.is_zero(self._is_zero, self._counter)
         self._set_not_flag(self._loop, self._is_zero)
 
-        # Follow NEXT exactly ``index`` times.  Heap lookup itself is a compact
-        # runtime scan, so emitted source does not scale with list capacity.
         bf.begin_while(self._loop)
         bf.add_const(self._loop, -1)
         self.heap.read_next(self._next, self._current)
@@ -235,10 +228,21 @@ class DynamicIntListRuntime(DynamicIntListRootRuntime):
         bf.end_while(self._loop)
 
         self.heap.read_payload_i64(dst, self._current)
+
+    def get_packed(
+        self,
+        dst: PackedI64Ref,
+        ref: ObjectHandleRef,
+        index: PackedU32Ref,
+    ) -> None:
+        """Load a non-negative index; missing/out-of-range currently yields 0."""
+        self._clear_workspace()
+        self._get_packed_body(dst, ref, index)
         self._clear_workspace()
 
     def get_int64(self, dst, ref: ObjectHandleRef, index: PackedU32Ref) -> None:
-        self.get_packed(self._value_tmp, ref, index)
+        self._clear_workspace()
+        self._get_packed_body(self._value_tmp, ref, index)
         self.packed64.to_int64(dst, self._value_tmp)
         self._clear_workspace()
 
