@@ -1,7 +1,7 @@
-"""In-place Quad arithmetic helpers used by the compact compiler path.
+"""In-place and fused Quad arithmetic helpers for the compact compiler path.
 
 These helpers are deliberately separate from the correctness-first Quad core:
-they exploit the compiler's two reserved Quad workspace words to eliminate
+they exploit the compiler's reserved Quad workspace words to eliminate
 otherwise unnecessary result words and full-word copies in hot scalar paths.
 """
 
@@ -12,6 +12,7 @@ from bfquad import (
     STRIDE,
     Quad64Ref,
     _RelativeBuilder,
+    _add_not_preserved,
     _add_preserved,
     _map_total,
 )
@@ -53,8 +54,6 @@ def add64_inplace(backend, dst: Quad64Ref, rhs: Quad64Ref) -> bool:
     inner_carry = t_delta + 2
     carry_out = t_delta + STRIDE
 
-    # The traversal marker is consumed first and is then free restoration
-    # scratch for preserved RHS bits.
     r.clear(marker)
 
     r.clear(total)
@@ -81,13 +80,7 @@ def add64_inplace(backend, dst: Quad64Ref, rhs: Quad64Ref) -> bool:
 
 
 def inc64_inplace(backend, dst: Quad64Ref) -> bool:
-    """Compute ``dst += 1`` with one repeated two-bit-lane body.
-
-    This is substantially smaller than materializing a Quad constant one,
-    performing an out-of-place add, and copying the result back.  The reserved
-    workspace word carries only the ripple carry; no user-visible value lives
-    there.
-    """
+    """Compute ``dst += 1`` with one repeated two-bit-lane body."""
     carry_word = _workspace_word(backend, dst)
     if carry_word is None:
         return False
@@ -126,7 +119,6 @@ def inc64_inplace(backend, dst: Quad64Ref) -> bool:
     bf.move(dst.marker(0))
     bf.emit("[" + r.code() + "]")
     bf.ptr = dst.marker(DIGITS)
-    # Fixed-width overflow is discarded.
     bf.clear(carry_word.marker(DIGITS))
     return True
 
@@ -168,4 +160,86 @@ def neg64_inplace(backend, dst: Quad64Ref) -> bool:
     return inc64_inplace(backend, dst)
 
 
-__all__ = ["add64_inplace", "inc64_inplace", "neg64_inplace"]
+def sub_double64(
+    backend,
+    dst: Quad64Ref,
+    lhs: Quad64Ref,
+    rhs: Quad64Ref,
+) -> bool:
+    """Compute ``dst = lhs - (rhs << 1)`` modulo 2**64 in one lane pass.
+
+    A normal lowering materializes ``rhs << 1`` as a full Quad word and then
+    performs a second full subtraction pass.  Here one workspace lane carries
+    both subtraction carry and rhs's previous high bit, which is exactly the
+    low bit of the shifted rhs in the next lane.
+    """
+    if len({dst.base, lhs.base, rhs.base}) != 3:
+        return False
+
+    state = _workspace_word(backend, dst, lhs, rhs)
+    if state is None:
+        return False
+
+    bf = backend.bf
+    for digit in range(DIGITS):
+        bf.set_const(lhs.marker(digit), 1)
+    bf.clear(lhs.marker(DIGITS))
+
+    # Two's-complement subtraction starts with carry 1.  The shifted rhs has
+    # an implicit zero below bit 0, so prev_rhs_high starts zero.
+    bf.set_const(state.marker(0), 1)
+    bf.clear(state.bit0(0))
+
+    r = _RelativeBuilder()
+    marker = 0
+    a0, a1 = 1, 2
+    b_delta = rhs.base - lhs.base
+    b0, b1 = b_delta + 1, b_delta + 2
+    d_delta = dst.base - lhs.base
+    total = d_delta
+    d0, d1 = d_delta + 1, d_delta + 2
+    t_delta = state.base - lhs.base
+    carry_in = t_delta
+    prev_rhs_high = t_delta + 1
+    helper = t_delta + 2
+    carry_out = t_delta + STRIDE
+    next_rhs_high = t_delta + STRIDE + 1
+
+    r.clear(marker)
+    r.clear(total)
+    r.clear(d0)
+    r.clear(d1)
+    r.clear(carry_out)
+    r.clear(next_rhs_high)
+
+    # Low bit: subtract the previous lane's rhs high bit.
+    r.transfer(carry_in, total)
+    _add_preserved(r, a0, total, marker)
+    _add_not_preserved(r, prev_rhs_high, total, marker, helper)
+    _map_total(r, total, d0, helper)
+
+    # High bit: subtract this lane's rhs low bit.
+    r.clear(total)
+    r.transfer(helper, total)
+    _add_preserved(r, a1, total, marker)
+    _add_not_preserved(r, b0, total, marker, helper)
+    _map_total(r, total, d1, carry_out)
+
+    # rhs bit1 becomes the shifted low bit in the next two-bit lane.
+    _add_preserved(r, b1, next_rhs_high, marker)
+    r.move(STRIDE)
+
+    bf.move(lhs.marker(0))
+    bf.emit("[" + r.code() + "]")
+    bf.ptr = lhs.marker(DIGITS)
+    bf.clear(state.marker(DIGITS))
+    bf.clear(state.bit0(DIGITS))
+    return True
+
+
+__all__ = [
+    "add64_inplace",
+    "inc64_inplace",
+    "neg64_inplace",
+    "sub_double64",
+]
