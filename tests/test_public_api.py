@@ -12,7 +12,7 @@ def test_public_abi_is_fixed():
 
 
 def test_public_compile_source_emits_only_standard_brainfuck():
-    # This test owns only the public-output alphabet contract.  List/input/
+    # This test owns only the public-output alphabet contract. List/input/
     # indexing coverage belongs to their focused tests, including the ABC-style
     # compile-performance fixture which independently checks BF_COMMANDS.
     code = compile_source("x = 1\nprint(x)\n")
@@ -21,7 +21,7 @@ def test_public_compile_source_emits_only_standard_brainfuck():
 
 
 def test_generated_brainfuck_executes_without_python_runtime_services():
-    # Compilation happens above this boundary.  The executor receives only the
+    # Compilation happens above this boundary. The executor receives only the
     # generated BF bytecode plus stdin; it has no access to the Python AST,
     # compiler objects, variable metadata, or helper functions.
     code = compile_source(
@@ -31,3 +31,15 @@ def test_generated_brainfuck_executes_without_python_runtime_services():
     )
     result = run_bf(code, "7\n", step_limit=100_000_000)
     assert result.output == "22\n"
+
+
+def test_public_fused_dynamic_list_plus_equals_is_semantically_correct():
+    code = compile_source(
+        "A = [7, -3, 11]\n"
+        "i = 1\n"
+        "s = 10\n"
+        "s += A[i]\n"
+        "print(s)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "7\n"
