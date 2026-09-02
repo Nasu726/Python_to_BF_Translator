@@ -13,7 +13,7 @@ import ast
 from bfcore import BFEmitter, Binary64Core
 from bflists import IntListRef
 from bfmemory import allocate_live_blocks
-from bfpacked64 import I64_BYTES, PackedI64Ref
+from bfpacked64 import PackedI64Ref
 from bfquad import WORD_CELLS, Quad64Ref
 from bfquadbackend import QuadBinaryStringListIO
 from bfstringlists import StringListRef
@@ -132,13 +132,19 @@ class PythonToBFQuad(PythonToBFCompact):
             self.backend.set_u64(word, value & MASK64)
         return word
 
+    def _packed_input_token(self) -> PackedI64Ref:
+        # Shared temporary outside the two Quad scratch words.  Input calls are
+        # sequential, so the same eight bytes are deliberately reused.
+        return PackedI64Ref(self.workspace_base + 160)
+
     def _read_single_int_line(self, dst: Quad64Ref) -> None:
         """Read int(input()) through the packed decimal parser, then expand."""
         has_token = self.temps.cell()
         end_line = self.temps.cell()
         line_open = self.temps.cell()
-        token = PackedI64Ref(self.workspace_base + 160)
+        token = self._packed_input_token()
 
+        self.backend.packed64.clear(token)
         self.bf.set_const(line_open, 1)
         self.backend.read_packed_s64_line_token(
             token,
@@ -148,6 +154,50 @@ class PythonToBFQuad(PythonToBFCompact):
         )
         self.backend.packed64.to_int64(dst, token)
         self._close_line_if_end(line_open, end_line)
+        self.backend.drain_to_line_end(line_open, self.workspace_base)
+        self.backend.packed64.clear(token)
+
+    def _read_int_unpack_line(self, targets: list[ast.AST], node: ast.AST) -> None:
+        """Read map(int, input().split()) without contiguous-word assumptions."""
+        if not targets or not all(isinstance(t, ast.Name) for t in targets):
+            raise self._error(
+                node,
+                "map(int, input().split()) unpacking requires simple names",
+            )
+
+        line_open = self.temps.cell()
+        has_token = self.temps.cell()
+        end_line = self.temps.cell()
+        token = self._packed_input_token()
+        self.bf.set_const(line_open, 1)
+        self.backend.packed64.clear(token)
+
+        for target in targets:
+            assert isinstance(target, ast.Name)
+            if (
+                target.id in self.strings
+                or target.id in self.lists
+                or target.id in self.string_lists
+            ):
+                raise self._error(target, "integer token requires an integer variable")
+
+            dst = self._var(target)
+            self.backend.set_u64(dst, 0)
+            gate = self.temps.cell()
+            self.backend.copy_cell(line_open, gate, self.backend.s0)
+            self.bf.begin_while(gate)
+            self.bf.add_const(gate, -1)
+            self.backend.read_packed_s64_line_token(
+                token,
+                has_token,
+                end_line,
+                self.workspace_base,
+            )
+            self.backend.packed64.to_int64(dst, token)
+            self.backend.packed64.clear(token)
+            self._close_line_if_end(line_open, end_line)
+            self.bf.end_while(gate)
+
         self.backend.drain_to_line_end(line_open, self.workspace_base)
         self.backend.packed64.clear(token)
 
