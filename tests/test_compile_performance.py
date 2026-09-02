@@ -4,6 +4,7 @@ from pybf import compile_source
 
 
 BF_COMMANDS = set("><+-.,[]")
+ATCODER_SOURCE_LIMIT = 512 * 1024
 
 CONTEST_SUM_SOURCE = '''
 n = int(input())
@@ -30,7 +31,7 @@ def test_contest_list_index_program_compiles_in_practical_time():
 
     assert code
     assert set(code) <= BF_COMMANDS
-    # This is deliberately generous for a hosted CI runner.  A short ABC-style
-    # program taking minutes to compile is a compiler bug, not an optimization
-    # wishlist item.
     assert elapsed < 60.0, f"compile took {elapsed:.2f}s"
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"generated BF is {len(code):,} bytes; limit is {ATCODER_SOURCE_LIMIT:,}"
+    )
