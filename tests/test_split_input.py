@@ -22,6 +22,18 @@ print(a, b, x)
     assert execute(source, 'hello world\n7\n') == 'hello world 7\n'
 
 
+def test_string_split_unpack_does_not_read_through_newline():
+    source = '''
+a, b = input().split()
+x = input()
+print(a, b, x, sep='|')
+'''
+    # CPython would raise ValueError for the malformed unpack.  Until runtime
+    # exceptions exist, missing split values become empty strings, but the next
+    # input() must still begin on the following line.
+    assert execute(source, 'hello\nworld\n') == 'hello||world\n'
+
+
 def test_map_str_split_unpack():
     source = '''
 a, b = map(str, input().split())
