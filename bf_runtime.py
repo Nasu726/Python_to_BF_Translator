@@ -2,7 +2,8 @@
 
 The project historically had an interpreter hard-wired to ``test.bf``.  This
 module keeps execution separate from file I/O so generated programs can be
-compiled and exercised before merging a branch.
+compiled and exercised before merging a branch.  Straight-line runs are
+collapsed into opcodes to avoid paying one Python dispatch per Brainfuck byte.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 
 
 BF_COMMANDS = set("><+-.,[]")
+_LINEAR = set("><+-")
 
 
 @dataclass(frozen=True)
@@ -26,21 +28,37 @@ class BFExecutionError(RuntimeError):
     pass
 
 
-def _jump_table(code: str) -> dict[int, int]:
+def _compile(code: str) -> tuple[list[tuple[str, int]], dict[int, int]]:
+    filtered = "".join(c for c in code if c in BF_COMMANDS)
+    ops: list[tuple[str, int]] = []
     stack: list[int] = []
     jump: dict[int, int] = {}
-    for i, c in enumerate(code):
+    i = 0
+    while i < len(filtered):
+        c = filtered[i]
+        if c in _LINEAR:
+            j = i + 1
+            while j < len(filtered) and filtered[j] == c:
+                j += 1
+            ops.append((c, j - i))
+            i = j
+            continue
+
+        op_index = len(ops)
+        ops.append((c, 1))
         if c == "[":
-            stack.append(i)
+            stack.append(op_index)
         elif c == "]":
             if not stack:
-                raise BFExecutionError(f"unmatched ] at command {i}")
-            j = stack.pop()
-            jump[i] = j
-            jump[j] = i
+                raise BFExecutionError(f"unmatched ] near command {i}")
+            left = stack.pop()
+            jump[left] = op_index
+            jump[op_index] = left
+        i += 1
+
     if stack:
-        raise BFExecutionError(f"unmatched [ at command {stack[-1]}")
-    return jump
+        raise BFExecutionError("unmatched [")
+    return ops, jump
 
 
 def run_bf(
@@ -53,34 +71,34 @@ def run_bf(
     """Execute Brainfuck with wrapping 8-bit cells.
 
     Non-Brainfuck characters are ignored, matching common interpreters.
-    Input past EOF yields a zero byte.  Output is returned as a Python string
-    whose code points are the emitted byte values 0..255.
+    Input past EOF yields a zero byte.  ``steps`` and ``step_limit`` count the
+    original Brainfuck commands executed, even though consecutive linear
+    commands are dispatched as one Python opcode.
     """
 
-    code = "".join(c for c in code if c in BF_COMMANDS)
-    jump = _jump_table(code)
+    ops, jump = _compile(code)
     mem = [0] * memory_size
     ptr = pc = steps = input_pos = 0
     out: list[str] = []
 
-    while pc < len(code):
-        steps += 1
+    while pc < len(ops):
+        c, count = ops[pc]
+        steps += count
         if step_limit is not None and steps > step_limit:
             raise BFExecutionError(f"step limit exceeded ({step_limit:,})")
 
-        c = code[pc]
         if c == ">":
-            ptr += 1
+            ptr += count
             if ptr >= memory_size:
                 raise BFExecutionError("data pointer moved past allocated tape")
         elif c == "<":
-            ptr -= 1
+            ptr -= count
             if ptr < 0:
                 raise BFExecutionError("data pointer moved left of cell 0")
         elif c == "+":
-            mem[ptr] = (mem[ptr] + 1) & 0xFF
+            mem[ptr] = (mem[ptr] + count) & 0xFF
         elif c == "-":
-            mem[ptr] = (mem[ptr] - 1) & 0xFF
+            mem[ptr] = (mem[ptr] - count) & 0xFF
         elif c == ".":
             out.append(chr(mem[ptr]))
         elif c == ",":
