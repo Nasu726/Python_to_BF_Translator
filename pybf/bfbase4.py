@@ -104,6 +104,28 @@ def _add_preserved(
     r.emit("]")
 
 
+def _add_double_preserved(
+    r: _RelativeBuilder,
+    src: int,
+    total: int,
+    tmp: int,
+) -> None:
+    """``total += 2*src`` for one radix-4 digit, preserving ``src``."""
+    r.move(src)
+    r.emit("[")
+    r.add(src, -1)
+    r.add(total, 2)
+    r.add(tmp, 1)
+    r.move(src)
+    r.emit("]")
+    r.move(tmp)
+    r.emit("[")
+    r.add(tmp, -1)
+    r.add(src, 1)
+    r.move(tmp)
+    r.emit("]")
+
+
 def _add_complement_preserved(
     r: _RelativeBuilder,
     src: int,
@@ -161,7 +183,7 @@ def _map_total_base4(
 
 
 class Base4I64Core:
-    """Source-compact copy/add/sub/compare primitives over radix-4 int64 lanes."""
+    """Source-compact arithmetic primitives over radix-4 int64 lanes."""
 
     def __init__(self, bf: BFEmitter) -> None:
         self.bf = bf
@@ -247,6 +269,109 @@ class Base4I64Core:
         # Overflow beyond digit 31 is modulo-2**64 and therefore discarded.
         bf.clear(dst.marker(DIGITS))
         bf.clear(dst.value(DIGITS))
+
+    def double64(self, dst: Base4I64Ref, src: Base4I64Ref) -> None:
+        """``dst = 2*src (mod 2**64)`` with one fixed 32-lane pass."""
+        if dst.base == src.base:
+            raise ValueError("double64 requires a distinct destination")
+
+        bf = self.bf
+        d_delta = dst.base - src.base
+        for digit in range(DIGITS):
+            bf.set_const(src.marker(digit), 1)
+        bf.clear(src.marker(DIGITS))
+        bf.clear(dst.marker(0))
+
+        r = _RelativeBuilder()
+        marker = 0
+        src_value = 1
+        carry_in = d_delta
+        out = d_delta + 1
+        carry_out = d_delta + STRIDE
+
+        r.clear(marker)
+        r.clear(out)
+        r.clear(carry_out)
+        r.transfer(carry_in, marker)
+        _add_double_preserved(r, src_value, marker, out)
+        _map_total_base4(r, marker, out, carry_out)
+        r.move(STRIDE)
+
+        bf.move(src.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = src.marker(DIGITS)
+        bf.clear(dst.marker(DIGITS))
+        bf.clear(dst.value(DIGITS))
+
+    def _shifted_add_from_double(
+        self,
+        dst: Base4I64Ref,
+        doubled: Base4I64Ref,
+    ) -> None:
+        """Set ``dst = doubled + doubled*4`` modulo 2**64.
+
+        ``doubled`` is preserved.  Lane zero is copied directly; lanes 1..31
+        add the current and previous radix-4 digits with a ripple carry.  This
+        is the second half of ``x*10 = (2*x) + 4*(2*x)``.
+        """
+        if dst.base == doubled.base:
+            raise ValueError("shifted add requires a distinct destination")
+
+        bf = self.bf
+        delta = dst.base - doubled.base
+
+        # Low lane: shifted operand contributes zero, so no carry is possible.
+        bf.clear(dst.marker(0))
+        bf.clear(dst.value(0))
+        bf.clear(doubled.marker(0))
+        bf.move(doubled.value(0))
+        bf.emit("[")
+        bf.add_const(doubled.value(0), -1)
+        bf.add_const(dst.value(0), 1)
+        bf.add_const(doubled.marker(0), 1)
+        bf.move(doubled.value(0))
+        bf.emit("]")
+        bf.move(doubled.marker(0))
+        bf.emit("[")
+        bf.add_const(doubled.marker(0), -1)
+        bf.add_const(doubled.value(0), 1)
+        bf.move(doubled.marker(0))
+        bf.emit("]")
+        bf.clear(dst.marker(1))
+
+        for digit in range(1, DIGITS):
+            bf.set_const(doubled.marker(digit), 1)
+        bf.clear(doubled.marker(DIGITS))
+
+        r = _RelativeBuilder()
+        marker = 0
+        current = 1
+        previous = -STRIDE + 1
+        carry_in = delta
+        out = delta + 1
+        carry_out = delta + STRIDE
+
+        r.clear(marker)
+        r.clear(out)
+        r.clear(carry_out)
+        r.transfer(carry_in, marker)
+        _add_preserved(r, current, marker, out)
+        _add_preserved(r, previous, marker, out)
+        _map_total_base4(r, marker, out, carry_out)
+        r.move(STRIDE)
+
+        bf.move(doubled.marker(1))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = doubled.marker(DIGITS)
+        bf.clear(dst.marker(DIGITS))
+        bf.clear(dst.value(DIGITS))
+
+    def mul10_inplace(self, dst: Base4I64Ref, scratch: Base4I64Ref) -> None:
+        """Multiply ``dst`` by ten modulo 2**64 using two fixed lane passes."""
+        if dst.base == scratch.base:
+            raise ValueError("mul10_inplace requires a distinct scratch word")
+        self.double64(scratch, dst)
+        self._shifted_add_from_double(dst, scratch)
 
     def _sub64_with_carry(
         self,
