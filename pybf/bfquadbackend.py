@@ -67,7 +67,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             for cell in (byte, quotient, parity, gate):
                 bf.clear(cell)
 
-            # This is the only long-distance transfer for the packed byte.
             source = src.byte(byte_index)
             bf.begin_while(source)
             bf.add_const(source, -1)
@@ -78,7 +77,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.clear(quotient)
                 bf.clear(parity)
 
-                # quotient, parity = divmod(byte, 2), consuming byte.
                 bf.begin_while(byte)
                 bf.add_const(byte, -1)
                 bf.set_const(gate, 1)
@@ -107,9 +105,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.add_const(byte, 1)
                 bf.end_while(quotient)
 
-        # Eight divisions consume every byte completely.  The local markers
-        # are therefore already zero and global scratch was never touched.
-
     def copy64(self, dst, src) -> None:
         if self._all_quad(dst, src):
             if not self._same(dst, src):
@@ -125,6 +120,44 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             self.quad.set_u64(dst, value)
             return
         super().set_u64(dst, value)
+
+    def shl1_inplace(self, word) -> None:
+        if isinstance(word, Quad64Ref):
+            self.quad.shl1_inplace(word)
+            return
+        super().shl1_inplace(word)
+
+    def shr1_inplace(self, word) -> None:
+        if isinstance(word, Quad64Ref):
+            self.quad.shr1_inplace(word)
+            return
+        super().shr1_inplace(word)
+
+    def shl_const(self, dst, src, amount: int) -> None:
+        if self._all_quad(dst, src):
+            amount = max(0, amount)
+            if amount >= DIGITS * 2:
+                self.quad.set_u64(dst, 0)
+                return
+            if not self._same(dst, src):
+                self.quad.copy64(dst, src)
+            for _ in range(amount):
+                self.quad.shl1_inplace(dst)
+            return
+        super().shl_const(dst, src, amount)
+
+    def shr_const(self, dst, src, amount: int) -> None:
+        if self._all_quad(dst, src):
+            amount = max(0, amount)
+            if amount >= DIGITS * 2:
+                self.quad.set_u64(dst, 0)
+                return
+            if not self._same(dst, src):
+                self.quad.copy64(dst, src)
+            for _ in range(amount):
+                self.quad.shr1_inplace(dst)
+            return
+        super().shr_const(dst, src, amount)
 
     def add64(self, dst, a, b) -> None:
         if self._all_quad(dst, a, b):
