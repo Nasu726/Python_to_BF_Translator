@@ -20,6 +20,7 @@ jobs:
           - suite: arithmetic
             files: >-
               tests/test_bfarith.py
+              tests/test_bfbase4.py
               tests/test_bfcompare.py
               tests/test_bfcore.py
               tests/test_bfio.py
