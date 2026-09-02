@@ -20,32 +20,6 @@ program.py --(Pythonでコンパイル)--> program.bf --(Brainfuck interpreter)-
 
 `pybf/` はコンパイラ内部実装、`tests/` はテスト、`legacy/` は旧実装です。通常は直接実行しません。
 
-## 入力
-
-通常の競技プログラミング向けPythonと同じ書き方を使えます。
-
-```python
-n = int(input())
-a, b = map(int, input().split())
-A = list(map(int, input().split()))
-```
-
-各 `input()` はBrainfuck実行時にも**1行単位**です。整数化・空白区切りtokenize・listへの格納・次行との境界管理はすべて生成Brainfuck自身が行います。
-
-例えば入力が
-
-```text
-3
-10 20
-4 5 6
-```
-
-なら上のコードでは `n == 3`, `a == 10`, `b == 20`, `A == [4, 5, 6]` になります。
-
-固定ABIのため、`list[int]` は最大64要素です。正常なPython/競プロ入力ではtoken数が代入先と一致することを前提にします。現時点では不正なunpack個数に対するPythonの `ValueError` までは再現せず、不足分は0、余剰分は同じ行内で破棄します。
-
-実例は `examples/input_patterns.py` にあります。
-
 ## Standalone Brainfuck contract
 
 生成物は標準Brainfuckの8命令だけから構成されます。
@@ -61,6 +35,7 @@ Python側が実行時に計算・管理する仕組みはありません。Pytho
 - `while` / `for` / `break` / `continue` → Brainfuck loopと明示的control flag
 - `print(int)` → Brainfuck上のdecimal conversion
 - `input()` / `int(input())` → `,` とBrainfuck上のparser
+- `input().split()` → Brainfuck上の空白tokenizerとnewline管理
 - string/list → tape上の固定レイアウト
 - listの動的index → Brainfuck上のindex比較・走査
 - 一時変数・変数配置 → コンパイル時にtape addressへ割当
@@ -84,12 +59,33 @@ CLIオプションで型サイズは変更できません。型表現はABIと�
 - `bool`: 64-bit scalar上の0/1
 - `str`: 最大255 byteの固定長領域（NUL終端）
 - `list[int]`: 最大64要素、各要素signed 64-bit
+- `list[str]`: 最大64要素、各要素は固定長byte string
 
 Python本来の任意精度int、動的長string/list、完全なobject alias semanticsとは異なります。
 
+## 入力
+
+通常の競技プログラミング向けPythonと同じ書き方を使えます。
+
+```python
+n = int(input())
+a, b = map(int, input().split())
+name, country = input().split()
+A = list(map(int, input().split()))
+words = input().split()
+```
+
+各 `input()` はBrainfuck実行時にも **1行単位** です。整数化・空白tokenize・string/listへの格納・newline管理はすべて生成Brainfuck自身が行います。
+
+`int(input())` は最初の整数tokenを読み、同じ物理行に残りがあってもその行を最後まで消費してから次の `input()` へ進みます。`input().split()` 系もnewlineを越えて次行のtokenを盗みません。
+
+固定長ABIのため、list容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。現時点ではPythonの`ValueError`等の例外再現までは行いません。固定数unpackで値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する固定runtime仕様です。
+
+整数入力の実例は `examples/input_patterns.py` にあります。
+
 ## 主な対応構文
 
-- 整数・bool・文字列・整数listリテラル
+- 整数・bool・文字列・`list[int]`・`list[str]`リテラル
 - `+ - * // % **`
 - `& | ^ ~ << >>`
 - `== != < <= > >=`
@@ -98,8 +94,12 @@ Python本来の任意精度int、動的長string/list、完全なobject alias se
 - `break`, `continue`, loop `else`
 - `input()`, `int(input())`
 - `a, b = map(int, input().split())`
+- `a, b = input().split()`
+- `a, b = map(str, input().split())`
 - `A = list(map(int, input().split()))`
-- `A[i]`, `A[i] = x`, `A.append(x)`, `len(A)`, `for x in A`
+- `S = input().split()` / `list(input().split())`
+- `S = list(map(str, input().split()))`
+- int/string listのindex、代入、`append`, `len`, iteration
 - `print(...)`, `sep=`, `end=`
 - `abs`, `bool`, `min`, `max`
 

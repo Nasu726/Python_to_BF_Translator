@@ -1,7 +1,7 @@
-"""Whitespace-delimited scalar input on top of the typed BF backend."""
+"""Whitespace-delimited scalar and string input on the typed BF backend."""
 
 from bfcore import Int64Ref, WORD_BITS
-from bfstrings import BinaryStringIO
+from bfstrings import BinaryStringIO, StringRef
 
 
 class BinaryTokenIO(BinaryStringIO):
@@ -18,7 +18,7 @@ class BinaryTokenIO(BinaryStringIO):
             bf.end_while(tmp)
 
     def _is_hspace(self, result: int, ch: int, tmp: int) -> None:
-        """Space accepted inside ``str.split()`` before the line terminator."""
+        """Whitespace accepted by ``str.split()`` before line termination."""
         bf = self.bf
         bf.clear(result)
         for value in (ord(' '), ord('\t'), ord('\r')):
@@ -248,4 +248,124 @@ class BinaryTokenIO(BinaryStringIO):
         self._neg64_inplace(dst)
         bf.end_while(sign)
         bf.end_while(gate)
+        self._clear_scratch()
+
+    def read_string_line_token(
+        self,
+        dst: StringRef,
+        has_token: int,
+        end_line: int,
+        workspace_base: int,
+    ) -> None:
+        """Read one ``str.split()`` token without crossing a newline.
+
+        The token is stored directly into a fixed NUL-terminated byte buffer.
+        Overlong tokens are truncated, but their remaining bytes are consumed
+        through the delimiter so subsequent reads stay aligned.
+        """
+        bf = self.bf
+        ch = workspace_base + WORD_BITS * 2
+        skip = ch + 1
+        tmp = ch + 2
+        active = ch + 3
+        delimiter = ch + 4
+        gate = ch + 5
+        line_tmp = ch + 6
+        slot_gate = ch + 7
+
+        self.clear_string(dst)
+        for c in (has_token, end_line, ch, skip, tmp, active, delimiter, gate, line_tmp, slot_gate):
+            bf.clear(c)
+
+        bf.move(ch)
+        bf.emit(',')
+        self._is_hspace(skip, ch, tmp)
+        bf.begin_while(skip)
+        bf.add_const(skip, -1)
+        bf.move(ch)
+        bf.emit(',')
+        self._is_hspace(skip, ch, tmp)
+        bf.end_while(skip)
+
+        self._is_line_end(end_line, ch, tmp)
+        bf.set_const(has_token, 1)
+        self.copy_cell(end_line, gate, self.s0)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        bf.clear(has_token)
+        bf.end_while(gate)
+
+        self.copy_cell(has_token, gate, self.s0)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        bf.set_const(active, 1)
+
+        for i in range(dst.capacity):
+            self.copy_cell(active, slot_gate, self.s0)
+            bf.begin_while(slot_gate)
+            bf.add_const(slot_gate, -1)
+            self.copy_cell(ch, dst.char(i), self.s0)
+            bf.move(ch)
+            bf.emit(',')
+
+            self._is_line_end(line_tmp, ch, tmp)
+            bf.begin_while(line_tmp)
+            bf.add_const(line_tmp, -1)
+            bf.set_const(end_line, 1)
+            bf.end_while(line_tmp)
+
+            self._is_hspace(delimiter, ch, tmp)
+            self._is_line_end(line_tmp, ch, tmp)
+            bf.begin_while(line_tmp)
+            bf.add_const(line_tmp, -1)
+            bf.set_const(delimiter, 1)
+            bf.end_while(line_tmp)
+            bf.begin_while(delimiter)
+            bf.add_const(delimiter, -1)
+            bf.clear(active)
+            bf.end_while(delimiter)
+            bf.end_while(slot_gate)
+
+        # Buffer filled before the delimiter: consume the rest of the token.
+        bf.begin_while(active)
+        bf.move(ch)
+        bf.emit(',')
+        self._is_line_end(line_tmp, ch, tmp)
+        bf.begin_while(line_tmp)
+        bf.add_const(line_tmp, -1)
+        bf.set_const(end_line, 1)
+        bf.end_while(line_tmp)
+        self._is_hspace(delimiter, ch, tmp)
+        self._is_line_end(line_tmp, ch, tmp)
+        bf.begin_while(line_tmp)
+        bf.add_const(line_tmp, -1)
+        bf.set_const(delimiter, 1)
+        bf.end_while(line_tmp)
+        bf.begin_while(delimiter)
+        bf.add_const(delimiter, -1)
+        bf.clear(active)
+        bf.end_while(delimiter)
+        bf.end_while(active)
+
+        bf.end_while(gate)
+        bf.clear(dst.terminator)
+        self._clear_scratch()
+
+    def drain_to_line_end(self, active: int, workspace_base: int) -> None:
+        """Consume bytes through newline/EOF while ``active`` remains true."""
+        bf = self.bf
+        ch = workspace_base + WORD_BITS * 2
+        is_end = ch + 1
+        tmp = ch + 2
+        bf.clear(is_end)
+        bf.clear(tmp)
+        bf.begin_while(active)
+        bf.move(ch)
+        bf.emit(',')
+        self._is_line_end(is_end, ch, tmp)
+        bf.begin_while(is_end)
+        bf.add_const(is_end, -1)
+        bf.clear(active)
+        bf.end_while(is_end)
+        bf.end_while(active)
         self._clear_scratch()
