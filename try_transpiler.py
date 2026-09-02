@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from bf_runtime import BFExecutionError, run_bf
+from transpiler import compile_source as compile_current
 from transpiler_v2 import CompileError, compile_source as compile_v2
 from transpiler_v3 import compile_source as compile_v3
 
@@ -17,7 +18,12 @@ def main() -> None:
     )
     parser.add_argument("source", type=Path, help="Python source file")
     parser.add_argument("-o", "--output", type=Path, help="write generated Brainfuck here")
-    parser.add_argument("--backend", choices=("v2", "v3"), default="v3")
+    parser.add_argument(
+        "--backend",
+        choices=("current", "v3", "v2"),
+        default="current",
+        help="compiler frontend; current is recommended",
+    )
     parser.add_argument("--string-capacity", type=int, default=128)
     parser.add_argument("--run", action="store_true", help="execute generated Brainfuck")
     parser.add_argument("--input-file", type=Path, help="stdin text for the Brainfuck program")
@@ -30,12 +36,10 @@ def main() -> None:
     try:
         if args.backend == "v2":
             code = compile_v2(source, str(args.source))
+        elif args.backend == "v3":
+            code = compile_v3(source, str(args.source), string_capacity=args.string_capacity)
         else:
-            code = compile_v3(
-                source,
-                str(args.source),
-                string_capacity=args.string_capacity,
-            )
+            code = compile_current(source, str(args.source), string_capacity=args.string_capacity)
     except (CompileError, SyntaxError, ValueError) as exc:
         print(f"compile error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
@@ -55,7 +59,8 @@ def main() -> None:
     if args.input_file:
         input_data = args.input_file.read_text(encoding="utf-8")
     elif args.input_text is not None:
-        input_data = args.input_text.encode("utf-8").decode("unicode_escape")
+        # Convenient for shell use: --input-text '7 -2\n'
+        input_data = bytes(args.input_text, "utf-8").decode("unicode_escape")
     else:
         input_data = sys.stdin.read() if not sys.stdin.isatty() else ""
 
