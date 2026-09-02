@@ -42,11 +42,9 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         """Expand eight packed bytes into Quad bits with compact emitted source.
 
         ``src`` is traversal scratch when this fast path is used, so consuming
-        it is intentional.  The legacy converter preserves each source byte and
-        reconstructs eight Boolean bits through many long scratch round-trips.
-        Here each byte crosses the long tape distance exactly once into the hot
-        four-cell scratch area, then repeated runtime division-by-two extracts
-        its eight little-endian bits locally.
+        it is intentional.  Each byte crosses the long tape distance exactly
+        once into the hot four-cell scratch area; repeated runtime divmod-by-two
+        then extracts its eight little-endian Boolean bits locally.
         """
         bf = self.bf
         quotient = self.s0
@@ -66,7 +64,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.clear(quotient)
                 bf.clear(parity)
 
-                # quotient, parity = divmod(byte, 2), consuming byte.
                 bf.begin_while(byte)
                 bf.add_const(byte, -1)
                 bf.set_const(gate, 1)
@@ -90,7 +87,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
                 bf.add_const(out, 1)
                 bf.end_while(parity)
 
-                # Feed the quotient into the next bit extraction.
                 bf.begin_while(quotient)
                 bf.add_const(quotient, -1)
                 bf.add_const(byte, 1)
@@ -258,6 +254,51 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             self.copy64(word, tmp)
             return
         super()._neg64_inplace(word)
+
+    def print_u64(self, src, workspace_base: int) -> None:
+        if not isinstance(src, Quad64Ref):
+            return super().print_u64(src, workspace_base)
+
+        # Keep the mutable magnitude in Quad form.  The inherited double-dabble
+        # conversion only depends on Int64Ref.bit(i), so it works unchanged on
+        # the strided representation and avoids a full Quad->legacy-word copy.
+        magnitude = self._qtmp(0)
+        bcd_base = workspace_base + WORD_CELLS
+        counter = bcd_base + 80
+        ge5_flag = counter + 1
+        started = ge5_flag + 1
+        ascii_cell = started + 1
+        control = ascii_cell + 1
+
+        self.copy64(magnitude, src)
+        self._bcd_from_magnitude(magnitude, bcd_base, counter, ge5_flag)
+        self._print_bcd_digits(bcd_base, started, ascii_cell, control)
+
+    def print_s64(self, src, workspace_base: int) -> None:
+        if not isinstance(src, Quad64Ref):
+            return super().print_s64(src, workspace_base)
+
+        magnitude = self._qtmp(0)
+        bcd_base = workspace_base + WORD_CELLS
+        counter = bcd_base + 80
+        ge5_flag = counter + 1
+        sign = ge5_flag + 1
+        started = sign + 1
+        ascii_cell = started + 1
+        control = ascii_cell + 1
+
+        self.copy64(magnitude, src)
+        self.copy_cell(src.bit(63), sign, self.s0)
+        self.bf.begin_while(sign)
+        self.bf.add_const(sign, -1)
+        self.bf.set_const(ascii_cell, ord("-"))
+        self.bf.move(ascii_cell)
+        self.bf.emit(".")
+        self._neg64_inplace(magnitude)
+        self.bf.end_while(sign)
+
+        self._bcd_from_magnitude(magnitude, bcd_base, counter, ge5_flag)
+        self._print_bcd_digits(bcd_base, started, ascii_cell, control)
 
 
 __all__ = ["QuadBinaryStringListIO"]
