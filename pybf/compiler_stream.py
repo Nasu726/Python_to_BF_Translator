@@ -1,23 +1,4 @@
-"""Streaming fusion for dead materialized input strings.
-
-A very common contest pattern is::
-
-    s = input()
-    for c in s:
-        ...
-
-If ``s`` is never observed as a value, materializing a 255-byte buffer and then
-emitting a dynamic-index traversal is pure overhead.  This layer fuses the two
-statements into one line-scoped input loop while preserving Python-visible I/O
-ordering.  The optimization is deliberately conservative and is disabled when
-its proof conditions are not met.
-
-This final layer also performs a few source-size critical scalar strength
-reductions.  In particular, multiplication by a positive power of two is
-lowered as a fixed left shift rather than instantiating the general 64-step
-runtime multiplier.  This is an ordinary modulo-2**64 identity and preserves
-the compiler's fixed-width integer semantics.
-"""
+"""Streaming and source-size lowering for the final compiler path."""
 
 from __future__ import annotations
 
@@ -76,11 +57,6 @@ class PythonToBFStream(PythonToBFQuad):
     """Quad-scalar compact compiler plus proven-safe contest lowering."""
 
     def compile_expr(self, node: ast.AST):
-        # Strength-reduce x * 2**k and 2**k * x.  The public ABI defines int
-        # arithmetic modulo 2**64, so a fixed left shift is exactly equivalent
-        # to multiplication by a positive power of two.  Avoiding mul64 here is
-        # source-size critical: the generic runtime multiplier contains an
-        # adder plus two mutable 64-bit shifts in its emitted loop body.
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
             left_shift = _positive_power_of_two_constant(node.left)
             right_shift = _positive_power_of_two_constant(node.right)
@@ -117,10 +93,8 @@ class PythonToBFStream(PythonToBFQuad):
             and loop.target.id != source
         ):
             return False
-
         if _contains_input_call(loop.body) or _contains_input_call(loop.orelse):
             return False
-
         for stmt in loop.body + loop.orelse:
             if _mentions_name(stmt, source):
                 return False
@@ -199,13 +173,26 @@ class PythonToBFStream(PythonToBFQuad):
 
         self._compile_guarded_else(node.orelse, broke)
 
+    def _record_size(self, node: ast.AST, part_start: int) -> None:
+        emitted = sum(len(part) for part in self.bf.parts[part_start:])
+        self.statement_sizes.append(
+            (getattr(node, "lineno", 0), type(node).__name__, emitted)
+        )
+
     def compile_module(self, tree: ast.AST) -> str:
         if not isinstance(tree, ast.Module):
             raise CompileError("expected ast.Module")
 
+        # Useful both for CI diagnostics and future optimizer decisions.  This
+        # is incremental over newly appended emitter chunks, so collecting the
+        # attribution is O(total emitted source), not O(statements*source).
+        self.statement_sizes: list[tuple[int, str, int]] = []
+
         i = 0
         while i < len(tree.body):
+            part_start = len(self.bf.parts)
             if self._can_fuse_input_string_for(tree.body, i):
+                first = tree.body[i]
                 loop = tree.body[i + 1]
                 assert isinstance(loop, ast.For)
                 mark = self.temps.mark()
@@ -213,9 +200,12 @@ class PythonToBFStream(PythonToBFQuad):
                     self._compile_streaming_input_string_for(loop)
                 finally:
                     self.temps.rewind(mark)
+                self._record_size(first, part_start)
                 i += 2
                 continue
-            self.compile_stmt(tree.body[i])
+            stmt = tree.body[i]
+            self.compile_stmt(stmt)
+            self._record_size(stmt, part_start)
             i += 1
         return clean_bf(self.bf.code())
 
