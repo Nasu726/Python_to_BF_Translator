@@ -11,6 +11,12 @@ emitting a dynamic-index traversal is pure overhead.  This layer fuses the two
 statements into one line-scoped input loop while preserving Python-visible I/O
 ordering.  The optimization is deliberately conservative and is disabled when
 its proof conditions are not met.
+
+This final layer also performs a few source-size critical scalar strength
+reductions.  In particular, multiplication by a positive power of two is
+lowered as a fixed left shift rather than instantiating the general 64-step
+runtime multiplier.  This is an ordinary modulo-2**64 identity and preserves
+the compiler's fixed-width integer semantics.
 """
 
 from __future__ import annotations
@@ -56,8 +62,40 @@ def _contains_input_call(nodes: list[ast.stmt]) -> bool:
     return False
 
 
+def _positive_power_of_two_constant(node: ast.AST) -> int | None:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, int):
+        return None
+    value = node.value
+    if value <= 0 or value & (value - 1):
+        return None
+    return value.bit_length() - 1
+
+
 class PythonToBFStream(PythonToBFCompact):
-    """Compact compiler plus proven-safe input/string-loop fusion."""
+    """Compact compiler plus proven-safe contest-oriented lowering."""
+
+    def compile_expr(self, node: ast.AST):
+        # Strength-reduce x * 2**k and 2**k * x.  The public ABI defines int
+        # arithmetic modulo 2**64, so a fixed left shift is exactly equivalent
+        # to multiplication by a positive power of two.  Avoiding mul64 here is
+        # source-size critical: the generic runtime multiplier contains an
+        # adder plus two mutable 64-bit shifts in its emitted loop body.
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            left_shift = _positive_power_of_two_constant(node.left)
+            right_shift = _positive_power_of_two_constant(node.right)
+
+            if left_shift is not None:
+                value = self.compile_expr(node.right)
+                result = self._new_word()
+                self.backend.shl_const(result, value, left_shift)
+                return result
+            if right_shift is not None:
+                value = self.compile_expr(node.left)
+                result = self._new_word()
+                self.backend.shl_const(result, value, right_shift)
+                return result
+
+        return super().compile_expr(node)
 
     def _can_fuse_input_string_for(
         self,
