@@ -114,7 +114,30 @@ def test_packed_to_quad_destructive_conversion_boundaries():
     code = optimize_bf(bf.code())
     result = run_bf(code, memory_size=1000, step_limit=300_000_000)
     assert [_s64(result.memory, ref) for ref in quad] == values
-    # The fast path is deliberately destructive because list traversal results
-    # are dead immediately after expansion.
     for src in packed:
         assert all(result.memory[src.byte(i)] == 0 for i in range(8))
+
+
+def test_quad_truthiness_scans_all_bits():
+    bf = BFEmitter()
+    backend = QuadBinaryStringListIO(bf, scratch_base=700)
+    backend.set_quad_workspace(400)
+    zero = Quad64Ref(0)
+    low = Quad64Ref(120)
+    high = Quad64Ref(240)
+    out_zero = 350
+    out_low = 351
+    out_high = 352
+
+    backend.set_u64(zero, 0)
+    backend.set_u64(low, 1)
+    backend.set_u64(high, 1 << 63)
+    backend._is_nonzero64(out_zero, zero)
+    backend._is_nonzero64(out_low, low)
+    backend._is_nonzero64(out_high, high)
+
+    code = optimize_bf(bf.code())
+    result = run_bf(code, memory_size=1000, step_limit=300_000_000)
+    assert result.memory[out_zero] == 0
+    assert result.memory[out_low] == 1
+    assert result.memory[out_high] == 1
