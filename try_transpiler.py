@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from bf_runtime import BFExecutionError, run_bf
-from transpiler import compile_source as compile_current
+from transpiler_full import compile_source as compile_current
 from transpiler_v2 import CompileError, compile_source as compile_v2
 from transpiler_v3 import compile_source as compile_v3
 
@@ -65,7 +65,6 @@ def main() -> None:
     if args.input_file:
         input_data = args.input_file.read_text(encoding="utf-8")
     elif args.input_text is not None:
-        # Convenient for shell use: --input-text '7 -2\n'
         input_data = bytes(args.input_text, "utf-8").decode("unicode_escape")
     else:
         input_data = sys.stdin.read() if not sys.stdin.isatty() else ""
