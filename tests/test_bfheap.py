@@ -2,6 +2,7 @@ from bf_runtime import run_bf
 from bfcore import BFEmitter, Binary64Core, Int64Ref
 from bfheap import BLOCK_STRIDE, HANDLE, MARKER, TYPE, HeapBlockArena
 from bfobjects import ObjectHandleCore, ObjectHandleRef
+from bfopt import optimize_bf
 from bfpacked64 import PackedI64Core, PackedI64Ref
 
 
@@ -11,6 +12,12 @@ def _u32(memory: list[int], base: int) -> int:
 
 def _u64_bytes(memory: list[int], ref: PackedI64Ref) -> int:
     return sum(memory[ref.byte(i)] << (8 * i) for i in range(8))
+
+
+def _run(bf: BFEmitter, *, memory_size: int, step_limit: int):
+    # Public compilation always runs the source optimizer. Heap E2E tests use
+    # the same execution boundary instead of benchmarking raw, redundant BF.
+    return run_bf(optimize_bf(bf.code()), memory_size=memory_size, step_limit=step_limit)
 
 
 def test_heap_allocates_blocks_at_runtime_and_returns_to_anchor():
@@ -33,7 +40,7 @@ def test_heap_allocates_blocks_at_runtime_and_returns_to_anchor():
     arena.allocate(last_handle, type_tag=7)
     bf.end_while(loop_count)
 
-    result = run_bf(bf.code(), memory_size=512, step_limit=20_000_000)
+    result = _run(bf, memory_size=512, step_limit=20_000_000)
     assert _u32(result.memory, next_handle.base) == 4
     assert _u32(result.memory, last_handle.base) == 3
 
@@ -64,7 +71,7 @@ def test_heap_type_tag_is_stored_in_each_object_header():
     arena.allocate(a, type_tag=1)
     arena.allocate(b, type_tag=2)
 
-    result = run_bf(bf.code(), memory_size=256, step_limit=10_000_000)
+    result = _run(bf, memory_size=256, step_limit=10_000_000)
     first = left_sentinel + BLOCK_STRIDE
     second = first + BLOCK_STRIDE
     assert result.memory[first + TYPE] == 1
@@ -102,7 +109,7 @@ def test_heap_resolves_type_through_runtime_handle_and_alias():
     arena.read_type(type_alias, alias)
     arena.read_type(type_missing, missing)
 
-    result = run_bf(bf.code(), memory_size=512, step_limit=50_000_000)
+    result = _run(bf, memory_size=512, step_limit=50_000_000)
     assert result.memory[type_a] == 11
     assert result.memory[type_alias] == 22
     assert result.memory[type_missing] == 0
@@ -144,7 +151,7 @@ def test_heap_header_u32_fields_round_trip_through_alias_handle():
     arena.read_capacity(capacity_out, alias)
     arena.read_next(next_out, obj)
 
-    result = run_bf(bf.code(), memory_size=512, step_limit=100_000_000)
+    result = _run(bf, memory_size=512, step_limit=100_000_000)
     assert _u32(result.memory, length_out.base) == 123_456
     assert _u32(result.memory, capacity_out.base) == 200_000
     assert _u32(result.memory, next_out.base) == 0x00ABCDEF
@@ -179,7 +186,7 @@ def test_heap_packed_i64_payload_round_trips_through_runtime_lookup():
     arena.write_payload_i64(alias, packed)
     arena.read_payload_i64(restored_packed, obj)
 
-    result = run_bf(bf.code(), memory_size=512, step_limit=150_000_000)
+    result = _run(bf, memory_size=512, step_limit=150_000_000)
     assert _u64_bytes(result.memory, packed) == 0xFEDCBA9876543210
     assert _u64_bytes(result.memory, restored_packed) == 0xFEDCBA9876543210
     assert _u32(result.memory, alias.base) == _u32(result.memory, obj.base) == 1
