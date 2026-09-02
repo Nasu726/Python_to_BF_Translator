@@ -24,7 +24,8 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
-from compiler_compact import CompileError, PythonToBFCompact
+from compiler_compact import CompileError
+from compiler_quad import PythonToBFQuad
 from transpiler_full import _LoopContext
 from transpiler_v2 import clean_bf
 
@@ -71,8 +72,8 @@ def _positive_power_of_two_constant(node: ast.AST) -> int | None:
     return value.bit_length() - 1
 
 
-class PythonToBFStream(PythonToBFCompact):
-    """Compact compiler plus proven-safe contest-oriented lowering."""
+class PythonToBFStream(PythonToBFQuad):
+    """Quad-scalar compact compiler plus proven-safe contest lowering."""
 
     def compile_expr(self, node: ast.AST):
         # Strength-reduce x * 2**k and 2**k * x.  The public ABI defines int
@@ -117,15 +118,9 @@ class PythonToBFStream(PythonToBFCompact):
         ):
             return False
 
-        # Original input() consumes the complete source line before the first
-        # loop-body statement runs.  A fused stream must therefore reject any
-        # body that performs another input operation before this line is fully
-        # consumed.
         if _contains_input_call(loop.body) or _contains_input_call(loop.orelse):
             return False
 
-        # The source value is intentionally never materialized.  Reject any
-        # observation/rebinding of it in the loop or later module statements.
         for stmt in loop.body + loop.orelse:
             if _mentions_name(stmt, source):
                 return False
@@ -164,8 +159,6 @@ class PythonToBFStream(PythonToBFCompact):
             self.bf.clear(cell)
         self.bf.set_const(active, 1)
 
-        # Read one byte at a time.  active is re-enabled only after a normal
-        # data byte whose loop body did not break.
         self.bf.begin_while(active)
         self.bf.add_const(active, -1)
         self.bf.move(input_cell)
@@ -195,9 +188,6 @@ class PythonToBFStream(PythonToBFCompact):
         self.bf.end_while(data)
         self.bf.end_while(active)
 
-        # In unfused Python, input() had already consumed the whole line before
-        # a possible break.  Drain the unread suffix so subsequent input() sees
-        # exactly the same next line.
         drain_gate = self.temps.cell()
         line_open = self.temps.cell()
         self.backend.copy_cell(broke, drain_gate, self.backend.s0)
