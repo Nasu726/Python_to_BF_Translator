@@ -1,8 +1,8 @@
 """Current fixed-ABI compiler frontend.
 
 This module is the final lowering layer used by the public ``pybf`` API.  It
-keeps all ``input().split()`` forms line-scoped, including the older
-``map(int, ...)`` path, and resolves the final fixed-runtime type layout.
+keeps all ``input().split()`` forms line-scoped, including integer and string
+unpacking, and resolves the final fixed-runtime type layout.
 """
 
 from __future__ import annotations
@@ -143,48 +143,94 @@ class PythonToBFCompiler(PythonToBFInputs):
         self.temps = _TempArena(self.scratch_base + Binary64Core.SCRATCH_CELLS)
         self._loop_stack: list[_LoopContext] = []
 
-    def _finish_split_line(self, end_line: int) -> None:
-        """Drain any unused bytes from the current logical input line."""
-        active = self.temps.cell()
+    def _close_line_if_end(self, line_open: int, end_line: int) -> None:
+        """Set ``line_open = 0`` when a token reader consumed newline/EOF."""
         gate = self.temps.cell()
-        self.bf.set_const(active, 1)
         self.backend.copy_cell(end_line, gate, self.backend.s0)
         self.bf.begin_while(gate)
         self.bf.add_const(gate, -1)
-        self.bf.clear(active)
+        self.bf.clear(line_open)
         self.bf.end_while(gate)
-        self.backend.drain_to_line_end(active, self.workspace_base)
+
+    def _read_int_unpack_line(self, targets: list[ast.AST], node: ast.AST) -> None:
+        """Lower fixed-arity ``map(int, input().split())`` without line bleed."""
+        if not targets or not all(isinstance(t, ast.Name) for t in targets):
+            raise self._error(node, "map(int, input().split()) unpacking requires simple names")
+
+        line_open = self.temps.cell()
+        has_token = self.temps.cell()
+        end_line = self.temps.cell()
+        self.bf.set_const(line_open, 1)
+
+        for target in targets:
+            assert isinstance(target, ast.Name)
+            if (
+                target.id in self.strings
+                or target.id in self.lists
+                or target.id in self.string_lists
+            ):
+                raise self._error(target, "integer token requires an integer variable")
+
+            dst = self._var(target)
+            # If the line ended before this target, leave the fixed-runtime
+            # fallback value at zero and, critically, do not consume next line.
+            self.backend._clear_word(dst)
+            gate = self.temps.cell()
+            self.backend.copy_cell(line_open, gate, self.backend.s0)
+            self.bf.begin_while(gate)
+            self.bf.add_const(gate, -1)
+            self.backend.read_s64_line_token(
+                dst, has_token, end_line, self.workspace_base
+            )
+            self._close_line_if_end(line_open, end_line)
+            self.bf.end_while(gate)
+
+        # Extra tokens are invalid for Python unpacking, but exceptions are not
+        # implemented yet.  Drain them so the following input() starts cleanly.
+        self.backend.drain_to_line_end(line_open, self.workspace_base)
+
+    def _read_string_unpack_line(self, targets: list[ast.AST], node: ast.AST) -> None:
+        """Lower ``input().split()`` / ``map(str, ...)`` within one line."""
+        if not targets or not all(isinstance(t, ast.Name) for t in targets):
+            raise self._error(node, "split unpacking requires simple names")
+
+        line_open = self.temps.cell()
+        has_token = self.temps.cell()
+        end_line = self.temps.cell()
+        self.bf.set_const(line_open, 1)
+
+        for target in targets:
+            assert isinstance(target, ast.Name)
+            if target.id not in self.strings:
+                raise self._error(target, "string token requires a string variable")
+
+            dst = self.strings[target.id]
+            self.backend.clear_string(dst)
+            gate = self.temps.cell()
+            self.backend.copy_cell(line_open, gate, self.backend.s0)
+            self.bf.begin_while(gate)
+            self.bf.add_const(gate, -1)
+            self.backend.read_string_line_token(
+                dst, has_token, end_line, self.workspace_base
+            )
+            self._close_line_if_end(line_open, end_line)
+            self.bf.end_while(gate)
+
+        self.backend.drain_to_line_end(line_open, self.workspace_base)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
-        # The old frontend used read_s64_token(), which skips arbitrary
-        # whitespace and could cross a newline.  Python input().split() is
-        # explicitly one-line input, so use the line-token primitive here.
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
             and isinstance(node.targets[0], (ast.Tuple, ast.List))
-            and _is_map_int_input_split(node.value)
         ):
             targets = node.targets[0].elts
-            if not targets or not all(isinstance(t, ast.Name) for t in targets):
-                raise self._error(node, "map(int, input().split()) unpacking requires simple names")
-
-            has_token = self.temps.cell()
-            end_line = self.temps.cell()
-            for target in targets:
-                assert isinstance(target, ast.Name)
-                if (
-                    target.id in self.strings
-                    or target.id in self.lists
-                    or target.id in self.string_lists
-                ):
-                    raise self._error(target, "integer token requires an integer variable")
-                self.backend.read_s64_line_token(
-                    self._var(target), has_token, end_line, self.workspace_base
-                )
-
-            self._finish_split_line(end_line)
-            return
+            if _is_map_int_input_split(node.value):
+                self._read_int_unpack_line(targets, node)
+                return
+            if _is_input_split(node.value) or _is_map_str_input_split(node.value):
+                self._read_string_unpack_line(targets, node)
+                return
 
         return super()._compile_stmt_inner(node)
 
