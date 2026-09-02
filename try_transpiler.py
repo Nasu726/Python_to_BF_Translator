@@ -25,6 +25,7 @@ def main() -> None:
         help="compiler frontend; current is recommended",
     )
     parser.add_argument("--string-capacity", type=int, default=128)
+    parser.add_argument("--list-capacity", type=int, default=32)
     parser.add_argument("--run", action="store_true", help="execute generated Brainfuck")
     parser.add_argument("--input-file", type=Path, help="stdin text for the Brainfuck program")
     parser.add_argument("--input-text", default=None, help="literal stdin text for the Brainfuck program")
@@ -39,7 +40,12 @@ def main() -> None:
         elif args.backend == "v3":
             code = compile_v3(source, str(args.source), string_capacity=args.string_capacity)
         else:
-            code = compile_current(source, str(args.source), string_capacity=args.string_capacity)
+            code = compile_current(
+                source,
+                str(args.source),
+                string_capacity=args.string_capacity,
+                list_capacity=args.list_capacity,
+            )
     except (CompileError, SyntaxError, ValueError) as exc:
         print(f"compile error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
