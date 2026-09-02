@@ -30,6 +30,28 @@ def test_literal_length_and_dynamic_index():
     assert signed_bits(result.memory, length.base) == 3
 
 
+def test_last_slot_walk_does_not_read_following_allocation():
+    bf = BFEmitter()
+    backend = BinaryListIO(bf, scratch_base=900)
+    values = IntListRef(0, 3)
+    neighbor = values.base + values.cells
+    out = Int64Ref(300)
+    idx = Int64Ref(364)
+    workspace = Int64Ref(428)
+
+    backend.set_list_literal(values, [1, 2, 3])
+    # Model the exact compiler layout that exposed the bug: a live nonzero cell
+    # begins immediately after the list-owned storage.
+    bf.set_const(neighbor, 1)
+    backend.set_u64(idx, 2)
+    backend.get_dynamic(out, values, idx, workspace, match=500)
+
+    result = run_bf(bf.code(), memory_size=1200, step_limit=300_000_000)
+    assert signed_bits(result.memory, out.base) == 3
+    assert result.memory[neighbor] == 1
+    assert result.memory[values.sentinel_walk] == 0
+
+
 def test_append_uses_original_length_once():
     bf = BFEmitter()
     backend = BinaryListIO(bf, scratch_base=900)
