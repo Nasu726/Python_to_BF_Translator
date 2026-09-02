@@ -6,9 +6,9 @@
 
 Pythonはコンパイル時にのみ使用し、生成後の `.bf` は標準Brainfuckインタプリタだけで実行できる状態を維持します。
 
-主用途としてAtCoder等の競技プログラミングを想定し、典型的なPythonコードをBrainfuck向けに書き換えず、そのまま入力として使えることを重視します。
+主用途はAtCoder等の競技プログラミングです。典型的なPythonコードをtranslator向けに崩さず、そのまま入力できることを優先します。
 
-たとえば次のようなコードは必須対応です。
+最低限、次のようなコードは自然に動く必要があります。
 
 ```python
 n = int(input())
@@ -18,36 +18,36 @@ b = a
 for i in range(n):
     a[i] = i
 
+a.sort()
 print(b)
 ```
 
-ここで `b = a` はコピーではなくPython同様の**同一list objectへの参照共有**でなければなりません。
-
 ---
 
-## 1. スコープ方針
+# 1. 言語仕様の基本方針
 
-### 1.1 実装対象
+## 1.1 実装対象
 
-優先するのは「別の便利構文に頼らずPythonプログラムを書くために必要な基本機能」です。
+「別の便利構文に頼らず普通のPythonプログラムを書くために必要な基本機能」を実装対象とします。
 
 - 代入・参照・スコープ
 - 基本リテラル
-- 整数・真偽値・文字列
-- list / tuple / dict / set の基本操作
+- `None`
+- int / bool / str
+- list / tuple / dict / set
 - 算術・比較・論理・bit演算
 - 添字アクセス・更新
 - `if` / `while` / `for`
 - `break` / `continue`
 - 関数定義・呼び出し・`return`
 - 再帰
-- mutable objectのalias semantics
+- mutable objectの参照意味論
 - 行単位入力・出力
-- Pythonコードで普通に使う基本的な組み込み操作
+- Pythonコードで通常必要になる基本操作
 
-### 1.2 初期段階では実装しない発展的構文
+## 1.2 初期段階では実装しない発展的構文
 
-以下は、基本構文で同じ処理を書けるため優先しません。
+基本構文で同値処理を書けるsyntax sugarは優先しません。
 
 - list / dict / set comprehension
 - generator expression
@@ -59,17 +59,17 @@ print(b)
 - walrus operator (`:=`)
 - metaclass等の高度なobject model
 
-これらを採用しなくても、同じアルゴリズムを基本構文で記述できることを優先します。
+この非対応は「基本的な処理能力を欠く」ことを意味してはいけません。たとえばlist comprehensionを実装しなくても、通常の`for`と`append`で同じ処理が書ける必要があります。
 
-### 1.3 標準ライブラリ
+## 1.3 標準ライブラリ
 
 標準ライブラリ全体の再実装は目標にしません。
 
-`collections`, `heapq`, `bisect`, `itertools`, `math` 等は別レイヤの課題とします。
+`collections`, `heapq`, `bisect`, `itertools`, `math` 等は別レイヤの課題です。
 
-ただし、言語を普通に使うために不可欠な操作はruntime primitiveまたはcompiler intrinsicとして提供します。
+一方で、言語を普通に使うために不可欠なものはruntime primitiveまたはcompiler intrinsicとして提供します。
 
-例:
+優先例:
 
 - `input`
 - `print`
@@ -78,12 +78,110 @@ print(b)
 - `bool`
 - `len`
 - `range`
+- `deepcopy`（後述のcopy semantics用intrinsic）
 
-一方、`sum`, `sorted`, `enumerate`, `zip` 等は、それらが無くても基本構文で同値処理を書けるため後回しにできます。
+`sum`, `enumerate`, `zip` 等は基本構文で同値処理を書けるため後回しにできます。ただし`list.sort()`のように、代替実装をユーザーへ毎回書かせると実用性を大きく損なう基本メソッドは優先します。
 
 ---
 
-# 2. 現在の基盤
+# 2. 明示的な意味論方針
+
+## 2.1 list代入はPython互換のalias semanticsを維持する
+
+次はcopyではありません。
+
+```python
+a = [1, 2]
+b = a
+b[0] = 9
+print(a)
+# [9, 2]
+```
+
+`b = a` はPython同様、同一list objectへの参照共有とします。
+
+これは「shallow copy」とも異なります。単なるaliasです。
+
+## 2.2 shallow copy
+
+以下をshallow copyとして実装します。
+
+```python
+b = a.copy()
+b = a[:]
+```
+
+外側のlist objectだけを複製し、要素がobject referenceなら参照は共有します。
+
+例:
+
+```python
+a = [[1], [2]]
+b = a.copy()
+b[0].append(3)
+print(a)
+# [[1, 3], [2]]
+```
+
+## 2.3 deep copy
+
+競プロではnested listの参照共有が事故原因になりやすいため、標準ライブラリ全体を実装する前でも**`copy.deepcopy`相当のintrinsic**を提供します。
+
+基本APIは次を予定します。
+
+```python
+b = deepcopy(a)
+```
+
+将来的に`import copy`対応レイヤを作る場合は、`copy.deepcopy(a)`を同じintrinsicへloweringしてもよいものとします。
+
+### deepcopyの意味論
+
+最終的には単なる再帰コピーではなく、Pythonの`copy.deepcopy`に近い**memo付きobject graph copy**を目標にします。
+
+- scalar immutable値はそのまま
+- list / dict / set / tuple等を再帰複製
+- 同じsource objectが複数箇所から参照されている場合、clone側でも同じclone objectを共有
+- cycleを含むobject graphでも無限再帰しない
+
+例:
+
+```python
+x = [1]
+a = [x, x]
+b = deepcopy(a)
+
+b[0].append(2)
+print(b[1])
+# [1, 2]
+
+print(a)
+# [[1], [1]]
+```
+
+P0ではまずlist/tupleを中心としたacyclic graphで動かし、その後memo tableを追加してshared substructure/cycleまで完成させます。
+
+## 2.4 list repetitionのPython意味論
+
+```python
+a = [[0] * m] * n
+```
+
+はPython同様、**同じinner listへの参照をn個並べる**ものとします。
+
+独立行が必要なら、comprehension非対応期間は基本構文で次のように書けます。
+
+```python
+a = []
+for i in range(n):
+    a.append([0] * m)
+```
+
+あるいは既存objectを完全複製したい場合は`deepcopy`を使用できます。
+
+---
+
+# 3. 現在の基盤
 
 現時点で存在する主な機能:
 
@@ -114,6 +212,7 @@ print(b)
 特に次が大きな不足です。
 
 ```python
+n = int(input())
 a = [0] * n
 b = a
 ```
@@ -122,54 +221,52 @@ b = a
 
 ---
 
-# 3. 最優先: runtime object model と memory model
+# 4. Phase 1 — Runtime object / heap / reference基盤
 
-## Phase 1 — Heap / Reference 基盤
+## 目的
 
-### 目的
+mutable objectを「変数領域そのもの」ではなくruntime objectとして管理します。
 
-mutable objectを「変数領域そのもの」ではなく、runtime objectとして管理する方式へ移行します。
-
-### 必須要件
+## 必須要件
 
 - scalar valueとobject referenceを区別
 - list等のmutable valueはheap objectとして保持
 - 変数はobject handle/referenceを保持
 - `b = a` は同一objectを指す
-- `b[0] = x` が `a[0]` に反映される
-- objectのruntime lengthを持つ
-- compile-timeにlist長が分からなくても生成可能
-- Brainfuck自身がheapを操作する
+- object identityを保持
+- runtime length / capacityを持つ
+- compile-timeに長さが分からなくても生成可能
+- Brainfuck自身がheapを操作
 - Python runtimeへ依存しない
 
-### 想定heap object header
+## 想定heap object header
 
-概念的には以下の情報を持たせます。
+概念的には以下を持たせます。
 
 ```text
 [type]
 [length]
 [capacity / block size]
-[reference/ownership metadata]
+[allocation metadata]
 [data ...]
 ```
 
 BFでは通常のmachine pointerを直接使えないため、handleからobjectへ到達するためのmarker traversal / indexed traversal primitiveをruntimeとして定義します。
 
-### allocator
+## allocator
 
-最初は以下の順で実装します。
+実装順:
 
 1. monotonic / bump allocation
-2. object handleによる参照
-3. reuse可能なfree-list
-4. 必要であればreference counting
+2. object handle
+3. reusable free-list
+4. ownership/lifetime tracking
+5. 必要に応じreference counting
+6. cycle GCは後回し
 
-競プロコードではGCそのものより、loop内で一時listを繰り返し生成してもmemoryを一方的に消費しないことの方が重要です。
+競プロコードではGCの完全性より、loop内で一時objectを生成してもmemoryを一方的に消費し続けないことを優先します。
 
-cycle GCは後回しにできます。
-
-### Acceptance tests
+## Acceptance tests
 
 ```python
 a = [1, 2]
@@ -192,17 +289,15 @@ for i in range(100):
     a = [i]
 ```
 
-最後のケースでheapが単純リークし続けないことも確認します。
+最後のケースで単純heap leakを続けないこと。
 
 ---
 
-# 4. Dynamic list
-
-## Phase 2 — Python listの基本意味論
+# 5. Phase 2 — Dynamic list
 
 Heap基盤の直後に実装します。
 
-### 必須構文
+## 必須構文
 
 ```python
 a = []
@@ -211,14 +306,14 @@ a = [0] * n
 a = [x] * n
 ```
 
-特にruntime値によるrepeatを必須にします。
+runtime値によるrepeatは必須です。
 
 ```python
 n = int(input())
 a = [0] * n
 ```
 
-### 必須操作
+## 必須操作
 
 - runtime length
 - runtime capacity
@@ -231,12 +326,14 @@ a = [0] * n
 - iteration
 - equality
 - membership (`x in a`, `x not in a`)
-- list concatenation `a + b`
-- list repetition `a * n`, `n * a`
+- concatenation `a + b`
+- repetition `a * n`, `n * a`
 - alias assignment
-- explicit copy operationが必要になった場合のcopy lowering
+- `a.copy()` shallow copy
+- `a[:]` shallow copy
+- `deepcopy(a)`
 
-### index semantics
+## index / slice
 
 ```python
 a[i]
@@ -244,11 +341,9 @@ a[-1]
 a[i] = x
 ```
 
-runtime indexに対応します。
+runtime indexへ対応します。
 
-### slice
-
-basic indexingが安定してから以下を追加します。
+basic indexing安定後:
 
 ```python
 a[l:r]
@@ -256,48 +351,177 @@ a[l:r:s]
 a[::-1]
 ```
 
-slice assignmentは後段でも構いません。
+slice assignmentは後段で構いません。
 
-### nested list
+## nested list
 
-AtCoderでは2次元配列が必須です。
-
-comprehensionを非目標にする代わりに、次が書ける必要があります。
+AtCoderでは2次元配列・隣接リストが必須です。
 
 ```python
 a = []
-i = 0
-while i < n:
+for i in range(n):
     a.append([0] * m)
-    i += 1
 ```
-
-またalias semanticsを正しく区別します。
 
 ```python
-a = [[0] * m] * n
+g = []
+for i in range(n):
+    g.append([])
+
+g[u].append(v)
 ```
 
-これはPython同様、同じinner listへの参照をn個持つ必要があります。
+を必須acceptance caseとします。
 
 ---
 
-# 5. 型システム / Value model
+# 6. Phase 2.5 — list.sort / stable sorting runtime
 
-## Phase 3 — Compiler-side type inference
+`list.sort()` は競プロ実用性に直結するため、dict/setより大幅に優先します。
+
+## 採用アルゴリズム
+
+**bottom-up merge sort** を標準runtime実装とします。
+
+理由:
+
+- stable
+- worst-case `O(n log n)`
+- pivot悪化が無い
+- recursion不要でBFにloweringしやすい
+- 比較器を差し替えやすい
+- predictableなcontrol flow
+
+quicksortは平均`O(n log n)`でも最悪`O(n^2)`で、通常はstableでもないため標準実装には採用しません。
+
+## 基本contract
+
+```python
+a.sort()
+```
+
+- in-place
+- stable
+- worst-case `O(n log n)` comparator calls
+- auxiliary buffer `O(n)`
+- Python同様、戻り値は`None`
+
+そのため`None`を基本value modelへ追加します。
+
+## 最初に対応するelement type
+
+1. `list[int]`
+2. `list[str]`
+3. tupleのlexicographic comparison
+4. nested comparable container
+
+型推論でelement comparatorをcompile-time選択し、汎用tag dispatchを毎比較で行わない構造を優先します。
+
+## reverse
+
+早期に次も対応します。
+
+```python
+a.sort(reverse=True)
+```
+
+`reverse`がruntime boolの場合も最終的には対応します。
+
+## key
+
+AtCoderでは次も重要です。
+
+```python
+a.sort(key=f)
+```
+
+lambdaは発展構文として非目標ですが、named functionを`key=`へ渡せるようにします。
+
+function runtime完成後に実装し、Python同様、原則としてkeyは各要素について一度だけ評価してcacheします。
+
+概念的には:
+
+```text
+[(key0, ref0), (key1, ref1), ...]
+```
+
+をtemporary bufferへ作りstable merge sortします。
+
+これによりkeyが重い場合でも`O(n log n)`回keyを再計算しません。
+
+## sorted
+
+`sorted(a)` は`list.sort()` runtimeを再利用して実装できますが、built-inなので後段でも構いません。
+
+実装する場合:
+
+```text
+shallow-copy iterable → list.sort-compatible runtime → new listを返す
+```
+
+とします。
+
+## BF runtime design
+
+sort対象listとは別に、同じ要素数を保持できるtemporary merge bufferをheapへ確保します。
+
+bottom-up run width:
+
+```text
+1, 2, 4, 8, ...
+```
+
+で隣接runをmergeし、各pass後にsource/destination bufferをswapします。
+
+最後のsorted dataがtemporary側にある場合のみ元listへ戻します。
+
+## Acceptance tests
+
+```python
+a = [5, 1, 4, 1, 3]
+a.sort()
+print(a)
+# [1, 1, 3, 4, 5]
+```
+
+```python
+a = [5, 1, 4, 1, 3]
+a.sort(reverse=True)
+print(a)
+# [5, 4, 3, 1, 1]
+```
+
+stable性はkey付きrecordで検証します。
+
+```python
+a = [(2, 0), (1, 1), (2, 2), (1, 3)]
+
+def first(x):
+    return x[0]
+
+a.sort(key=first)
+print(a)
+# [(1, 1), (1, 3), (2, 0), (2, 2)]
+```
+
+---
+
+# 7. Phase 3 — Compiler-side type / value model
 
 Brainfuckにはruntime型システムがないため、コンパイル時に可能な限り型を確定します。
 
-### 基本方針
+## 基本方針
 
 - scalarは固定width
 - mutable objectはreference
-- container element typeはcompile-time inferenceを優先
-- Pythonの完全なdynamic typingを最初から再現しない
-- ただし普通の競プロコードで自然に型推論できることを目標にする
+- `None`はsingleton value
+- container element typeはcompile-time inference優先
+- 普通の競プロコードで自然に推論できることを目標にする
+- 最初から全値をtagged unionにしてBF runtimeを重くしない
 
 対象:
 
+- None
 - int
 - bool
 - str
@@ -307,7 +531,7 @@ Brainfuckにはruntime型システムがないため、コンパイル時に可�
 - set[T]
 - function signatures
 
-### 必須検査
+必須検査:
 
 - incompatible assignment
 - function argument type propagation
@@ -315,17 +539,11 @@ Brainfuckにはruntime型システムがないため、コンパイル時に可�
 - container element type propagation
 - nested container type
 
-### 将来
-
-必要になればtagged valueへ拡張しますが、最初から全値をtagged unionにしてBF runtimeを重くしないことを優先します。
-
 ---
 
-# 6. Tuple / unpacking / assignment semantics
+# 8. Phase 4 — Tuple / unpacking / assignment
 
-## Phase 4
-
-### 必須
+必須:
 
 ```python
 a, b = b, a
@@ -336,7 +554,7 @@ x, y = pair
 - tuple value
 - unpack
 - nested unpack
-- function multiple return
+- multiple return
 
 ```python
 def f():
@@ -345,48 +563,37 @@ def f():
 a, b = f()
 ```
 
-starred unpackは後回しでよいです。
+starred unpackは後回し。
 
 ---
 
-# 7. String
+# 9. Phase 5 — String
 
-## Phase 5
+現在のfixed byte stringを通常のPythonコードで必要な操作まで拡張します。
 
-現在のfixed byte stringを、通常のPythonコードで必要な操作まで拡張します。
-
-### 必須
+必須:
 
 - assignment
 - equality / ordering
-- `len`
-- index
-- negative index
+- len
+- index / negative index
 - slice
 - concatenation
 - repetition
 - iteration
-- `in`
+- membership
 - `str(int)`
 - `int(str)`
 
-### I/O model
+Brainfuck I/Oがbyte単位なので、まずUTF-8 byte sequenceとして扱い、AtCoderで主に使うASCII入力についてPythonコードと同じ結果を保証します。
 
-Brainfuckの標準I/Oがbyte単位なので、まずUTF-8 byte sequenceとして扱います。
-
-AtCoderで主に使うASCII入力についてPythonコードと同じ結果を保証します。
-
-完全なUnicode code point semanticsは別フェーズとします。
+完全なUnicode code point semanticsは別フェーズ。
 
 ---
 
-# 8. Function / Scope / Call stack
-
-## Phase 6 — user-defined function
+# 10. Phase 6 — Function / Scope / Call stack
 
 AtCoderで普通のPythonコードを使うための最重要項目です。
-
-### 必須構文
 
 ```python
 def f(x, y):
@@ -396,16 +603,16 @@ def f(x, y):
 ans = f(a, b)
 ```
 
-### 必須runtime
+必須runtime:
 
 - call frame
-- local variables
+- locals
 - parameters
 - return value
 - nested calls
 - recursion
 
-### recursion acceptance
+recursion acceptance:
 
 ```python
 def fact(n):
@@ -414,36 +621,25 @@ def fact(n):
     return n * fact(n - 1)
 ```
 
-生成Brainfuckだけで動くこと。
-
-### scope
+scope:
 
 - local
 - module/global
-- `global` は必要になった時点で追加
+- `global` は必要時追加
+- `nonlocal`, closureは後回し
 
-`nonlocal`, closureは発展機能として後回しにできます。
+引数:
 
-### default / keyword args
+1. positional
+2. default
+3. keyword
+4. `*args`, `**kwargs` は低優先
 
-通常のpositional argumentを先に完成させます。
-
-その後:
-
-- default arguments
-- keyword arguments
-
-を追加します。
-
-`*args`, `**kwargs` は優先度低。
+このphase完了後、`list.sort(key=named_function)`を実装します。
 
 ---
 
-# 9. Control flow 完成
-
-## Phase 7
-
-### for
+# 11. Phase 7 — Control flow完成
 
 以下を普通に扱います。
 
@@ -457,62 +653,49 @@ for ch in s:
 
 `range`のstart/stop/stepはruntime値対応にします。
 
-現在の「stepがcompile-time constant」等の制約を除去します。
-
-### その他
-
 - nested break/continue
 - loop else
 - return through nested control flow
 
-を統一control-flow loweringで処理します。
+を統一loweringで処理します。
 
 ---
 
-# 10. Operators 完成
+# 12. Phase 8 — Operators完成
 
-## Phase 8
-
-### int
+## int
 
 - `+ - * // % **`
 - unary `+ -`
 - `& | ^ ~ << >>`
 - comparison
 
-既存実装を完全に統一します。
-
-### comparison
+## comparison
 
 - chained comparison
 - `in`
 - `not in`
+- lexicographic tuple/list/string comparison
 
-### logical
+## logical
 
 - `and`
 - `or`
 - `not`
-- Pythonのshort-circuit
-- operand value return semantics
+- short-circuit
+- operand-value return semantics
 
-### identity
+## identity
 
-`is` / `is not` はobject handleが導入された後なら実装可能です。
-
-mutable objectについてidentity比較を正しく扱います。
+object handle導入後に`is` / `is not`を実装します。
 
 ---
 
-# 11. Dict / Set
+# 13. Phase 9 — Dict / Set
 
-## Phase 9
-
-AtCoderで頻出するため、標準ライブラリ扱いにはせず基本containerとして実装します。
+AtCoderで頻出するため基本containerとして実装します。
 
 ## dict
-
-最低限:
 
 ```python
 d = {}
@@ -523,42 +706,38 @@ len(d)
 for key in d:
 ```
 
-### runtime
+correctness-onlyのlinear tableから始めてもよいですが、実用版はhash tableへ進めます。
 
-最初はlinear tableでもcorrectness上は成立しますが、実用性を考えると最終的にはhash tableを実装します。
+候補:
 
 - open addressing
 - tombstone
 - resize
 - fixed-width hash
 
-を候補とします。
-
 ## set
 
 - add
-- remove/discardの基本操作
+- remove / discard
 - membership
 - len
 - iteration
 
-setも同じhash runtimeを共有します。
+同じhash runtimeを共有します。
 
 ---
 
-# 12. Numeric types
+# 14. Phase 10 — Numeric types
 
-## Phase 10
+## int
 
-### int
+当面signed 64-bitを正式ABIとして維持します。
 
-当面signed 64-bitを仕様として維持します。
+Python arbitrary precision intは非常に高コストなため、AtCoder用途ではint64を仕様差として認めます。
 
-Python arbitrary precision intは非常に大きなruntimeコストを生むため、AtCoder用途ではint64を正式ABIとして扱います。
+## float
 
-### float
-
-Python基本機能として後段でfloat64を追加します。
+後段でfloat64を追加します。
 
 - literal
 - conversion
@@ -566,17 +745,13 @@ Python基本機能として後段でfloat64を追加します。
 - comparison
 - print / parse
 
-Brainfuck上でIEEE-754を完全にsoftware実装するか、独自fixed representationを使うかは実装前に決定します。
-
-Pythonとの意味論一致を目標にするならIEEE-754 binary64を優先します。
+Python意味論一致を優先するならIEEE-754 binary64 software runtimeを採用します。
 
 ---
 
-# 13. Exceptions / Error model
+# 15. Phase 11 — Exceptions / Error model
 
-## Phase 11
-
-AtCoderのvalid inputでは例外が発生しないケースが多いため優先度は低めですが、現在のようなsilent zero-fill等は最終仕様にはしません。
+valid contest inputでは優先度は低めですが、silent zero-fill等を最終仕様にはしません。
 
 最低限:
 
@@ -586,63 +761,58 @@ AtCoderのvalid inputでは例外が発生しないケースが多いため優�
 - invalid int conversion
 - missing dict key
 
-に対してruntime error stateを持たせます。
+にruntime error stateを持たせます。
 
-完全な`try/except`実装は後回しにできます。
-
-まず「誤った値で処理継続しない」ことを保証します。
+完全な`try/except`は後回しでも、誤値のまま処理継続しないことを保証します。
 
 ---
 
-# 14. Memory management 完成
+# 16. Phase 12 — Memory management完成
 
-## Phase 12
-
-Heap/object systemが安定した後、長時間実行に耐えるmemory managementへ進みます。
-
-候補:
+Heap/object system安定後:
 
 1. compile-time lifetime analysis
-2. stack/region allocationできるobjectはstackへ
+2. stack/region allocation可能objectはstackへ
 3. escaping mutable objectだけheapへ
 4. heap free-list
 5. reference counting
-6. cycleを含む場合のみ簡易GC検討
+6. cycle必要時のみGC検討
 
-重要なのは、Brainfuck側で実行可能であることです。
-
-Python runtimeにallocation/freeを依存させません。
+`deepcopy`のmemo tableやsort temporary bufferもこのallocator上で安全にallocate/freeできる必要があります。
 
 ---
 
-# 15. Optimization
+# 17. Optimization
 
 Correctnessの後に実施します。
 
-## source-size optimization
+## source size
 
 - repeated primitive sharing
 - runtime loop化
 - pointer movement削減
-- base-4 / bit-pair backend活用
+- base-4 / bit-pair backend
 - constant propagation
 - dead temporary elimination
 
-## runtime optimization
+## runtime
 
-- common BF arithmetic primitive改善
+- arithmetic primitive改善
 - traversal回数削減
 - object layout locality
 - list index traversal改善
+- merge sort buffer locality
+- comparator specialization
 - decimal I/O改善
 
-## memory optimization
+## memory
 
 - liveness reuse
 - frame reuse
 - heap block reuse
+- sort temporary buffer reuse
 
-各最適化には以下を測定します。
+測定値:
 
 - generated BF command count
 - executed BF primitive steps
@@ -650,24 +820,22 @@ Correctnessの後に実施します。
 
 ---
 
-# 16. Differential testing
+# 18. Differential testing
 
-すべての主要機能について、同一のPython source/inputを
+主要機能は同一source/inputを
 
 1. CPython
-2. Python→BF→BF interpreter
+2. Python → BF → BF interpreter
 
-で実行し、stdoutを比較するテストを増やします。
+で実行し、stdoutを比較します。
 
-例外未実装部分を除き、結果不一致はregressionとします。
+意図的な仕様差を除き、不一致はregressionです。
 
 ## AtCoder compatibility corpus
 
-実際に典型的な競プロコードパターンをfixtureとして蓄積します。
+最低限以下をfixture化します。
 
-最低限:
-
-### 入力
+### input
 
 ```python
 n = int(input())
@@ -676,12 +844,10 @@ a = list(map(int, input().split()))
 s = input()
 ```
 
-### 配列
+### DP
 
 ```python
-a = [0] * n
-for i in range(n):
-    a[i] = i
+dp = [0] * (n + 1)
 ```
 
 ### alias
@@ -693,18 +859,30 @@ b[0] = 1
 assert a[0] == 1
 ```
 
-### 2次元配列
+### shallow copy
+
+```python
+a = [[0], [1]]
+b = a.copy()
+b[0].append(2)
+assert a[0] == [0, 2]
+```
+
+### deep copy
+
+```python
+a = [[0], [1]]
+b = deepcopy(a)
+b[0].append(2)
+assert a[0] == [0]
+```
+
+### 2D array
 
 ```python
 a = []
 for i in range(h):
     a.append([0] * w)
-```
-
-### DP
-
-```python
-dp = [0] * (n + 1)
 ```
 
 ### graph
@@ -717,6 +895,25 @@ for i in range(n):
 g[u].append(v)
 ```
 
+### sort
+
+```python
+a = list(map(int, input().split()))
+a.sort()
+print(a)
+```
+
+### stable sort
+
+```python
+a = [(2, 0), (1, 1), (2, 2), (1, 3)]
+
+def first(x):
+    return x[0]
+
+a.sort(key=first)
+```
+
 ### function
 
 ```python
@@ -724,15 +921,13 @@ def dfs(v):
     ...
 ```
 
-これらが「Python側で書き換え無し」にcompile/runできることを各milestoneのacceptance conditionにします。
+各milestoneで「Python側の書き換え無し」にcompile/runできることをacceptance conditionとします。
 
 ---
 
-# 17. 実装順序
+# 19. 実装優先順位
 
-依存関係を考慮し、以下の順で進めます。
-
-## P0 — まず実用性を決める基盤
+## P0 — AtCoder実用性を決める基盤
 
 1. runtime object handle
 2. heap allocator
@@ -740,8 +935,12 @@ def dfs(v):
 4. dynamic list length/capacity
 5. `[x] * n`
 6. nested list
+7. `a.copy()` / `a[:]` shallow copy
+8. `deepcopy(a)` basic container copy
+9. stable `list.sort()` for `list[int]`
+10. `list.sort(reverse=...)`
 
-この段階で次を必ず通します。
+この段階で必ず次を通します。
 
 ```python
 n = int(input())
@@ -749,75 +948,87 @@ a = [0] * n
 b = a
 for i in range(n):
     a[i] = i
+a.sort(reverse=True)
 print(b)
 ```
 
 ## P1 — 普通のアルゴリズム記述
 
-7. function / return / call frame
-8. recursion
-9. runtime `range` step
-10. string index/slice/concat/repeat
-11. tuple values/unpack
-12. membership operators
+11. function / return / call frame
+12. recursion
+13. runtime `range` step
+14. tuple values/unpack
+15. string index/slice/concat/repeat
+16. membership operators
+17. lexicographic comparator
+18. `list.sort(key=named_function)`
+19. deepcopy memoization / shared-reference preservation
 
 ## P2 — 競プロcontainer
 
-13. nested heterogeneous container type inference
-14. dict
-15. set
+20. nested container type inference
+21. dict
+22. set
+23. sort comparator coverage for supported comparable types
 
 ## P3 — completeness
 
-16. float64
-17. runtime errors
-18. broader argument syntax
-19. slicing completion
-20. object lifetime / free-list / RC改善
+24. float64
+25. runtime errors
+26. broader argument syntax
+27. slicing completion
+28. object lifetime/free-list/RC改善
+29. cycle-safe deepcopy
 
 ## P4 — optimization
 
-21. source size
-22. runtime steps
-23. tape memory
-24. large AtCoder corpus
+30. source size
+31. runtime steps
+32. tape memory
+33. merge sort / comparator optimization
+34. large AtCoder corpus
 
 ---
 
-# 18. 「完成」の定義
+# 20. 「完成」の定義
 
-第一の完成条件は、Python言語の全仕様を100%再現することではありません。
-
-以下を満たした時点を「実用的なPython→Brainfuck transpiler v1」とします。
+実用的なPython→Brainfuck transpiler v1は以下を満たすものとします。
 
 - AtCoderで一般的なPythonコードを専用構文へ書き換えずcompileできる
-- `[0] * n` 等のruntime-sized listが動く
-- mutable assignmentがPythonのalias semanticsと一致する
-- nested listを扱える
+- `[0] * n`等のruntime-sized listが動く
+- `b = a`がPython同様aliasになる
+- shallow copyとdeep copyを明確に使い分けられる
+- nested listが動く
+- `list.sort()`がstableかつworst-case `O(n log n)`で動く
 - function / recursionが動く
 - int/string/list/tuple/dict/setの基本操作が動く
-- input/printが普通のPythonコードと同じ形で使える
+- input/printが通常のPythonコードと同じ形で使える
 - generated BFのみで実行できる
-- CPython differential test corpusがgreen
-- comprehension等の発展的syntaxを使わなくても同値処理を基本構文で記述できる
+- CPython differential corpusがgreen
+- comprehension等の発展syntax無しでも同値処理を基本構文で記述できる
 
-特に、ユーザーがtranslatorの都合に合わせてPythonコードを崩す必要がある状態は完成とはみなしません。
+ユーザーがtranslatorの都合に合わせてPythonコードを崩す必要がある状態は完成とはみなしません。
 
 ---
 
-# 19. 次に着手する具体タスク
+# 21. 次に着手する具体タスク
 
-次の開発PRでは、他のsyntax追加より先に以下を行います。
+次の開発PRでは他のsyntax追加より先に以下を行います。
 
-1. 現在のlist variable直接配置モデルを調査し、object-handle化する境界を決定
-2. BF heap traversal primitiveを実装
-3. dynamic list object headerを実装
+1. 現在のlist直接配置モデルからobject-handle modelへの移行境界を決定
+2. BF heap traversal primitive実装
+3. dynamic list object header実装
 4. list variableをreferenceへ変更
-5. `b = a` のalias testを追加
-6. `[literal] * runtime_int` をlowering
-7. `[0] * n` を実BFで実行
-8. nested list allocationを追加
-9. AtCoder DP / graph初期化fixtureを追加
-10. full CI greenを確認
+5. `b = a` alias test
+6. `[literal] * runtime_int` lowering
+7. `[0] * n` 実BF test
+8. nested list allocation
+9. shallow-copy primitive
+10. deepcopy primitiveの最小版
+11. merge-sort temporary buffer設計
+12. `list[int].sort()` bottom-up merge sort
+13. reverse sort
+14. AtCoder DP / graph / sort fixture
+15. full CI green
 
-このP0が通るまでは、comprehension等のsyntax sugarや便利built-inの追加を優先しません。
+P0が通るまでは、comprehension等のsyntax sugarや便利built-inの追加を優先しません。
