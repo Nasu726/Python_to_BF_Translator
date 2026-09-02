@@ -3,6 +3,7 @@ spec.md
 
 # test cases
 test/
+pybf/
 
 # old prototype
 py_to_bf.py
