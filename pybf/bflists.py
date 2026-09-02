@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from bfcore import Int64Ref, WORD_BITS
 from bfpacked64 import I64_BYTES, PackedI64Core, PackedI64Ref
-from bftokens import BinaryTokenIO
+from bfpackedtokens import PackedBinaryTokenIO
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class IntListRef:
         return 1 + self.capacity * I64_BYTES
 
 
-class BinaryListIO(BinaryTokenIO):
+class BinaryListIO(PackedBinaryTokenIO):
     """Integer-list operations over compact packed element storage."""
 
     def __init__(self, bf, scratch_base: int) -> None:
@@ -191,6 +191,27 @@ class BinaryListIO(BinaryTokenIO):
         bf.clear(slot_match)
         self._clear_scratch()
 
+    def append_packed(
+        self,
+        ref: IntListRef,
+        value: PackedI64Ref,
+        length_copy: int,
+        match: int,
+    ) -> None:
+        """Append an already-packed int64 without a 64-cell conversion."""
+        bf = self.bf
+        self.copy_cell(ref.length_cell, length_copy, self.s0)
+        for i in range(ref.capacity):
+            self._eq_byte_const(match, length_copy, i)
+            bf.begin_while(match)
+            bf.add_const(match, -1)
+            self.packed64.copy(ref.item(i), value)
+            bf.add_const(ref.length_cell, 1)
+            bf.end_while(match)
+        bf.clear(length_copy)
+        bf.clear(match)
+        self._clear_scratch()
+
     def append(
         self,
         ref: IntListRef,
@@ -206,19 +227,10 @@ class BinaryListIO(BinaryTokenIO):
         final temporaries of the operation, so the eight cells immediately
         after ``match`` are a private ephemeral region.
         """
-        bf = self.bf
         if packed_tmp is None:
             packed_tmp = PackedI64Ref(match + 1)
         self.packed64.from_int64(packed_tmp, value)
-        self.copy_cell(ref.length_cell, length_copy, self.s0)
-        for i in range(ref.capacity):
-            self._eq_byte_const(match, length_copy, i)
-            bf.begin_while(match)
-            bf.add_const(match, -1)
-            self.packed64.copy(ref.item(i), packed_tmp)
-            bf.add_const(ref.length_cell, 1)
-            bf.end_while(match)
-        bf.clear(length_copy)
+        self.append_packed(ref, packed_tmp, length_copy, match)
         self.packed64.clear(packed_tmp)
         self._clear_scratch()
 
@@ -233,30 +245,40 @@ class BinaryListIO(BinaryTokenIO):
     ) -> None:
         """Implement ``list(map(int, input().split()))`` with one parser body.
 
-        The old implementation emitted the full signed-decimal parser once per
-        list capacity slot. Here one parser sits inside a Brainfuck runtime loop
-        and appends each token. Extra tokens after capacity are still consumed
-        so the following ``input()`` begins on the next physical line.
+        Decimal tokens are accumulated directly into packed int64 bytes, then
+        copied into packed list slots.  The old path parsed into a 64 Boolean-
+        cell word and immediately repacked it, which dominated source size.
+        Extra tokens after capacity are still consumed so the following
+        ``input()`` begins on the next physical line.
         """
         bf = self.bf
         self.clear_list(ref)
         for c in (active, gate, has_token, end_line):
             bf.clear(c)
 
-        token = Int64Ref(workspace_base + WORD_BITS * 2 + 16)
-        packed_tmp = PackedI64Ref(token.base + WORD_BITS)
-        length_copy = packed_tmp.base + I64_BYTES
+        # Packed parser controls occupy workspace_base+128..+151.  Keep the
+        # token and append scratch beyond that private region.
+        token = PackedI64Ref(workspace_base + WORD_BITS * 2 + 32)
+        length_copy = token.base + I64_BYTES
         append_match = length_copy + 1
 
+        self.packed64.clear(token)
+        bf.clear(length_copy)
+        bf.clear(append_match)
         bf.set_const(active, 1)
         bf.begin_while(active)
 
-        self.read_s64_line_token(token, has_token, end_line, workspace_base)
+        self.read_packed_s64_line_token(
+            token,
+            has_token,
+            end_line,
+            workspace_base,
+        )
 
         self.copy_cell(has_token, gate, self.s0)
         bf.begin_while(gate)
         bf.add_const(gate, -1)
-        self.append(ref, token, length_copy, append_match, packed_tmp)
+        self.append_packed(ref, token, length_copy, append_match)
         bf.end_while(gate)
 
         self.copy_cell(end_line, gate, self.s0)
@@ -266,6 +288,7 @@ class BinaryListIO(BinaryTokenIO):
         bf.end_while(gate)
 
         bf.end_while(active)
+        self.packed64.clear(token)
         self._clear_scratch()
 
 
