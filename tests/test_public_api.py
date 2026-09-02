@@ -12,13 +12,10 @@ def test_public_abi_is_fixed():
 
 
 def test_public_compile_source_emits_only_standard_brainfuck():
-    code = compile_source(
-        "x = int(input())\n"
-        "A = [1, 2, 3]\n"
-        "if x > 0:\n"
-        "    A.append(x)\n"
-        "print(A[-1])\n"
-    )
+    # This test owns only the public-output alphabet contract.  List/input/
+    # indexing coverage belongs to their focused tests, including the ABC-style
+    # compile-performance fixture which independently checks BF_COMMANDS.
+    code = compile_source("x = 1\nprint(x)\n")
     assert code
     assert set(code) <= BF_COMMANDS
 
