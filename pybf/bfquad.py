@@ -1,21 +1,22 @@
-"""Experimental base-4/bit-pair backend.
+"""Source-compact bit-pair backend for 64-bit compiler scalars.
 
-Each 64-bit word uses 32 lanes plus a sentinel::
+Each word uses 32 lanes plus a sentinel::
 
     [marker, bit0, bit1] * 32 + [sentinel, 0, 0]
 
-The value is still binary at the bit level; grouping two bits lets one marker
-cell service two bits.  The key Brainfuck optimization is that corresponding
-lanes in A/B/D have constant offsets.  A single loop body therefore walks all
-32 base-4 digits at runtime instead of Python emitting 32 copies of the full
-adder.  Marker cells are disposable control state; value bits are preserved.
+The value bits still represent the exact same two's-complement int64 ABI as
+``Int64Ref``.  ``Quad64Ref`` subclasses ``Int64Ref`` and only changes physical
+bit addressing, so correctness-first backend operations can continue to work
+through the normal ``bit(i)`` interface while hot add/sub/compare operations
+use one runtime lane-walking Brainfuck body instead of 64 Python-unrolled
+bodies.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bfcore import BFEmitter
+from bfcore import BFEmitter, Int64Ref
 
 
 DIGITS = 32
@@ -25,21 +26,33 @@ MASK64 = (1 << 64) - 1
 
 
 @dataclass(frozen=True)
-class Quad64Ref:
-    base: int
+class Quad64Ref(Int64Ref):
+    """Int64-compatible reference with interleaved runtime-walk markers."""
 
     def marker(self, digit: int) -> int:
+        if not 0 <= digit <= DIGITS:
+            raise IndexError(digit)
         return self.base + STRIDE * digit
 
     def bit0(self, digit: int) -> int:
+        if not 0 <= digit <= DIGITS:
+            raise IndexError(digit)
         return self.base + STRIDE * digit + 1
 
     def bit1(self, digit: int) -> int:
+        if not 0 <= digit <= DIGITS:
+            raise IndexError(digit)
         return self.base + STRIDE * digit + 2
 
     def bit(self, bit_index: int) -> int:
+        if not 0 <= bit_index < 64:
+            raise IndexError(bit_index)
         digit, within = divmod(bit_index, 2)
         return self.bit0(digit) if within == 0 else self.bit1(digit)
+
+    @property
+    def cells(self) -> int:
+        return WORD_CELLS
 
 
 class _RelativeBuilder:
@@ -52,9 +65,9 @@ class _RelativeBuilder:
     def move(self, target: int) -> None:
         delta = target - self.pos
         if delta > 0:
-            self.parts.append('>' * delta)
+            self.parts.append(">" * delta)
         elif delta < 0:
-            self.parts.append('<' * -delta)
+            self.parts.append("<" * -delta)
         self.pos = target
 
     def emit(self, code: str) -> None:
@@ -62,65 +75,65 @@ class _RelativeBuilder:
 
     def clear(self, cell: int) -> None:
         self.move(cell)
-        self.emit('[-]')
+        self.emit("[-]")
 
     def add(self, cell: int, amount: int) -> None:
         self.move(cell)
-        self.emit('+' * amount if amount >= 0 else '-' * -amount)
+        self.emit("+" * amount if amount >= 0 else "-" * -amount)
 
     def transfer(self, src: int, dst: int) -> None:
-        """Destructively add a 0/1 source into dst."""
+        """Destructively add a Boolean source into dst."""
         self.move(src)
-        self.emit('[-')
+        self.emit("[-")
         self.move(dst)
-        self.emit('+')
+        self.emit("+")
         self.move(src)
-        self.emit(']')
+        self.emit("]")
 
     def code(self) -> str:
-        return ''.join(self.parts)
+        return "".join(self.parts)
 
 
 def _map_total(builder: _RelativeBuilder, total: int, out: int, carry: int) -> None:
     """Map total in 0..3 to parity and floor(total/2), consuming total."""
     r = builder
     r.move(total)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(out, 1)
     r.move(total)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(out, -1)
     r.add(carry, 1)
     r.move(total)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(out, 1)
     r.move(total)
-    r.emit(']')
+    r.emit("]")
     r.move(total)
-    r.emit(']')
+    r.emit("]")
     r.move(total)
-    r.emit(']')
+    r.emit("]")
 
 
 def _add_preserved(builder: _RelativeBuilder, src: int, total: int, tmp: int) -> None:
     """total += src for a Boolean src, restoring src and leaving tmp zero."""
     r = builder
     r.move(src)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(total, 1)
     r.add(tmp, 1)
     r.move(src)
-    r.emit(']')
+    r.emit("]")
     r.move(tmp)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(src, 1)
     r.move(tmp)
-    r.emit(']')
+    r.emit("]")
 
 
 def _add_not_preserved(
@@ -133,40 +146,40 @@ def _add_not_preserved(
     """total += (1-src), preserving Boolean src; tmp/helper finish zero."""
     r = builder
 
-    # Copy src into tmp, restoring src through helper.
     r.move(src)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(tmp, 1)
     r.add(helper, 1)
     r.move(src)
-    r.emit(']')
+    r.emit("]")
     r.move(helper)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(src, 1)
     r.move(helper)
-    r.emit(']')
+    r.emit("]")
 
-    # tmp ^= 1, using helper as the one-shot flag.
     r.add(helper, 1)
     r.move(tmp)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.clear(helper)
     r.move(tmp)
-    r.emit(']')
+    r.emit("]")
     r.move(helper)
-    r.emit('[')
-    r.emit('-')
+    r.emit("[")
+    r.emit("-")
     r.add(tmp, 1)
     r.move(helper)
-    r.emit(']')
+    r.emit("]")
 
     r.transfer(tmp, total)
 
 
 class Quad64Core:
+    """Runtime-lane add/sub/unsigned-compare over ``Quad64Ref`` values."""
+
     def __init__(self, bf: BFEmitter) -> None:
         self.bf = bf
 
@@ -176,15 +189,14 @@ class Quad64Core:
             self.bf.clear(dst.marker(digit))
             self.bf.set_const(dst.bit0(digit), (value >> (2 * digit)) & 1)
             self.bf.set_const(dst.bit1(digit), (value >> (2 * digit + 1)) & 1)
-        # Sentinel lane is always zero.
         self.bf.clear(dst.marker(DIGITS))
-        self.bf.clear(dst.base + STRIDE * DIGITS + 1)
-        self.bf.clear(dst.base + STRIDE * DIGITS + 2)
+        self.bf.clear(dst.bit0(DIGITS))
+        self.bf.clear(dst.bit1(DIGITS))
 
-    def _prepare_binary_op(self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref) -> None:
+    def _prepare_binary_op(
+        self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref
+    ) -> None:
         for digit in range(DIGITS):
-            # A markers drive the walking loop.  B markers are local temporary
-            # cells.  D markers carry state between adjacent digits.
             self.bf.set_const(a.marker(digit), 1)
             self.bf.clear(b.marker(digit))
             self.bf.clear(dst.marker(digit))
@@ -195,10 +207,6 @@ class Quad64Core:
         self.bf.clear(dst.marker(DIGITS))
 
     def _emit_add_body(self, b_delta: int, d_delta: int) -> str:
-        # Relative lane layout:
-        # A: 0 marker/temp, 1 a0, 2 a1
-        # B: b_delta marker/tmp, +1 b0, +2 b1
-        # D: d_delta carry-in, +1 d0, +2 d1
         r = _RelativeBuilder()
         total = 0
         a0, a1 = 1, 2
@@ -208,18 +216,18 @@ class Quad64Core:
         d0, d1 = d_delta + 1, d_delta + 2
         carry_out = d_delta + STRIDE
 
-        r.clear(total)  # consume current A marker
+        r.clear(total)
         r.transfer(carry_in, total)
         _add_preserved(r, a0, total, tmp)
         _add_preserved(r, b0, total, tmp)
-        _map_total(r, total, d0, tmp)  # B marker becomes low-bit carry
+        _map_total(r, total, d0, tmp)
 
         r.transfer(tmp, total)
         _add_preserved(r, a1, total, tmp)
         _add_preserved(r, b1, total, tmp)
         _map_total(r, total, d1, carry_out)
 
-        r.move(STRIDE)  # matching ] tests the next A marker
+        r.move(STRIDE)
         return r.code()
 
     def _emit_sub_body(self, b_delta: int, d_delta: int) -> str:
@@ -247,22 +255,47 @@ class Quad64Core:
         return r.code()
 
     def add64(self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref) -> None:
-        """dst = a+b modulo 2**64, preserving all value bits of a and b."""
+        """dst = a+b modulo 2**64, preserving value bits of a and b."""
         self._prepare_binary_op(dst, a, b)
         self.bf.move(a.marker(0))
         body = self._emit_add_body(b.base - a.base, dst.base - a.base)
-        self.bf.emit('[' + body + ']')
-        # The body advances one lane each runtime iteration; after 32 passes
-        # the actual pointer is at A's sentinel, not merely one stride ahead.
+        self.bf.emit("[" + body + "]")
         self.bf.ptr = a.marker(DIGITS)
-        self.bf.clear(dst.marker(DIGITS))  # discard unsigned overflow
+        self.bf.clear(dst.marker(DIGITS))
 
     def sub64(self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref) -> None:
         """dst = a-b modulo 2**64 via a + ~b + 1."""
         self._prepare_binary_op(dst, a, b)
-        self.bf.set_const(dst.marker(0), 1)  # initial +1 carry
+        self.bf.set_const(dst.marker(0), 1)
         self.bf.move(a.marker(0))
         body = self._emit_sub_body(b.base - a.base, dst.base - a.base)
-        self.bf.emit('[' + body + ']')
+        self.bf.emit("[" + body + "]")
         self.bf.ptr = a.marker(DIGITS)
         self.bf.clear(dst.marker(DIGITS))
+
+    def uge64(
+        self,
+        result: int,
+        a: Quad64Ref,
+        b: Quad64Ref,
+        tmp: Quad64Ref,
+    ) -> None:
+        """Set result=1 iff unsigned a>=b using the subtraction carry-out."""
+        self._prepare_binary_op(tmp, a, b)
+        self.bf.set_const(tmp.marker(0), 1)
+        self.bf.move(a.marker(0))
+        body = self._emit_sub_body(b.base - a.base, tmp.base - a.base)
+        self.bf.emit("[" + body + "]")
+        self.bf.ptr = a.marker(DIGITS)
+
+        carry = tmp.marker(DIGITS)
+        self.bf.clear(result)
+        self.bf.move(carry)
+        self.bf.emit("[-")
+        self.bf.move(result)
+        self.bf.emit("+")
+        self.bf.move(carry)
+        self.bf.emit("]")
+
+
+__all__ = ["DIGITS", "STRIDE", "WORD_CELLS", "Quad64Ref", "Quad64Core"]
