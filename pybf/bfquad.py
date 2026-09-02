@@ -202,8 +202,7 @@ class Quad64Core:
         delta = dst.base - src.base
 
         # Source markers drive the loop.  The current source marker is consumed
-        # at the start of every lane and then reused as the restoration scratch
-        # for the two Boolean payload bits.
+        # at the start of every lane and then reused as restoration scratch.
         for digit in range(DIGITS):
             bf.set_const(src.marker(digit), 1)
         bf.clear(src.marker(DIGITS))
@@ -228,18 +227,17 @@ class Quad64Core:
         bf.clear(dst.bit0(DIGITS))
         bf.clear(dst.bit1(DIGITS))
 
-    def _prepare_binary_op(
-        self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref
-    ) -> None:
+    def _prepare_binary_op(self, a: Quad64Ref) -> None:
+        """Arm only the A traversal markers.
+
+        Earlier revisions also swept B and destination lanes here.  With a
+        large list allocation between scalar words those compile-time tape
+        trips dominated generated source.  B scratch, destination bits and the
+        next carry are now cleared in the repeated runtime lane body instead.
+        """
         for digit in range(DIGITS):
             self.bf.set_const(a.marker(digit), 1)
-            self.bf.clear(b.marker(digit))
-            self.bf.clear(dst.marker(digit))
-            self.bf.clear(dst.bit0(digit))
-            self.bf.clear(dst.bit1(digit))
         self.bf.clear(a.marker(DIGITS))
-        self.bf.clear(b.marker(DIGITS))
-        self.bf.clear(dst.marker(DIGITS))
 
     def _emit_add_body(self, b_delta: int, d_delta: int) -> str:
         r = _RelativeBuilder()
@@ -251,7 +249,13 @@ class Quad64Core:
         d0, d1 = d_delta + 1, d_delta + 2
         carry_out = d_delta + STRIDE
 
+        # Local cleanup replaces the old 32-lane static B/D sweep.
         r.clear(total)
+        r.clear(tmp)
+        r.clear(d0)
+        r.clear(d1)
+        r.clear(carry_out)
+
         r.transfer(carry_in, total)
         _add_preserved(r, a0, total, tmp)
         _add_preserved(r, b0, total, tmp)
@@ -276,6 +280,11 @@ class Quad64Core:
         carry_out = d_delta + STRIDE
 
         r.clear(total)
+        r.clear(tmp)
+        r.clear(d0)
+        r.clear(d1)
+        r.clear(carry_out)
+
         r.transfer(carry_in, total)
         _add_preserved(r, a0, total, tmp)
         _add_not_preserved(r, b0, total, tmp, d0)
@@ -291,7 +300,8 @@ class Quad64Core:
 
     def add64(self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref) -> None:
         """dst = a+b modulo 2**64, preserving value bits of a and b."""
-        self._prepare_binary_op(dst, a, b)
+        self._prepare_binary_op(a)
+        self.bf.clear(dst.marker(0))
         self.bf.move(a.marker(0))
         body = self._emit_add_body(b.base - a.base, dst.base - a.base)
         self.bf.emit("[" + body + "]")
@@ -300,7 +310,7 @@ class Quad64Core:
 
     def sub64(self, dst: Quad64Ref, a: Quad64Ref, b: Quad64Ref) -> None:
         """dst = a-b modulo 2**64 via a + ~b + 1."""
-        self._prepare_binary_op(dst, a, b)
+        self._prepare_binary_op(a)
         self.bf.set_const(dst.marker(0), 1)
         self.bf.move(a.marker(0))
         body = self._emit_sub_body(b.base - a.base, dst.base - a.base)
@@ -316,7 +326,7 @@ class Quad64Core:
         tmp: Quad64Ref,
     ) -> None:
         """Set result=1 iff unsigned a>=b using the subtraction carry-out."""
-        self._prepare_binary_op(tmp, a, b)
+        self._prepare_binary_op(a)
         self.bf.set_const(tmp.marker(0), 1)
         self.bf.move(a.marker(0))
         body = self._emit_sub_body(b.base - a.base, tmp.base - a.base)
