@@ -34,6 +34,15 @@ class QuadBinaryStringListIO(BinaryStringListIO):
     def _all_quad(*refs) -> bool:
         return all(isinstance(ref, Quad64Ref) for ref in refs)
 
+    @staticmethod
+    def _same(a, b) -> bool:
+        return isinstance(a, Quad64Ref) and isinstance(b, Quad64Ref) and a.base == b.base
+
+    def copy64(self, dst, src) -> None:
+        if isinstance(dst, Quad64Ref) and isinstance(src, Quad64Ref) and dst.base == src.base:
+            return
+        super().copy64(dst, src)
+
     def set_u64(self, dst, value: int) -> None:
         if isinstance(dst, Quad64Ref):
             self.quad.set_u64(dst, value)
@@ -42,46 +51,71 @@ class QuadBinaryStringListIO(BinaryStringListIO):
 
     def add64(self, dst, a, b) -> None:
         if self._all_quad(dst, a, b):
-            self.quad.add64(dst, a, b)
+            if self._same(a, b):
+                # Quad64Core uses B's marker cells as lane-local scratch, so
+                # aliased operands must be separated physically first.
+                rhs = self._qtmp(0)
+                self.copy64(rhs, b)
+                self.quad.add64(dst, a, rhs)
+            else:
+                self.quad.add64(dst, a, b)
             return
         super().add64(dst, a, b)
 
     def sub64(self, dst, a, b) -> None:
         if self._all_quad(dst, a, b):
-            self.quad.sub64(dst, a, b)
+            if self._same(a, b):
+                self.quad.set_u64(dst, 0)
+            else:
+                self.quad.sub64(dst, a, b)
             return
         super().sub64(dst, a, b)
 
     def uge64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.quad.uge64(result, a, b, self._qtmp(0))
+            if self._same(a, b):
+                self.bf.set_const(result, 1)
+            else:
+                self.quad.uge64(result, a, b, self._qtmp(0))
             return
         super().uge64(result, a, b)
 
     def ult64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.uge64(result, a, b)
-            self._toggle_bit(result, self.s0)
-            self._clear_scratch()
+            if self._same(a, b):
+                self.bf.clear(result)
+            else:
+                self.uge64(result, a, b)
+                self._toggle_bit(result, self.s0)
+                self._clear_scratch()
             return
         super().ult64(result, a, b)
 
     def ule64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.uge64(result, b, a)
+            if self._same(a, b):
+                self.bf.set_const(result, 1)
+            else:
+                self.uge64(result, b, a)
             return
         super().ule64(result, a, b)
 
     def ugt64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.uge64(result, b, a)
-            self._toggle_bit(result, self.s0)
-            self._clear_scratch()
+            if self._same(a, b):
+                self.bf.clear(result)
+            else:
+                self.uge64(result, b, a)
+                self._toggle_bit(result, self.s0)
+                self._clear_scratch()
             return
         super().ugt64(result, a, b)
 
     def sge64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
+            if self._same(a, b):
+                self.bf.set_const(result, 1)
+                return
             # Signed ordering is unsigned ordering after XORing the sign bit of
             # both operands with 1<<63.  Mutate only for the duration of the
             # comparison and restore before returning.
@@ -97,28 +131,40 @@ class QuadBinaryStringListIO(BinaryStringListIO):
 
     def slt64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.sge64(result, a, b)
-            self._toggle_bit(result, self.s0)
-            self._clear_scratch()
+            if self._same(a, b):
+                self.bf.clear(result)
+            else:
+                self.sge64(result, a, b)
+                self._toggle_bit(result, self.s0)
+                self._clear_scratch()
             return
         super().slt64(result, a, b)
 
     def sle64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.sge64(result, b, a)
+            if self._same(a, b):
+                self.bf.set_const(result, 1)
+            else:
+                self.sge64(result, b, a)
             return
         super().sle64(result, a, b)
 
     def sgt64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
-            self.sge64(result, b, a)
-            self._toggle_bit(result, self.s0)
-            self._clear_scratch()
+            if self._same(a, b):
+                self.bf.clear(result)
+            else:
+                self.sge64(result, b, a)
+                self._toggle_bit(result, self.s0)
+                self._clear_scratch()
             return
         super().sgt64(result, a, b)
 
     def eq64(self, result: int, a, b) -> None:
         if self._all_quad(a, b):
+            if self._same(a, b):
+                self.bf.set_const(result, 1)
+                return
             # Equality iff both unsigned >= directions hold.
             other = self.s1
             gate = self.s2
