@@ -201,8 +201,6 @@ class Quad64Core:
         bf = self.bf
         delta = dst.base - src.base
 
-        # Source markers drive the loop.  The current source marker is consumed
-        # at the start of every lane and then reused as restoration scratch.
         for digit in range(DIGITS):
             bf.set_const(src.marker(digit), 1)
         bf.clear(src.marker(DIGITS))
@@ -227,6 +225,67 @@ class Quad64Core:
         bf.clear(dst.bit0(DIGITS))
         bf.clear(dst.bit1(DIGITS))
 
+    def shl1_inplace(self, word: Quad64Ref) -> None:
+        """Shift left by one using one reverse lane-walking body."""
+        bf = self.bf
+        # Lane zero is a zero sentinel for the reverse walk; lanes 1..31 run.
+        bf.clear(word.marker(0))
+        for digit in range(1, DIGITS):
+            bf.set_const(word.marker(digit), 1)
+        bf.clear(word.marker(DIGITS))
+
+        r = _RelativeBuilder()
+        marker, bit0, bit1 = 0, 1, 2
+        lower_bit1 = -1
+        r.clear(marker)
+        r.clear(bit1)
+        r.transfer(bit0, bit1)
+        r.transfer(lower_bit1, bit0)
+        r.move(-STRIDE)
+
+        bf.move(word.marker(DIGITS - 1))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = word.marker(0)
+
+        # Lowest lane receives an implicit zero in bit0.
+        bf.clear(word.bit1(0))
+        bf.move(word.bit0(0))
+        bf.emit("[-")
+        bf.move(word.bit1(0))
+        bf.emit("+")
+        bf.move(word.bit0(0))
+        bf.emit("]")
+
+    def shr1_inplace(self, word: Quad64Ref) -> None:
+        """Logical shift right by one using one forward lane-walking body."""
+        bf = self.bf
+        for digit in range(DIGITS - 1):
+            bf.set_const(word.marker(digit), 1)
+        bf.clear(word.marker(DIGITS - 1))
+        bf.clear(word.marker(DIGITS))
+
+        r = _RelativeBuilder()
+        marker, bit0, bit1 = 0, 1, 2
+        next_bit0 = STRIDE + 1
+        r.clear(marker)
+        r.clear(bit0)
+        r.transfer(bit1, bit0)
+        r.transfer(next_bit0, bit1)
+        r.move(STRIDE)
+
+        bf.move(word.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = word.marker(DIGITS - 1)
+
+        # Highest lane receives an implicit zero in bit1.
+        bf.clear(word.bit0(DIGITS - 1))
+        bf.move(word.bit1(DIGITS - 1))
+        bf.emit("[-")
+        bf.move(word.bit0(DIGITS - 1))
+        bf.emit("+")
+        bf.move(word.bit1(DIGITS - 1))
+        bf.emit("]")
+
     def _prepare_binary_op(self, a: Quad64Ref) -> None:
         """Arm only the A traversal markers.
 
@@ -249,7 +308,6 @@ class Quad64Core:
         d0, d1 = d_delta + 1, d_delta + 2
         carry_out = d_delta + STRIDE
 
-        # Local cleanup replaces the old 32-lane static B/D sweep.
         r.clear(total)
         r.clear(tmp)
         r.clear(d0)
