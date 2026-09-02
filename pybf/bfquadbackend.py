@@ -50,7 +50,7 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         quotient = self.s0
         parity = self.s1
         gate = self.s2
-        byte = self.s3
+        byte = self.carry0
 
         for byte_index in range(8):
             bf.clear(byte)
@@ -259,9 +259,6 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         if not isinstance(src, Quad64Ref):
             return super().print_u64(src, workspace_base)
 
-        # Keep the mutable magnitude in Quad form.  The inherited double-dabble
-        # conversion only depends on Int64Ref.bit(i), so it works unchanged on
-        # the strided representation and avoids a full Quad->legacy-word copy.
         magnitude = self._qtmp(0)
         bcd_base = workspace_base + WORD_CELLS
         counter = bcd_base + 80
