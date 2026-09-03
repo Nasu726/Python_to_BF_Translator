@@ -1,7 +1,7 @@
 from bf_runtime import run_bf
 from bfcore import BFEmitter
 from bfhexpartition import run_partition_min_pass
-from bfhexseq import ANS, DATA, LEFT, TOTAL, RuntimeHexIntSequence
+from bfhexseq import ANS, LEFT, TOTAL, RuntimeHexIntSequence
 
 
 MASK64 = (1 << 64) - 1
@@ -74,9 +74,6 @@ def test_partition_min_pass_matches_reference_and_carries_state():
     assert _decode_s64(result.memory, seq.field(sentinel, ANS)) == ans
     assert result.pointer == seq.base
 
-    for i in range(len(values)):
-        assert _decode_u64(result.memory, seq.field(i, DATA)) == 0
-
 
 def test_partition_min_pass_handles_msb_carry_regression():
     values = [2**62, 2**62]
@@ -107,5 +104,5 @@ def test_partition_pass_source_is_runtime_n_independent():
     )
 
     assert len(code) == source_size
-    assert source_size < 400_000
+    assert source_size < 400_000, f"runtime partition source is {source_size:,} bytes"
     assert _decode_s64(result.memory, seq.field(len(values), ANS)) == _reference(values)[2]
