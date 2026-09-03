@@ -2,9 +2,9 @@
 
 This layer eliminates a temporary Python list when it is produced from one
 input line and consumed by exactly one later ``for x in list`` loop with no
-other uses.  Input-free scalar/setup statements may occur between producer and
-consumer.  Tokens are parsed one-at-a-time into the normal scalar target, so
-emitted Brainfuck source and runtime storage are independent of line length.
+other uses.  Pure scalar assignments may occur between producer and consumer.
+Tokens are parsed one-at-a-time into the normal scalar target, so emitted
+Brainfuck source and runtime storage are independent of line length.
 
 This is intentionally a producer/consumer optimization, not a replacement for
 full mutable list semantics.  Programs that retain, index, alias, sort or reuse
@@ -78,8 +78,50 @@ def _simple_int_list_input_assignment(node: ast.stmt) -> str | None:
     return node.targets[0].id
 
 
+def _pure_scalar_expr(node: ast.AST) -> bool:
+    """Conservative expression class safe to move across an input read."""
+    forbidden = (
+        ast.Call,
+        ast.Subscript,
+        ast.Attribute,
+        ast.List,
+        ast.Dict,
+        ast.Set,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+        ast.Lambda,
+        ast.Await,
+        ast.Yield,
+        ast.YieldFrom,
+        ast.NamedExpr,
+    )
+    return not any(isinstance(item, forbidden) for item in ast.walk(node))
+
+
 class PythonToBFStream(_BasePythonToBFStream):
     """Established generic compiler plus dead-list producer/consumer fusion."""
+
+    def _reorder_safe_setup(self, stmt: ast.stmt) -> bool:
+        """Whether stmt may execute before the producer's input consumption."""
+        if isinstance(stmt, ast.Assign):
+            return (
+                bool(stmt.targets)
+                and all(
+                    isinstance(target, ast.Name) and target.id in self.variables
+                    for target in stmt.targets
+                )
+                and _pure_scalar_expr(stmt.value)
+            )
+        if isinstance(stmt, ast.AnnAssign):
+            return (
+                isinstance(stmt.target, ast.Name)
+                and stmt.target.id in self.variables
+                and stmt.value is not None
+                and _pure_scalar_expr(stmt.value)
+            )
+        return False
 
     def _find_input_int_list_consumer(
         self,
@@ -113,9 +155,10 @@ class PythonToBFStream(_BasePythonToBFStream):
                         return None
                 return loop_index
 
-            # Delaying materialization past another input() would reorder the
-            # byte stream. Any other use of the list requires real list state.
-            if _contains_input_call([stmt]) or _mentions_name(stmt, source):
+            # Any use of the list requires real list state.  Even an A-free
+            # statement may be crossed only when it is a pure scalar assignment;
+            # this prevents moving print/calls/mutations before the input read.
+            if _mentions_name(stmt, source) or not self._reorder_safe_setup(stmt):
                 return None
 
         return None
@@ -162,7 +205,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.add_const(active, -1)
 
         # The final generic compiler stores scalars as Quad64Ref rather than the
-        # old contiguous Boolean Int64Ref.  Parse through the same packed-token
+        # old contiguous Boolean Int64Ref. Parse through the same packed-token
         # ABI used by PythonToBFQuad, then expand/copy into the loop target.
         self.backend.read_packed_s64_line_token(
             token,
@@ -187,7 +230,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             self._loop_stack.pop()
 
         # Rearm only when the loop did not break and the current token did not
-        # already consume LF/EOF.  A continue leaves broke == 0, matching Python.
+        # already consume LF/EOF. A continue leaves broke == 0, matching Python.
         self._flag_not(proceed, broke, proceed_tmp)
         self._flag_not(line_open, end_line, line_tmp)
         self.backend.copy_cell(proceed, rearm_gate, self.backend.s0)
@@ -200,7 +243,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.end_while(active)
 
         # A break in the middle of the line must consume the rest of that line
-        # so the following input() starts correctly.  If the breaking token
+        # so the following input() starts correctly. If the breaking token
         # itself consumed LF, line_open == 0 and drain_to_line_end is a no-op.
         self.backend.copy_cell(broke, drain_gate, self.backend.s0)
         self.bf.begin_while(drain_gate)
