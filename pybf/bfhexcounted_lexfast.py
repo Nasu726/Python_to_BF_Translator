@@ -18,6 +18,7 @@ from bfhexcounted_direct import (
     _prepare_count_from_first_line,
 )
 from bfhexdecimal_compact import decimal_digit_kernel, negate_data_kernel
+from bfhexradixfast import add_data_to_total_kernel
 from bfhexseq import (
     ACTIVE,
     ANS,
@@ -43,7 +44,6 @@ from bfhexseq import (
     WORKSPACE_END,
     RuntimeHexIntSequence,
     _RelativeBuilder,
-    _add_data_to_total_kernel,
     _flag_not,
     _transfer_word,
 )
@@ -192,7 +192,7 @@ def _counted_record_body() -> str:
     r.emit("]")
 
     r.move(0)
-    r.emit(_add_data_to_total_kernel())
+    r.emit(add_data_to_total_kernel())
     r.pos = 0
     r.move(GATE)
     r.emit("]")
