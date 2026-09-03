@@ -9,7 +9,8 @@ rather than inferred from the number of tokens present on the input line.
 from __future__ import annotations
 
 from bfcore import BFEmitter
-from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum
+from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as read_counted_canonical
+from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum as read_counted_prefix
 from bfhexio import (
     print_record_hex_s64_compact,
     propagate_field_back_after_consumed_markers,
@@ -17,7 +18,7 @@ from bfhexio import (
 from bfhexpartition_addcandidate import run_partition_min_pass as run_partition_min_pass_general
 from bfhexpartition_boundedans import MAX_BOUNDED_NIBBLES, answer_extent
 from bfhexpartition_nonnegans import run_partition_min_pass as run_partition_min_pass_nonnegative
-from bfhexpartition_zeroans import run_partition_min_pass as run_partition_min_pass_zero_aware
+from bfhexpartition_prefix import run_partition_min_pass as run_partition_min_pass_prefix
 from bfhexseq import ANS, RuntimeHexIntSequence
 from bfopt import optimize_bf
 
@@ -29,13 +30,15 @@ def _raw_size(bf: BFEmitter) -> int:
     return sum(len(part) for part in bf.parts)
 
 
-def _select_partition_runner(initial_ans: int):
-    """Choose the narrowest semantics-preserving partition minimum lowering."""
+def _select_partition_lowering(initial_ans: int):
+    """Choose a reader/pass pair whose record ABI matches the minimum lowering."""
     if 0 <= initial_ans < (1 << 63):
         if answer_extent(initial_ans) <= MAX_BOUNDED_NIBBLES:
-            return run_partition_min_pass_zero_aware
-        return run_partition_min_pass_nonnegative
-    return run_partition_min_pass_general
+            # Store inclusive prefix sums during input. The second pass then
+            # consumes those prefixes directly instead of recomputing LEFT.
+            return read_counted_prefix, run_partition_min_pass_prefix
+        return read_counted_canonical, run_partition_min_pass_nonnegative
+    return read_counted_canonical, run_partition_min_pass_general
 
 
 def _build_partition_program(
@@ -46,13 +49,13 @@ def _build_partition_program(
     cumulative: dict[str, int] = {}
 
     seq = RuntimeHexIntSequence(base=SEQUENCE_BASE)
-    read_counted_two_line_s64s_and_sum(bf, seq)
+    reader, partition_runner = _select_partition_lowering(initial_ans)
+    reader(bf, seq)
     cumulative["read_n_and_values"] = _raw_size(bf)
 
     seq.propagate_total_back_to_first(bf)
     cumulative["reverse_total"] = _raw_size(bf)
 
-    partition_runner = _select_partition_runner(initial_ans)
     partition_runner(bf, seq, initial_ans=initial_ans)
     cumulative["partition"] = _raw_size(bf)
 
