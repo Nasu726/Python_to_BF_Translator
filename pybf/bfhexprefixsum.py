@@ -28,8 +28,6 @@ def _map_total_base16_dual(
             r.clear(local_out)
             r.clear(next_out)
             r.add(carry, 1)
-            # Remaining total is now 0..15. Consume it once while duplicating
-            # directly to both outputs; no restore/copy pass is needed.
             r.move(total)
             r.emit("[")
             r.add(total, -1)
@@ -54,16 +52,16 @@ def add_data_to_prefix_and_next_total(r: _RelativeBuilder) -> None:
     consumed. The inclusive prefix sum is emitted into current DATA while an
     identical word is emitted into next.TOTAL for the following input record.
 
-    This fuses the old ``TOTAL += DATA`` plus subsequent TOTAL split and avoids
-    preserving the original DATA, which the specialized partition pass no
-    longer needs once the prefix has been stored.
+    The counted-reader ABI reserves LEFT[15] for the live count extent. A single
+    accumulator cell is sufficient because each radix digit is fully consumed
+    before the next digit begins, so LEFT[1] is reused for all sixteen lanes.
     """
     carry = TOTAL  # TOTAL[0] becomes free during nibble zero.
+    acc = LEFT + 1
 
     for i in range(HEX_DIGITS):
         a = TOTAL + i
         b = DATA + i
-        acc = LEFT + i
         prefix = DATA + i
         next_total = RECORD_STRIDE + TOTAL + i
 
@@ -80,6 +78,7 @@ def add_data_to_prefix_and_next_total(r: _RelativeBuilder) -> None:
             carry=carry,
         )
 
+    r.clear(acc)
     r.clear(carry)
 
 
