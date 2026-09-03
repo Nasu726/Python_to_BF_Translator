@@ -1,10 +1,10 @@
 """Source-compact direct decimal accumulation into hexadecimal int64 lanes.
 
 This keeps the runtime algorithm from ``bfhexdecimal`` but specializes the
-radix-16 mapper to the actual bounds of each operation.  Decimal accumulation
-maps at most 23 (= 14 remainder + 9 carry), while two's-complement negation maps
-at most 16.  The generic runtime helper is deliberately sized for 0..31 and
-therefore emits unnecessary nested guards for these narrower domains.
+radix-16 mapper to the actual operation bounds.  Decimal accumulation never
+exceeds 23; rather than unrolling all 23 values, its mapper detects the radix
+boundary at 16 and drains the residual 0..7 into scratch.  Two's-complement
+negation needs only the ordinary 0..16 bounded mapper.
 """
 
 from __future__ import annotations
@@ -28,10 +28,7 @@ def _map_total_base16_bounded(
     *,
     max_total: int,
 ) -> None:
-    """Consume 0..max_total into a hex digit and 0/1 carry.
-
-    ``max_total`` must stay below 32 so one carry bit is sufficient.
-    """
+    """Consume 0..max_total into a hex digit and 0/1 carry."""
     if not 0 <= max_total <= 31:
         raise ValueError("bounded base16 mapper requires max_total <= 31")
     r.clear(out)
@@ -48,6 +45,42 @@ def _map_total_base16_bounded(
     for _ in range(max_total):
         r.move(total)
         r.emit("]")
+
+
+def _map_total_base16_u23(
+    r: _RelativeBuilder,
+    total: int,
+    out: int,
+    carry: int,
+    residual: int,
+) -> None:
+    """Consume a known 0..23 total with only sixteen nested guards.
+
+    Values below sixteen are accumulated directly into ``out``.  At exactly
+    the sixteenth consumed unit, ``carry`` becomes one and the remaining 0..7
+    units are drained to ``residual`` so every open guard closes on total==0.
+    The residual is then moved into ``out``.
+    """
+    if residual in (total, out, carry):
+        raise ValueError("residual scratch must not alias mapper operands")
+
+    r.clear(out)
+    r.clear(carry)
+    r.clear(residual)
+    for step in range(1, 17):
+        r.move(total)
+        r.emit("[")
+        r.add(total, -1)
+        if step < 16:
+            r.add(out, 1)
+        else:
+            r.clear(out)
+            r.add(carry, 1)
+            r.transfer(total, residual)
+    for _ in range(16):
+        r.move(total)
+        r.emit("]")
+    r.transfer(residual, out)
 
 
 def _consume_nibble_times10(
@@ -88,14 +121,15 @@ def _decimal_digit_body() -> str:
     carry_out = HEX_CARRY_B
     for i in range(HEX_DIGITS):
         _consume_nibble_times10(r, DATA + i, HEX_TOTAL, carry_out)
+        # carry_in has served its purpose once moved into HEX_TOTAL and is zero,
+        # so it can safely act as the mapper's residual scratch for this lane.
         r.transfer(carry_in, HEX_TOTAL)
-        # (10*x)%16 <= 14 and the incoming decimal radix carry <= 9.
-        _map_total_base16_bounded(
+        _map_total_base16_u23(
             r,
             HEX_TOTAL,
             DATA + i,
             HEX_EXTRA,
-            max_total=23,
+            carry_in,
         )
         r.transfer(HEX_EXTRA, carry_out)
         carry_in, carry_out = carry_out, carry_in
@@ -125,7 +159,6 @@ def _negate_data_body() -> str:
         r.move(DATA + i)
         r.emit("]")
         r.transfer(HEX_CARRY_A, HEX_TOTAL)
-        # 15-x + carry <= 16.
         _map_total_base16_bounded(
             r,
             HEX_TOTAL,
