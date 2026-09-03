@@ -1,8 +1,12 @@
 from bf_runtime import run_bf
 from bfcontestpartition import build_partition_program, partition_program_size_breakdown
+from bfcore import BFEmitter
+from bfhexio import print_record_hex_s64_compact
+from bfhexseq import ANS, RuntimeHexIntSequence
 
 
 ATCODER_SOURCE_LIMIT = 512 * 1024
+MASK64 = (1 << 64) - 1
 
 
 def _reference(values):
@@ -13,6 +17,37 @@ def _reference(values):
         left += value
         ans = min(ans, abs(total - 2 * left))
     return ans
+
+
+def _compact_print_program(value):
+    bf = BFEmitter()
+    seq = RuntimeHexIntSequence(base=320)
+    bits = value & MASK64
+    for i in range(16):
+        bf.set_const(seq.field(0, ANS) + i, (bits >> (4 * i)) & 0xF)
+    print_record_hex_s64_compact(bf, seq, field_base=ANS)
+    return bf.code()
+
+
+def test_compact_hex_decimal_printer_signed_int64_boundaries():
+    values = [
+        0,
+        1,
+        10,
+        9_999_999,
+        -1,
+        -123_456_789,
+        -(1 << 63),
+        (1 << 63) - 1,
+    ]
+    for value in values:
+        result = run_bf(
+            _compact_print_program(value),
+            "",
+            memory_size=10_000,
+            step_limit=1_000_000_000,
+        )
+        assert result.output == f"{value}\n"
 
 
 def test_scalable_partition_vertical_slice_executes_end_to_end():
