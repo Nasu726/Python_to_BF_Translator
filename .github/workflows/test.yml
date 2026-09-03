@@ -41,6 +41,7 @@ jobs:
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpartition_minfused.py
+              tests/test_bfhexpartition_absfast.py
               tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
               tests/test_bfhexseq_direct.py
@@ -97,6 +98,7 @@ jobs:
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
           from bfhexpartition_minfused import run_partition_min_pass as run_minfused_partition_min_pass
+          from bfhexpartition_absfast import run_partition_min_pass as run_absfast_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
@@ -149,6 +151,7 @@ jobs:
           for label, runner in (
               ("movefused", run_movefused_partition_min_pass),
               ("minfused", run_minfused_partition_min_pass),
+              ("absfast", run_absfast_partition_min_pass),
           ):
               candidate_code = stage_program("partition", runner)
               candidate_result = run_bf(candidate_code, data, memory_size=30000, step_limit=1000000000)
