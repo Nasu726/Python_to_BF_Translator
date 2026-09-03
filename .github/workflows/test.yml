@@ -45,6 +45,7 @@ jobs:
               tests/test_bfhexpartition_totalcandidate.py
               tests/test_bfhexpartition_addcandidate.py
               tests/test_bfhexpartition_nonnegans.py
+              tests/test_bfhexpartition_difference.py
               tests/test_bfhexpartition_absfast.py
               tests/test_bfhexradixfast.py
               tests/test_bfhexpasses.py
@@ -110,6 +111,7 @@ jobs:
           from bfhexpartition_totalcandidate import _abs_total_inplace, run_partition_min_pass as run_totalcandidate_partition_min_pass
           from bfhexpartition_addcandidate import run_partition_min_pass as run_addcandidate_partition_min_pass
           from bfhexpartition_nonnegans import run_partition_min_pass as run_nonnegans_partition_min_pass
+          from bfhexpartition_difference import run_partition_min_pass as run_difference_partition_min_pass
           from bfhexpartition_absfast import run_partition_min_pass as run_absfast_partition_min_pass
           from bfhexseq import ANS, BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence, _RelativeBuilder
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
@@ -191,6 +193,7 @@ jobs:
               ("totalcandidate", run_totalcandidate_partition_min_pass),
               ("addcandidate", run_addcandidate_partition_min_pass),
               ("nonnegans", run_nonnegans_partition_min_pass),
+              ("difference", run_difference_partition_min_pass),
               ("absfast", run_absfast_partition_min_pass),
           ):
               candidate_code = stage_program("partition", runner)
