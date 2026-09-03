@@ -61,6 +61,23 @@ def test_hex_sequence_total_can_be_carried_back_to_record_zero():
     assert result.pointer == seq.base
 
 
+def test_hex_sequence_reverse_transport_includes_most_significant_nibble():
+    # 2**62 + 2**62 == 2**63 sets only the high/sign nibble that the original
+    # off-by-one reverse transport accidentally skipped.
+    values = [2**62, 2**62]
+    code, seq = _program(propagate=True)
+    result = run_bf(
+        code,
+        " ".join(map(str, values)) + "\n",
+        memory_size=8_000,
+        step_limit=500_000_000,
+    )
+
+    assert _decode_u64(result.memory, seq.field(0, TOTAL)) == 1 << 63
+    assert _decode_s64(result.memory, seq.field(0, TOTAL)) == -(1 << 63)
+    assert result.pointer == seq.base
+
+
 def test_hex_sequence_empty_line_keeps_zero_total_at_record_zero():
     code, seq = _program(propagate=True)
     result = run_bf(code, "\n", memory_size=4_000, step_limit=100_000_000)
