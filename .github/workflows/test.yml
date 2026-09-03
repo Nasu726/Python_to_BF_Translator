@@ -36,6 +36,7 @@ jobs:
               tests/test_bfhexcounted.py
               tests/test_bfhexcounted_extent.py
               tests/test_bfhexcounted_direct.py
+              tests/test_bfhexcounted_lexfast.py
               tests/test_bfhexdecimal.py
               tests/test_bfhexdecimal_compact.py
               tests/test_bfhexpartition.py
@@ -92,6 +93,7 @@ jobs:
           from bfhexcounted import read_counted_two_line_s64s_and_sum
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
+          from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as read_lexfast_counted
           from bfhexdecimal import decimal_digit_kernel as direct_digit, negate_data_kernel as direct_negate
           from bfhexdecimal_compact import decimal_digit_kernel as compact_digit, negate_data_kernel as compact_negate
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
@@ -179,10 +181,14 @@ jobs:
           extent_result = run_bf(extent_code, data, memory_size=30000, step_limit=1000000000)
           print(f"partition_extent_counted_reader_source={len(extent_code)} steps_n64={extent_result.steps}")
 
-          bf = BFEmitter()
-          seq = RuntimeHexIntSequence(base=320)
-          read_direct_counted(bf, seq)
-          direct_counted_code = optimize_bf(bf.code())
-          direct_counted_result = run_bf(direct_counted_code, data, memory_size=30000, step_limit=1000000000)
-          print(f"partition_direct_counted_reader_source={len(direct_counted_code)} steps_n64={direct_counted_result.steps}")
+          for label, reader in (
+              ("direct_counted", read_direct_counted),
+              ("lexfast_counted", read_lexfast_counted),
+          ):
+              bf = BFEmitter()
+              seq = RuntimeHexIntSequence(base=320)
+              reader(bf, seq)
+              reader_code = optimize_bf(bf.code())
+              reader_result = run_bf(reader_code, data, memory_size=30000, step_limit=1000000000)
+              print(f"partition_{label}_reader_source={len(reader_code)} steps_n64={reader_result.steps}")
           PY
