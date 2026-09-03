@@ -86,7 +86,7 @@ jobs:
           from bfcore import BFEmitter
           from bfhexcounted import read_counted_two_line_s64s_and_sum
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
-          from bfhexpartition_fused import run_partition_min_pass
+          from bfhexpartition import run_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfopt import optimize_bf
 
@@ -134,4 +134,19 @@ jobs:
                   step_limit=1000000000,
               )
               print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
+
+          # Compare the N-counted reader against the underlying line reader to
+          # separate numeric parsing/summing cost from count-carry overhead.
+          bf = BFEmitter()
+          seq = RuntimeHexIntSequence(base=320)
+          seq.read_lf_terminated_s64s_and_sum(bf)
+          line_code = optimize_bf(bf.code())
+          line_data = " ".join(["1"] * 64) + "\n"
+          line_result = run_bf(
+              line_code,
+              line_data,
+              memory_size=30000,
+              step_limit=1000000000,
+          )
+          print(f"partition_plain_line_reader_source={len(line_code)} steps_n64={line_result.steps}")
           PY
