@@ -34,6 +34,7 @@ jobs:
               tests/test_bfdynlist.py
               tests/test_bfheap.py
               tests/test_bfhexcounted.py
+              tests/test_bfhexcounted_extent.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpasses.py
@@ -86,6 +87,7 @@ jobs:
           from bfcontestpartition import build_partition_program, partition_program_size_breakdown
           from bfcore import BFEmitter
           from bfhexcounted import read_counted_two_line_s64s_and_sum
+          from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
@@ -149,8 +151,6 @@ jobs:
               f"steps={movefused_result.steps}"
           )
 
-          # Compare the N-counted reader against the underlying line reader to
-          # separate numeric parsing/summing cost from count-carry overhead.
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
           seq.read_lf_terminated_s64s_and_sum(bf)
@@ -163,4 +163,19 @@ jobs:
               step_limit=1000000000,
           )
           print(f"partition_plain_line_reader_source={len(line_code)} steps_n64={line_result.steps}")
+
+          bf = BFEmitter()
+          seq = RuntimeHexIntSequence(base=320)
+          read_extent_counted(bf, seq)
+          extent_code = optimize_bf(bf.code())
+          extent_result = run_bf(
+              extent_code,
+              data,
+              memory_size=30000,
+              step_limit=1000000000,
+          )
+          print(
+              f"partition_extent_counted_reader_source={len(extent_code)} "
+              f"steps_n64={extent_result.steps}"
+          )
           PY
