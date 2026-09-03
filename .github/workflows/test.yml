@@ -45,6 +45,7 @@ jobs:
               tests/test_bfhexpartition_totalcandidate.py
               tests/test_bfhexpartition_addcandidate.py
               tests/test_bfhexpartition_nonnegans.py
+              tests/test_bfhexpartition_absbranchfused.py
               tests/test_bfhexpartition_absfast.py
               tests/test_bfhexradixfast.py
               tests/test_bfhexpasses.py
@@ -83,6 +84,9 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest pytest-xdist
+      - name: Verify full test collection
+        if: matrix.suite == 'contest'
+        run: python -m pytest --collect-only -q tests
       - name: Run ${{ matrix.suite }} tests
         run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
       - name: Report scalable partition metrics
@@ -106,6 +110,7 @@ jobs:
           from bfhexpartition_totalcandidate import run_partition_min_pass as run_totalcandidate_partition_min_pass
           from bfhexpartition_addcandidate import run_partition_min_pass as run_addcandidate_partition_min_pass
           from bfhexpartition_nonnegans import run_partition_min_pass as run_nonnegans_partition_min_pass
+          from bfhexpartition_absbranchfused import run_partition_min_pass as run_absbranchfused_partition_min_pass
           from bfhexpartition_absfast import run_partition_min_pass as run_absfast_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
@@ -162,6 +167,7 @@ jobs:
               ("totalcandidate", run_totalcandidate_partition_min_pass),
               ("addcandidate", run_addcandidate_partition_min_pass),
               ("nonnegans", run_nonnegans_partition_min_pass),
+              ("absbranchfused", run_absbranchfused_partition_min_pass),
               ("absfast", run_absfast_partition_min_pass),
           ):
               candidate_code = stage_program("partition", runner)
