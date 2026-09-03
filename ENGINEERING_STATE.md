@@ -19,15 +19,14 @@ Do not record routine green CI runs. Record only baselines or results that affec
 - Public entry point remains ordinary Python source -> standalone standard Brainfuck (`><+-.,[]`).
 - Python is compile-time only; generated BF must not require Python/runtime services.
 - Primary practical target is competitive-programming style programs, especially workloads with N around 200,000.
-- Source size is an acceptance constraint. Current contest regression must remain <= 512 KiB.
-- Runtime complexity matters independently of source size. Do not trade a small source reduction for value-proportional or otherwise explosive BF execution.
+- Source size and runtime are independent acceptance axes. The contest regression must remain <= 512 KiB and runtime work must remain linear in runtime N.
+- Do not trade a small source reduction for value-proportional or otherwise explosive BF execution.
 
 ### [PERMANENT] Runtime / BF ABI
 
-- 8-bit wrapping tape cells.
-- Tape is zero-initialized before execution.
-- Standard byte I/O via `,` / `.`.
-- Generated code may require substantial rightward tape. AtCoder uses Tritium; large virtual tape is plausible, but an actual submission benchmark is still required before treating wall-clock feasibility as proven.
+- 8-bit wrapping tape cells, zero-initialized tape, standard byte I/O via `,` / `.`.
+- Scalable numeric records are 66-cell fixed-stride hexadecimal int64 records with MARKER/BACK plus DATA/TOTAL/LEFT/ANS words.
+- Generated code may require substantial rightward tape. AtCoder uses Tritium; raw interpreter steps are only a regression/complexity proxy. An actual Tritium/AtCoder benchmark is still required before claiming N=200,000 wall-clock feasibility.
 
 ### [PERMANENT] Python semantics
 
@@ -61,59 +60,67 @@ print(ans)
 
 Variable names are irrelevant; data-flow relationships are required. Near misses fall back to the generic compiler.
 
-The specialization is no longer dependent on “number of tokens == N”. First-line N is explicitly parsed and carried into the second-line reader:
+First-line N is explicitly parsed and carried with the runtime cursor:
 
-- exactly N values participate in the algorithm;
+- exactly N values participate;
 - extra second-line tokens are drained but ignored;
-- a short second line zero-fills the missing participating values and does not read the next line;
+- a short second line zero-fills missing participating values without crossing into the next line;
 - N=0 is supported and still drains the list line;
-- negative N is normalized to zero by the counted reader.
-
-`bfcontestpartition.py` selects the faster nonnegative-answer minimum path when `0 <= initial_ans < 2**63`; otherwise it uses the general signed-min path.
+- negative N is normalized to zero.
 
 ### [PR-LIFETIME: PR #6] Current measured baseline
 
-Latest stable public program:
+Latest public bounded-prefix program on CI:
 
-- optimized BF source: **438,702 bytes**;
-- 512 KiB headroom: **85,586 bytes**;
-- N=32 all-ones: **2,220,724** raw interpreter steps;
-- N=64 all-ones: **4,263,655** raw interpreter steps;
-- measured slope: **63,841.6 steps / added record**;
-- linear N=200,000 projection: **12,768,496,543 raw steps**.
+- optimized BF source: **363,109 bytes**;
+- 512 KiB headroom: **161,179 bytes**;
+- N=32 all-ones: **1,600,192** raw interpreter steps;
+- N=64 all-ones: **2,998,259** raw interpreter steps;
+- measured slope: **43,689.6 steps / added record**;
+- linear N=200,000 projection: **8,738,120,875 raw steps**.
 
-Raw interpreter steps are a regression/complexity proxy, not AtCoder wall-clock time. Tritium performs optimized/JIT execution. Do not claim N=200,000 is fast enough until tested with Tritium/AtCoder.
+For comparison, the retained pre-prefix baseline was 438,702 bytes / 4,263,655 N64 steps / 63,841.6 steps per record. The current path is therefore about 17% smaller in source and about 30% lower in the N64 raw-step proxy.
 
-N=64 phase telemetry on the same public construction:
+N=64 all-ones component telemetry:
 
-- counted lexical reader: **1,182,801** cumulative steps;
-- reverse TOTAL propagation: **1,231,061** cumulative;
-- partition pass: **4,079,669** cumulative;
-- reverse ANS propagation: **4,097,595** cumulative;
-- decimal output/full program: **4,263,655**.
+- prefix-retaining counted reader: **1,370,133** cumulative steps, 242,650 optimized source bytes;
+- reverse TOTAL propagation: **1,418,393** cumulative;
+- stored-prefix candidate only: **2,439,261** cumulative, so candidate construction adds about **1,020,868** steps;
+- candidate + abs: **2,788,205** cumulative, so abs adds about **348,944** steps;
+- reusable stored-prefix partition pass: **2,836,565** cumulative;
+- terminal direct-sentinel full program: **2,998,259** steps.
 
-The partition pass remains the dominant optimization target.
+The two largest remaining runtime targets are now the counted reader and stored-prefix candidate construction. Minimum/gating work has been reduced to a comparatively small remainder.
 
-### [PR-LIFETIME: PR #6] Runtime record design
+### [PR-LIFETIME: PR #6] Bounded-prefix fast path
 
-Current scalable numeric sequence uses fixed-stride hexadecimal int64 records. Core carried fields are DATA, TOTAL, LEFT and ANS plus marker/back links. The emitted source is independent of runtime N; tape use and execution scale with N.
+For a nonnegative initial answer that fits the bounded-answer scratch layout, `bfcontestpartition.py` uses a specialized reader/pass/output ABI:
 
-The current public reader is `bfhexcounted_lexfast.py`:
+1. `bfhexcounted_prefix.py` parses signed decimal int64 values and retains each inclusive prefix sum in the current record while carrying TOTAL forward.
+2. TOTAL is propagated back once after input.
+3. `bfhexpartition_prefix.py` computes `TOTAL - 2*stored_prefix` directly; it no longer recomputes `LEFT += DATA` during the second pass.
+4. The minimum lowering uses bounded answer width, adaptive narrowing when ANS becomes small, and an ANS=0 fast path. The zero path still handles the fixed-width `abs(INT64_MIN) == INT64_MIN` exception correctly.
+5. `bfhexpartition_prefix_terminal.py` leaves the runtime pointer on the final sentinel and prints ANS there directly. This removes the ordinary partition rewind plus runtime-N ANS backward transport.
 
-- carries N with the record cursor;
-- uses direct decimal -> fixed-width hexadecimal accumulation;
-- preserves signed int64 wrap;
-- explicitly clears parser scratch that aliases future-record cells.
+The terminal output change reduced the public source from 365,746 to 363,109 bytes. On N64 all-ones it reduced full execution from 3,020,551 to 2,998,259 steps; savings are larger when the final ANS has more nonzero digits because backward word transport is avoided.
 
-Current public partition arithmetic uses:
+Wide nonnegative answers and general signed answers retain the canonical reader/reusable partition/output path. The stored-prefix record ABI must not leak into those fallbacks.
 
-1. fused `LEFT += DATA` and `TOTAL - 2*LEFT` construction;
-2. destructive state transport to the next record;
-3. two's-complement absolute value;
-4. minimum propagation;
-5. compact decimal output.
+### [PR-LIFETIME: PR #6] Input and arithmetic evolution
 
-The canonical add-candidate decoder uses thresholds 8/16/24 rather than one 31-level source-unrolled decoder. This reduced public source from **458,094** to **438,702 bytes** with identical measured runtime.
+Important promoted changes, in order:
+
+- direct decimal -> fixed-width hexadecimal parsing;
+- lexical single-pass character classification;
+- counted N extent carried with the record cursor;
+- destructive candidate/state transport;
+- thresholded 8/16/24 candidate decoding;
+- bounded/adaptive answer-width minimum;
+- zero-answer fast path;
+- input-time prefix retention;
+- terminal direct-sentinel decimal output.
+
+The emitted source remains independent of runtime N.
 
 ---
 
@@ -154,19 +161,29 @@ Do not place huge runtime arrays between hot scalars or scratch; BF tape distanc
 
 ### [PERMANENT] Prefer runtime repetition over static expansion
 
-If an operation logically repeats at runtime, first ask whether BF can contain one loop body instead of the compiler emitting one body per slot/lane/item. Major reductions came from runtime string iteration, list walkers, numeric lane loops, direct token parsing, and runtime record traversal.
+If an operation logically repeats at runtime, first ask whether BF can contain one loop body instead of the compiler emitting one body per slot/lane/item. Major reductions came from runtime string iteration, list walkers, numeric lane loops, direct token parsing, runtime record traversal, and carried decimal-output rounds.
 
-### [PERMANENT] Measure source and runtime separately
+### [PERMANENT] Move reusable work to the earliest pass when it removes a later pass
 
-A smaller or apparently simpler BF lowering can be slower. Promote an optimization only after correctness and measured source/runtime evaluation.
+Input-time prefix retention is a strong example. The reader became more expensive, but storing information already available during input removed a larger `LEFT += DATA` state computation from the partition pass and won across all tested value distributions.
 
-Known examples from PR #6:
+### [PERMANENT] Terminal state need not be normalized back to a compile-time anchor
 
-- first fused candidate experiment reduced source but worsened partition runtime;
-- `absfast` reduced apparent arithmetic structure but was much slower;
-- fused abs+min was correct but increased both source and runtime;
-- destructive state transport was a genuine runtime win;
-- tiered 8/16/24 candidate decoding was a genuine source win with no runtime loss.
+If no pointer-sensitive code follows, a runtime-dependent sentinel can be the origin for final output. Direct sentinel printing avoids a full carried-state backward transport. Keep reusable helpers normalized, but allow explicit terminal variants when the program ends there.
+
+### [PERMANENT] Measure source and runtime separately and across value distributions
+
+A smaller or apparently simpler BF lowering can be slower. Promote only after correctness plus source/runtime measurement on more than one easy distribution.
+
+Known rejected experiments from PR #6:
+
+- first fused candidate experiment reduced source but worsened runtime;
+- `absfast` was much slower;
+- fused abs+min increased source and runtime;
+- DATA->LEFT candidate merge improved all-ones but regressed mixed/negative inputs;
+- fused dual-output prefix-sum reader improved all-ones but regressed mixed/negative inputs and increased source substantially.
+
+The last experiment also exposed an ABI bug: LEFT[15] is the live count extent. Scratch-lane optimizations must respect count/parser fields that share the same runtime record.
 
 ### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 
@@ -178,15 +195,15 @@ The runtime parser intentionally borrows cells in future-record workspace. A SIG
 
 ### [PERMANENT] Runtime count must travel with the cursor
 
-For `range(n)` semantics, N cannot remain only at a fixed anchor while the parser advances through runtime-created records. Carry the count/extent with the cursor. Count extent can avoid a full 16-nibble nonzero rescan after each decrement.
+For `range(n)` semantics, N cannot remain only at a fixed anchor while the parser advances through runtime-created records. Carry count/extent with the cursor. Count extent avoids a full 16-nibble nonzero rescan after each decrement.
 
 ### [PERMANENT] Avoid value-proportional decimal arithmetic
 
-A packed decimal parser using value-proportional byte `*10` loops saved little source and exceeded enormous step budgets. Decimal kernels should have work bounded by representation width/digit count, not numeric byte value.
+Decimal kernels must have work bounded by representation width/digit count, not numeric byte value.
 
 ### [PERMANENT] Repository editing safety
 
-Never perform `partial fetch -> full replacement` on a foundational file. A previous partial replacement truncated `transpiler_v2.py`. Fetch the full current blob before replacement or isolate work in a new module.
+Never perform `partial fetch -> full replacement` on a foundational file. Fetch the full current blob before replacement or isolate work in a new module.
 
 ### [PERMANENT] Runtime walker coordinate discipline
 
@@ -194,7 +211,7 @@ Repeated BF-loop builders that move to another record/block must rebase relative
 
 ### [PERMANENT] Sentinels must be physical storage, not neighboring variables
 
-Any walker that probes the next slot needs a reserved sentinel. Treating the next compiler allocation as an implicit sentinel caused overflow/corruption.
+Any walker that probes the next slot needs reserved sentinel storage.
 
 ### [PERMANENT] Do not mask bugs with step-limit increases
 
@@ -206,7 +223,7 @@ Step limits are diagnostic and regression guards. Increase temporarily only to d
 
 ### [PR-LIFETIME: PR #6]
 
-CI is sharded into `arithmetic`, `runtime`, `frontend`, and `contest`, with xdist inside each job.
+CI is sharded into `arithmetic`, `runtime`, `frontend`, and `contest`, with xdist inside each job. Runtime telemetry is part of the main test workflow. Experimental benchmark workflow is manual-only.
 
 Do not relax these gates merely to land the PR:
 
@@ -217,17 +234,18 @@ Do not relax these gates merely to land the PR:
 - runtime-N source independence;
 - signed int64 boundary tests;
 - extra-token / short-line / N=0 counted-input semantics;
+- terminal sentinel output including empty sequence and `INT64_MIN` behavior;
 - linear raw-step growth guard.
 
-Latest head before this document refresh had all four shards green.
+The current runtime shard executes 114 tests including the terminal sentinel regression.
 
 ---
 
 ## Next implementation order
 
-1. Keep the current specialization green and source <=512 KiB.
-2. Benchmark the generated program with actual Tritium/AtCoder rather than inferring wall-clock performance from the Python interpreter step count.
-3. Continue partition-pass optimization only when it produces a measured win; current phase telemetry says this is the dominant cost.
+1. Keep the current specialization green and <=512 KiB.
+2. Benchmark the generated program with actual Tritium/AtCoder; do not infer wall-clock feasibility from Python raw-step telemetry.
+3. Optimize the two remaining dominant components: counted lexical/prefix reader and stored-prefix candidate construction. Require wins across mixed, large-positive, and negative distributions, not only all-ones.
 4. Generalize reusable runtime numeric/list primitives rather than adding more one-off whole-program patterns where a shared lowering is practical.
 5. Wire scalable storage into ordinary Python `list(map(int, input().split()))` semantics when aliasing/indexing/multi-pass behavior is ready.
 6. Resume broader heap/list/deepcopy/sort work after the scalable numeric list ABI is stable.
