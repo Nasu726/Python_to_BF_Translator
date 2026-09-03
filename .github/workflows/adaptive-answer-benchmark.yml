@@ -18,32 +18,36 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest
-      - name: Test optimization experiments
+      - name: Test prefix-retaining lowering
         env:
           PYTHONPATH: pybf
-        run: python -m pytest -q tests/test_bfhexpartition_adaptiveans.py tests/test_bfhexpartition_zeroans.py tests/test_bfhexpartition_datamerge.py
-      - name: Compare candidate merge direction
+        run: python -m pytest -q tests/test_bfhexpartition_prefix.py
+      - name: Compare canonical and prefix-retaining pipelines
         env:
           PYTHONPATH: pybf
         run: |
           python - <<'PY'
           from bf_runtime import run_bf
           from bfcore import BFEmitter
-          from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum
-          from bfhexpartition_zeroans import run_partition_min_pass as zeroans
-          from bfhexpartition_datamerge import run_partition_min_pass as datamerge
+          from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as canonical_reader
+          from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum as prefix_reader
+          from bfhexpartition_zeroans import run_partition_min_pass as canonical_partition
+          from bfhexpartition_prefix import run_partition_min_pass as prefix_partition
           from bfhexseq import RuntimeHexIntSequence
           from bfopt import optimize_bf
 
-          def program(runner):
+          def program(reader, partition):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              read_counted_two_line_s64s_and_sum(bf, seq)
+              reader(bf, seq)
               seq.propagate_total_back_to_first(bf)
-              runner(bf, seq, initial_ans=10_000_000)
+              partition(bf, seq, initial_ans=10_000_000)
               return optimize_bf(bf.code())
 
-          programs = {name: program(runner) for name, runner in [('zeroans', zeroans), ('datamerge', datamerge)]}
+          programs = {
+              'canonical': program(canonical_reader, canonical_partition),
+              'prefix': program(prefix_reader, prefix_partition),
+          }
           for name, code in programs.items():
               print(f'{name}_partition_source={len(code)}')
 
