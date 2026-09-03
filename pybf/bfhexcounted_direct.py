@@ -2,8 +2,8 @@
 
 This combines the two successful runtime experiments: the count-extent invariant
 from ``bfhexcounted_extent`` and direct decimal accumulation into DATA nibbles
-from ``bfhexseq_direct``.  It preserves the same data/sum ABI and two-line input
-semantics as the established counted reader.
+for the N values. The first-line count intentionally keeps the compact radix-4
+parser so the large direct-decimal kernel is emitted only once.
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ from bfhexseq import (
     _is_line_end,
     _transfer_word,
 )
-from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
 
 
 COUNT_EXTENT = LEFT + HEX_DIGITS - 1
@@ -146,7 +145,9 @@ def _prepare_count_from_first_line(
     bf: BFEmitter,
     seq: RuntimeHexIntSequence,
 ) -> None:
-    read_lf_terminated_s64s_and_sum_direct(bf, seq)
+    # N is parsed only once, so keep the source-compact established parser here
+    # and reserve the direct-hex kernel for the runtime-sized value loop.
+    seq.read_lf_terminated_s64s_and_sum(bf)
 
     r = _RelativeBuilder()
     _transfer_word(r, DATA, ANS)
@@ -178,9 +179,6 @@ def _prepare_count_from_first_line(
 def _counted_record_body() -> str:
     r = _RelativeBuilder()
 
-    # LEFT[0] carries whether the source line has already ended.  COUNT_EXTENT
-    # occupies LEFT[15].  Missing values therefore remain zero-filled without
-    # crossing into the following input line.
     r.clear(CH)
     _flag_not(r, SKIP, LEFT)
     r.move(SKIP)
@@ -209,9 +207,6 @@ def _counted_record_body() -> str:
     r.emit("[")
     r.add(GATE, -1)
 
-    # DATA is the decimal accumulator directly.  The previous iteration's
-    # workspace scrub guarantees zero future records, but explicitly clearing
-    # valid-token DATA also makes the body robust in isolation.
     for i in range(HEX_DIGITS):
         r.clear(DATA + i)
 
