@@ -9,7 +9,7 @@ from bfhexaddcandidate_tiered import add_data_and_move_state_total_minus_double_
 from bfhexpartition import MASK64, _set_hex_const
 from bfhexpartition_nonnegans import _min_and_move_ans_nonnegative
 from bfhexpartition_totalcandidate import _abs_total_inplace
-from bfhexseq import BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence, _RelativeBuilder
+from bfhexseq import ANS, BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence, _RelativeBuilder
 
 
 def _partition_body() -> str:
@@ -35,7 +35,7 @@ def run_partition_min_pass(
     if not 0 <= initial_ans < (1 << 63):
         raise ValueError("tiered partition requires signed nonnegative initial_ans")
 
-    _set_hex_const(bf, seq.base + 50, initial_ans & MASK64)
+    _set_hex_const(bf, seq.base + ANS, initial_ans & MASK64)
     bf.move(seq.base + MARKER)
     bf.emit("[" + partition_body() + "]")
 
