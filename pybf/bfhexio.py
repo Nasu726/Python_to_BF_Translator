@@ -17,6 +17,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from bfcore import BFEmitter, Binary64Core, Int64Ref, WORD_BITS
+from bfhexradixfast import map_total_base16_threshold
 from bfhexseq import (
     ANS,
     BACK,
@@ -26,7 +27,6 @@ from bfhexseq import (
     RECORD_STRIDE,
     RuntimeHexIntSequence,
     _RelativeBuilder,
-    _map_total_base16,
     _transfer_word,
 )
 
@@ -177,7 +177,7 @@ def _negate_hex_word(r: _RelativeBuilder, word_base: int) -> None:
         r.move(cell)
         r.emit("]")
         r.transfer(DEC_CARRY, DEC_TOTAL)
-        _map_total_base16(r, DEC_TOTAL, cell, DEC_CARRY)
+        map_total_base16_threshold(r, DEC_TOTAL, cell, DEC_CARRY)
     r.clear(DEC_CARRY)
     r.clear(DEC_TOTAL)
 
