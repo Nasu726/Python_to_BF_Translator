@@ -30,6 +30,7 @@ jobs:
               tests/test_bfwordops.py
           - suite: runtime
             files: >-
+              tests/test_bfcontestpartition.py
               tests/test_bfdynlist.py
               tests/test_bfheap.py
               tests/test_bfhexpartition.py
