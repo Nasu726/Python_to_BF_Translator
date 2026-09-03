@@ -70,6 +70,20 @@ print(chars[i])
     assert _run(code, "abcdef\n-1\n").output == "f\n"
 
 
+def test_char_list_swap_through_one_character_temporary():
+    source = '''
+chars = list(input())
+a = int(input())
+b = int(input())
+tmp = chars[a]
+chars[a] = chars[b]
+chars[b] = tmp
+print("".join(chars))
+'''
+    code = _compile(source)
+    assert _run(code, "ABCDE\n1\n4\n").output == "AECDB\n"
+
+
 def test_char_list_iteration_reuses_string_walker():
     source = '''
 chars = list(input())
@@ -79,6 +93,48 @@ print()
 '''
     code = _compile(source)
     assert _run(code, "abc\n").output == "a|b|c|\n"
+
+
+def test_abc199_c_ipfl_samples_with_char_list_view():
+    # ABC199 C has |S|=2N up to 4e5 and Q up to 3e5.  These official samples
+    # validate the source shape now; maximum-scale acceptance additionally
+    # requires replacing the current <=255-byte StringRef backing.
+    source = '''
+n = int(input())
+s = list(input())
+q = int(input())
+flipped = 0
+for k in range(q):
+    t, a, b = map(int, input().split())
+    if t == 1:
+        a -= 1
+        b -= 1
+        if flipped:
+            if a < n:
+                a += n
+            else:
+                a -= n
+            if b < n:
+                b += n
+            else:
+                b -= n
+        tmp = s[a]
+        s[a] = s[b]
+        s[b] = tmp
+    else:
+        flipped = 1 - flipped
+if flipped:
+    for i in range(n):
+        tmp = s[i]
+        s[i] = s[i + n]
+        s[i + n] = tmp
+print("".join(s))
+'''
+    code = _compile(source)
+    sample1 = "2\nFLIP\n2\n2 0 0\n1 1 4\n"
+    sample2 = "2\nFLIP\n6\n1 1 3\n2 0 0\n1 1 2\n1 2 3\n2 0 0\n1 1 4\n"
+    assert _run(code, sample1).output == "LPFI\n"
+    assert _run(code, sample2).output == "ILPF\n"
 
 
 def test_char_list_rejects_multi_character_assignment():
