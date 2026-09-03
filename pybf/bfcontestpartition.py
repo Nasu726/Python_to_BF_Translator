@@ -14,7 +14,7 @@ from bfhexio import (
     print_record_hex_s64_compact,
     propagate_field_back_after_consumed_markers,
 )
-from bfhexpartition_minfused import run_partition_min_pass
+from bfhexpartition_totalcandidate import run_partition_min_pass
 from bfhexseq import ANS, RuntimeHexIntSequence
 from bfopt import optimize_bf
 
