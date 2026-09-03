@@ -1,8 +1,23 @@
+import ast
+
 from bf_runtime import run_bf
-from compiler_layout import compile_source
+from compiler_layout import PythonToBFLayout, compile_source
 
 
 STEP_LIMIT = 1_000_000_000
+ABC_SOURCE_LIMIT = 512 * 1024
+
+ABC153_B_SOURCE = """
+h, n = map(int, input().split())
+a = list(map(int, input().split()))
+total = 0
+for x in a:
+    total += x
+if total >= h:
+    print("Yes")
+else:
+    print("No")
+"""
 
 
 def _compile(source: str) -> str:
@@ -112,19 +127,27 @@ print(s)
     assert result.output == "106\n"
 
 
-def test_abc153_b_common_raccoon_vs_monster_samples():
-    source = """
-h, n = map(int, input().split())
+def test_fusion_does_not_cross_side_effectful_setup():
+    tree = ast.parse(
+        """
 a = list(map(int, input().split()))
-total = 0
+print("ready")
 for x in a:
-    total += x
-if total >= h:
-    print("Yes")
-else:
-    print("No")
+    print(x)
 """
-    code = _compile(source)
+    )
+    compiler = PythonToBFLayout(tree, string_capacity=8, list_capacity=4)
+    assert compiler._find_input_int_list_consumer(tree.body, 0) is None
+
+
+def test_abc153_b_public_default_source_fits_abc_limit():
+    code = compile_source(ABC153_B_SOURCE)
+    assert set(code) <= set("><+-.,[]")
+    assert len(code) <= ABC_SOURCE_LIMIT
+
+
+def test_abc153_b_common_raccoon_vs_monster_samples():
+    code = _compile(ABC153_B_SOURCE)
     assert _run(code, "10 3\n4 5 6\n").output == "Yes\n"
     assert _run(code, "20 3\n4 5 6\n").output == "No\n"
     assert _run(code, "210 5\n31 41 59 26 53\n").output == "Yes\n"
