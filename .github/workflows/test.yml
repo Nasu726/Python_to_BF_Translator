@@ -43,6 +43,7 @@ jobs:
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpartition_minfused.py
               tests/test_bfhexpartition_absfast.py
+              tests/test_bfhexradixfast.py
               tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
               tests/test_bfhexseq_direct.py
