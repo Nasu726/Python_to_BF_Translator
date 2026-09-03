@@ -45,6 +45,7 @@ jobs:
               tests/test_bfhexpartition_totalcandidate.py
               tests/test_bfhexpartition_addcandidate.py
               tests/test_bfhexpartition_nonnegans.py
+              tests/test_bfhexpartition_absminfused.py
               tests/test_bfhexpartition_absfast.py
               tests/test_bfhexradixfast.py
               tests/test_bfhexpasses.py
@@ -94,7 +95,6 @@ jobs:
           from bf_runtime import run_bf
           from bfcontestpartition import build_partition_program, partition_program_size_breakdown
           from bfcore import BFEmitter
-          from bfhexcounted import read_counted_two_line_s64s_and_sum
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
           from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as read_lexfast_counted
@@ -107,6 +107,7 @@ jobs:
           from bfhexpartition_totalcandidate import run_partition_min_pass as run_totalcandidate_partition_min_pass
           from bfhexpartition_addcandidate import run_partition_min_pass as run_addcandidate_partition_min_pass
           from bfhexpartition_nonnegans import run_partition_min_pass as run_nonnegans_partition_min_pass
+          from bfhexpartition_absminfused import run_partition_min_pass as run_absminfused_partition_min_pass
           from bfhexpartition_absfast import run_partition_min_pass as run_absfast_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
@@ -132,10 +133,10 @@ jobs:
           print(f"partition_steps_per_added_record={slope:.1f}")
           print(f"partition_raw_step_projection_n200000={projected:.0f}")
 
-          def stage_program(stage, partition_runner=run_partition_min_pass):
+          def stage_program(stage, partition_runner=run_nonnegans_partition_min_pass):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              read_counted_two_line_s64s_and_sum(bf, seq)
+              read_lexfast_counted(bf, seq)
               if stage == "read":
                   return optimize_bf(bf.code())
               seq.propagate_total_back_to_first(bf)
@@ -163,6 +164,7 @@ jobs:
               ("totalcandidate", run_totalcandidate_partition_min_pass),
               ("addcandidate", run_addcandidate_partition_min_pass),
               ("nonnegans", run_nonnegans_partition_min_pass),
+              ("absminfused", run_absminfused_partition_min_pass),
               ("absfast", run_absfast_partition_min_pass),
           ):
               candidate_code = stage_program("partition", runner)
