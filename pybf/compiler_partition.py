@@ -1,7 +1,7 @@
 """Structural recognition for the scalable partition contest lowering.
 
 The generic compiler intentionally remains the fallback for all programs that
-do not match this complete data-flow shape.  This module recognizes the common
+do not match this complete data-flow shape. This module recognizes the common
 contest pattern::
 
     n = int(input())
@@ -16,11 +16,12 @@ contest pattern::
         ans = min(ans, abs(total - 2 * left))
     print(ans)
 
-Variable names are irrelevant; relationships between them are not.  The
-runtime-sized vertical slice currently relies on the standard contest input
-contract that the second line contains exactly n integers.  Until the carried
-sequence itself consumes an explicit n counter, this recognizer must remain
-narrow and its precondition documented.
+Variable names are irrelevant; relationships between them are not. The
+runtime lowering parses and carries first-line ``n`` explicitly, so exactly
+``n`` values participate. Extra tokens on the second line are drained, while a
+short second line zero-fills the missing participating values without crossing
+into a later input line. Near-miss program shapes remain on the generic
+compiler path.
 """
 
 from __future__ import annotations
