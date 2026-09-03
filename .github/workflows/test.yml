@@ -83,17 +83,55 @@ jobs:
           python - <<'PY'
           from bf_runtime import run_bf
           from bfcontestpartition import build_partition_program, partition_program_size_breakdown
+          from bfcore import BFEmitter
+          from bfhexcounted import read_counted_two_line_s64s_and_sum
+          from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
+          from bfhexpartition import run_partition_min_pass
+          from bfhexseq import ANS, RuntimeHexIntSequence
+          from bfopt import optimize_bf
 
           code = build_partition_program()
           print(f"partition_source_bytes={len(code)}")
           print(f"partition_size_breakdown={partition_program_size_breakdown()}")
+
+          measured = {}
           for n in (32, 64):
               data = f"{n}\n" + " ".join(["1"] * n) + "\n"
+              result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
+              measured[n] = result.steps
+              print(f"partition_steps_n{n}={result.steps}")
+          slope = (measured[64] - measured[32]) / 32
+          projected = measured[64] + slope * (200000 - 64)
+          print(f"partition_steps_per_added_record={slope:.1f}")
+          print(f"partition_raw_step_projection_n200000={projected:.0f}")
+
+          def stage_program(stage):
+              bf = BFEmitter()
+              seq = RuntimeHexIntSequence(base=320)
+              read_counted_two_line_s64s_and_sum(bf, seq)
+              if stage == "read":
+                  return optimize_bf(bf.code())
+              seq.propagate_total_back_to_first(bf)
+              if stage == "reverse_total":
+                  return optimize_bf(bf.code())
+              run_partition_min_pass(bf, seq, initial_ans=10000000)
+              if stage == "partition":
+                  return optimize_bf(bf.code())
+              propagate_field_back_after_consumed_markers(bf, seq, ANS)
+              if stage == "reverse_ans":
+                  return optimize_bf(bf.code())
+              print_record_hex_s64_compact(bf, seq, field_base=ANS)
+              return optimize_bf(bf.code())
+
+          n = 64
+          data = f"{n}\n" + " ".join(["1"] * n) + "\n"
+          for stage in ("read", "reverse_total", "partition", "reverse_ans", "full"):
+              stage_code = stage_program(stage)
               result = run_bf(
-                  code,
+                  stage_code,
                   data,
                   memory_size=30000,
                   step_limit=1000000000,
               )
-              print(f"partition_steps_n{n}={result.steps}")
+              print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
           PY
