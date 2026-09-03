@@ -8,18 +8,16 @@ in there.
 
 from __future__ import annotations
 
-from bfcore import BFEmitter, Int64Ref
-from bfhexio import consume_hex_word_to_binary64, propagate_field_back_after_consumed_markers
+from bfcore import BFEmitter
+from bfhexio import (
+    print_record_hex_s64_compact,
+    propagate_field_back_after_consumed_markers,
+)
 from bfhexpartition import run_partition_min_pass
 from bfhexseq import ANS, RuntimeHexIntSequence
-from bfio import Binary64IO
 from bfopt import optimize_bf
 
 
-BINARY_BASE = 0
-IO_SCRATCH_BASE = 64
-PRINT_WORKSPACE_BASE = 80
-NEWLINE_CELL = 240
 SEQUENCE_BASE = 320
 
 
@@ -57,18 +55,7 @@ def _build_partition_program(
     propagate_field_back_after_consumed_markers(bf, seq, ANS)
     cumulative["reverse_ans"] = _raw_size(bf)
 
-    result = Int64Ref(BINARY_BASE)
-    consume_hex_word_to_binary64(
-        bf,
-        hex_base=seq.base + ANS,
-        dst=result,
-        scratch_base=IO_SCRATCH_BASE,
-    )
-    cumulative["hex_to_binary"] = _raw_size(bf)
-
-    io = Binary64IO(bf, scratch_base=IO_SCRATCH_BASE)
-    io.print_s64(result, PRINT_WORKSPACE_BASE)
-    io.print_newline(NEWLINE_CELL)
+    print_record_hex_s64_compact(bf, seq, field_base=ANS)
     raw = bf.code()
     cumulative["decimal_print"] = len(raw)
 
