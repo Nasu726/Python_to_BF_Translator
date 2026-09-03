@@ -32,6 +32,8 @@ one-character strings have the same useful payload representation. Therefore:
    repr printing, insertion/deletion/append, or non-empty-separator joins must
    fall back to / wait for the general mutable-list implementation unless their
    semantics are proven separately.
+6. Runtime indices must be range-checked before conversion to the current
+   byte-sized physical selector. Values such as 256 must never wrap to slot 0.
 
 Acceptance examples:
 
@@ -53,6 +55,24 @@ for c in s:
 The target is that `list(input())` and `"".join(s)` themselves add effectively
 zero BF runtime work beyond the input, mutation, or output operations actually
 required by the program.
+
+### Real target: ABC199 C — IPFL
+
+ABC199 C is the first direct real-problem target for this syntax. It requires
+runtime-index character swaps and delayed half-string swapping. Official
+constraints include `N <= 2*10^5`, so `|S| <= 4*10^5`, and `Q <= 3*10^5`.
+
+Two separate gates are required:
+
+1. **source-shape gate now** — compile/run the official samples using
+   `list(input())`, runtime character indexing, a one-character temporary, and
+   `"".join(s)`;
+2. **maximum-scale gate later** — replace the current <=255-byte fixed
+   `StringRef` backing with a scalable byte-sequence representation, then run
+   the same ordinary Python shape at the official maximum constraints.
+
+Passing samples alone must not be described as full ABC199 C support while the
+fixed string-capacity ceiling remains.
 
 ## Priority B — explicit `int` / `str` conversion
 
@@ -83,17 +103,32 @@ the correctness-first contest slice, valid decimal input is the immediate
 acceptance target; invalid syntax must never be documented as supported until a
 runtime error state exists.
 
+### Real targets after sort support
+
+Two ABC tasks make the conversion priority concrete:
+
+- **ABC192 C — Kaprekar Number**: repeatedly converts an integer to decimal
+  digits, reorders those digits, converts the resulting strings back to
+  integers, and repeats up to `K <= 10^5` times.
+- **ABC221 C — Select Mul**: rearranges the decimal digits of `N <= 10^9`, splits
+  them into two positive integers, and maximizes their product.
+
+These become end-to-end compatibility targets once stable character sorting /
+reordered traversal is available. Until then, conversion-specific fixtures
+should isolate `str(int64)`, `int(str)`, and round trips without inventing a
+problem-specific lowering.
+
 ## Priority C — real ABC compatibility corpus
 
 Continue selecting actual ABC tasks before extending the backend so feature
 work is driven by real source shapes rather than synthetic APIs. Near-term tiers:
 
-1. streaming integer input/list folds — already represented by ABC153 B and
-   ABC103 C;
-2. character-array editing with `list(input())` / `"".join(...)`;
-3. indexed/mutating integer passes (ABC136 C class);
-4. sort/reordered traversal (ABC088 B class);
-5. queue/deque workloads (ABC247 D class).
+1. streaming integer input/list folds — ABC153 B and ABC103 C;
+2. character-array editing — ABC199 C;
+3. indexed/mutating integer passes — ABC136 C class;
+4. string/int conversion plus digit reorder — ABC192 C / ABC221 C after sort;
+5. sort/reordered list traversal — ABC088 B class;
+6. queue/deque workloads — ABC247 D class.
 
 For each tier, retain:
 
@@ -124,11 +159,13 @@ approximated with integer arithmetic.
 
 ## Immediate implementation order
 
-1. Finish zero-copy `list(input())` + `"".join(character_list)` syntax and
-   mutable character indexing.
+1. Finish zero-copy `list(input())` + `"".join(character_list)` syntax, mutable
+   character indexing, swaps, and ABC199 C sample compatibility.
 2. Finish `str(int64)` and `int(str)` with boundary/differential tests.
-3. Locate real ABC problems using character-array mutation and promote selected
-   tasks into the compatibility corpus.
+3. Replace fixed-capacity string/character backing with a scalable byte sequence
+   and revisit ABC199 C at maximum constraints.
 4. Proceed to scalable indexed/mutable integer lists.
-5. Proceed to stable sort and queue/deque semantics.
-6. Revisit float64 only after those higher-priority paths are stable.
+5. Proceed to stable sort; then promote ABC192 C / ABC221 C into the end-to-end
+   corpus.
+6. Proceed to queue/deque semantics.
+7. Revisit float64 only after those higher-priority paths are stable.
