@@ -15,11 +15,8 @@ from bfhexio import (
     propagate_field_back_after_consumed_markers,
 )
 from bfhexpartition_addcandidate import run_partition_min_pass as run_partition_min_pass_general
-from bfhexpartition_boundedans import (
-    MAX_BOUNDED_NIBBLES,
-    answer_extent,
-    run_partition_min_pass as run_partition_min_pass_bounded,
-)
+from bfhexpartition_adaptiveans import run_partition_min_pass as run_partition_min_pass_adaptive
+from bfhexpartition_boundedans import MAX_BOUNDED_NIBBLES, answer_extent
 from bfhexpartition_nonnegans import run_partition_min_pass as run_partition_min_pass_nonnegative
 from bfhexseq import ANS, RuntimeHexIntSequence
 from bfopt import optimize_bf
@@ -36,7 +33,7 @@ def _select_partition_runner(initial_ans: int):
     """Choose the narrowest semantics-preserving partition minimum lowering."""
     if 0 <= initial_ans < (1 << 63):
         if answer_extent(initial_ans) <= MAX_BOUNDED_NIBBLES:
-            return run_partition_min_pass_bounded
+            return run_partition_min_pass_adaptive
         return run_partition_min_pass_nonnegative
     return run_partition_min_pass_general
 
