@@ -1,9 +1,9 @@
 """N-counted direct-hex reader with compact count extent metadata.
 
-This combines the two successful runtime experiments: the count-extent invariant
-from ``bfhexcounted_extent`` and direct decimal accumulation into DATA nibbles
-for the N values. The first-line count intentionally keeps the compact radix-4
-parser so the large direct-decimal kernel is emitted only once.
+This combines the count-extent invariant with direct decimal accumulation into
+DATA nibbles for the N values. The first-line count intentionally keeps the
+source-compact radix-4 parser so the direct-decimal kernel is emitted only once.
+The direct kernel itself uses operation-specific radix-16 bounds.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from functools import lru_cache
 
 from bfcore import BFEmitter
 from bfhexcounted import _drain_remaining_line_body, _nibble_ge8
-from bfhexdecimal import decimal_digit_kernel, negate_data_kernel
+from bfhexdecimal_compact import decimal_digit_kernel, negate_data_kernel
 from bfhexseq import (
     ACTIVE,
     ANS,
@@ -145,8 +145,6 @@ def _prepare_count_from_first_line(
     bf: BFEmitter,
     seq: RuntimeHexIntSequence,
 ) -> None:
-    # N is parsed only once, so keep the source-compact established parser here
-    # and reserve the direct-hex kernel for the runtime-sized value loop.
     seq.read_lf_terminated_s64s_and_sum(bf)
 
     r = _RelativeBuilder()
@@ -288,7 +286,7 @@ def read_counted_two_line_s64s_and_sum(
     bf: BFEmitter,
     seq: RuntimeHexIntSequence,
 ) -> None:
-    """Read N and N integers using direct hex parsing plus count extent."""
+    """Read N and N integers using compact direct-hex parsing plus count extent."""
     if seq.base < 0:
         raise ValueError("sequence base must be non-negative")
 
