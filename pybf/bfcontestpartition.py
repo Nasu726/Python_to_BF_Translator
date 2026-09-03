@@ -14,7 +14,8 @@ from bfhexio import (
     print_record_hex_s64_compact,
     propagate_field_back_after_consumed_markers,
 )
-from bfhexpartition_addcandidate import run_partition_min_pass
+from bfhexpartition_addcandidate import run_partition_min_pass as run_partition_min_pass_general
+from bfhexpartition_nonnegans import run_partition_min_pass as run_partition_min_pass_nonnegative
 from bfhexseq import ANS, RuntimeHexIntSequence
 from bfopt import optimize_bf
 
@@ -40,7 +41,12 @@ def _build_partition_program(
     seq.propagate_total_back_to_first(bf)
     cumulative["reverse_total"] = _raw_size(bf)
 
-    run_partition_min_pass(bf, seq, initial_ans=initial_ans)
+    partition_runner = (
+        run_partition_min_pass_nonnegative
+        if 0 <= initial_ans < (1 << 63)
+        else run_partition_min_pass_general
+    )
+    partition_runner(bf, seq, initial_ans=initial_ans)
     cumulative["partition"] = _raw_size(bf)
 
     propagate_field_back_after_consumed_markers(bf, seq, ANS)
