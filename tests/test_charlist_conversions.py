@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import pytest
 
 from bf_runtime import run_bf
@@ -8,6 +10,7 @@ STEP_LIMIT = 1_000_000_000
 BF_COMMANDS = set("><+-.,[]")
 
 
+@lru_cache(maxsize=None)
 def _compile(source: str, *, string_capacity: int = 32) -> str:
     code = compile_source(source, string_capacity=string_capacity, list_capacity=4)
     assert set(code) <= BF_COMMANDS
@@ -60,9 +63,6 @@ print("".join(chars))
 
 
 def test_char_list_large_runtime_index_does_not_wrap_to_low_byte():
-    # Runtime errors/IndexError are a later project phase. Until then an invalid
-    # index may be a no-op, but it must never alias index 0 merely because the
-    # current string backing uses an 8-bit physical slot selector.
     source = '''
 chars = list(input())
 i = int(input())
@@ -111,9 +111,6 @@ print()
 
 
 def test_abc199_c_ipfl_samples_with_char_list_view():
-    # ABC199 C has |S|=2N up to 4e5 and Q up to 3e5. These official samples
-    # validate the source shape now; maximum-scale acceptance additionally
-    # requires replacing the current <=255-byte StringRef backing.
     source = '''
 n = int(input())
 s = list(input())
@@ -202,6 +199,8 @@ print(s)
         ("42", 42),
         ("+42", 42),
         ("-42", -42),
+        ("   +42   ", 42),
+        ("\t-42\t", -42),
         (str((1 << 63) - 1), (1 << 63) - 1),
         (str(-(1 << 63)), -(1 << 63)),
     ],
