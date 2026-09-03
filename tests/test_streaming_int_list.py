@@ -20,6 +20,17 @@ def _run(code: str, data: str):
     )
 
 
+def test_streaming_int_list_passes_each_token_to_loop_target():
+    source = """
+a = list(map(int, input().split()))
+for x in a:
+    print(x, end="|")
+print()
+"""
+    code = _compile(source)
+    assert _run(code, "1 2 3\n").output == "1|2|3|\n"
+
+
 def test_single_use_input_list_streams_beyond_configured_capacity():
     source = """
 a = list(map(int, input().split()))
@@ -102,8 +113,6 @@ print(s)
 
 
 def test_abc153_b_common_raccoon_vs_monster_samples():
-    # ABC153 B: N <= 1e5.  The normal explicit-loop solution is exactly the
-    # runtime input-list -> scalar fold shape this optimization targets.
     source = """
 h, n = map(int, input().split())
 a = list(map(int, input().split()))
@@ -123,8 +132,6 @@ else:
 
 
 def test_abc103_c_modulo_summation_samples():
-    # For ABC103 C, max f(m) = sum(a_i - 1), so a standard accepted-shape
-    # implementation is another direct streaming fold over the input list.
     source = """
 n = int(input())
 a = list(map(int, input().split()))
