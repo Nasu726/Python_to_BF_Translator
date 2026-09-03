@@ -1,6 +1,6 @@
 from bf_runtime import run_bf
 from bfcore import BFEmitter
-from bfhexpartition_fused import run_partition_min_pass
+from bfhexpartition import run_partition_min_pass
 from bfhexseq import ANS, LEFT, TOTAL, RuntimeHexIntSequence
 
 
