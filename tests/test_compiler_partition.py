@@ -138,3 +138,20 @@ def test_public_partition_specialization_honors_zero_n_and_drains_list_line():
     )
     assert result.output == "10000000\n"
     assert result.input_consumed == len(input_data)
+
+
+def test_public_partition_specialization_keeps_general_signed_min_for_negative_initial_ans():
+    source = SOURCE.replace("ans = 10000000", "ans = -5")
+    code = compile_source(source)
+    assert set(code) <= set("><+-.,[]")
+    assert len(code.encode("ascii")) <= 512 * 1024
+
+    values = [1, 2, 3, 4]
+    input_data = f"{len(values)}\n" + " ".join(map(str, values)) + "\n"
+    result = run_bf(
+        code,
+        input_data,
+        memory_size=30_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == f"{_reference(values, initial_ans=-5)}\n"
