@@ -3,7 +3,8 @@
 The first workload is ABC153 B (Common Raccoon vs Monster), whose official
 constraint is N <= 100000 and whose ordinary explicit-loop implementation is a
 single-use integer input list followed by a linear fold.  This script compiles
-that Python through the public compiler; it does not call an internal BF kernel.
+that Python through the public compiler with its default configuration; it does
+not call an internal BF kernel or shrink the legacy list-capacity setting.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def main() -> None:
     args.expected.write_text("Yes\n", encoding="ascii")
 
     if not args.no_program:
-        code = compile_source(ABC153_B_SOURCE, list_capacity=4)
+        code = compile_source(ABC153_B_SOURCE)
         if set(code) - set("><+-.,[]"):
             raise SystemExit("compiler emitted non-standard Brainfuck")
         args.program.write_text(code, encoding="ascii")
