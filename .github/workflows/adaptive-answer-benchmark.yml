@@ -1,11 +1,11 @@
-name: adaptive-answer-benchmark
+name: terminal-output-benchmark
 
 on:
   pull_request:
   workflow_dispatch:
 
 concurrency:
-  group: adaptive-answer-${{ github.event.pull_request.number || github.ref }}
+  group: terminal-output-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -18,45 +18,48 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest
-      - name: Test fused prefix-sum reader
+      - name: Test terminal sentinel output
         env:
           PYTHONPATH: pybf
-        run: python -m pytest -q tests/test_bfhexcounted_prefixfused.py
-      - name: Compare prefix readers
+        run: python -m pytest -q tests/test_bfhexpartition_prefix_terminal.py
+      - name: Compare reusable and terminal output tails
         env:
           PYTHONPATH: pybf
         run: |
           python - <<'PY'
           from bf_runtime import run_bf
           from bfcore import BFEmitter
-          from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum as prefix_reader
-          from bfhexcounted_prefixfused import read_counted_two_line_s64s_and_sum as fused_reader
+          from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum
+          from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition_prefix import run_partition_min_pass
-          from bfhexseq import RuntimeHexIntSequence
+          from bfhexpartition_prefix_terminal import run_partition_min_pass_and_print_terminal
+          from bfhexseq import ANS, RuntimeHexIntSequence
           from bfopt import optimize_bf
 
-          def program(reader):
+          def reusable_program():
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              reader(bf, seq)
+              read_counted_two_line_s64s_and_sum(bf, seq)
               seq.propagate_total_back_to_first(bf)
               run_partition_min_pass(bf, seq, initial_ans=10_000_000)
+              propagate_field_back_after_consumed_markers(bf, seq, ANS)
+              print_record_hex_s64_compact(bf, seq, field_base=ANS)
               return optimize_bf(bf.code())
 
-          def reader_program(reader):
+          def terminal_program():
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              reader(bf, seq)
+              read_counted_two_line_s64s_and_sum(bf, seq)
+              seq.propagate_total_back_to_first(bf)
+              run_partition_min_pass_and_print_terminal(bf, seq, initial_ans=10_000_000)
               return optimize_bf(bf.code())
 
-          programs = {'prefix': program(prefix_reader), 'fused': program(fused_reader)}
-          readers = {'prefix': reader_program(prefix_reader), 'fused': reader_program(fused_reader)}
+          programs = {'reusable': reusable_program(), 'terminal': terminal_program()}
           for name, code in programs.items():
-              print(f'{name}_partition_source={len(code)}')
-          for name, code in readers.items():
-              print(f'{name}_reader_source={len(code)}')
+              print(f'{name}_full_source={len(code)}')
 
           cases = {
+              'empty': [],
               'ones': [1] * 64,
               'small_mixed': ([5, -2, 10, 1234, -77] * 13)[:64],
               'positive_ffff': [0xFFFF] * 64,
@@ -65,10 +68,7 @@ jobs:
           }
           for case_name, values in cases.items():
               data = f'{len(values)}\n' + ' '.join(map(str, values)) + '\n'
-              for name, code in readers.items():
-                  result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
-                  print(f'{case_name}_{name}_reader_steps={result.steps}')
               for name, code in programs.items():
                   result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
-                  print(f'{case_name}_{name}_partition_steps={result.steps}')
+                  print(f'{case_name}_{name}_steps={result.steps} output={result.output.strip()}')
           PY
