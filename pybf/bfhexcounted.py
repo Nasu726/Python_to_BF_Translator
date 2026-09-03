@@ -17,7 +17,6 @@ from functools import lru_cache
 
 from bfcore import BFEmitter
 from bfhexseq import (
-    ACC_BASE,
     ACTIVE,
     ANS,
     BACK,
@@ -37,7 +36,6 @@ from bfhexseq import (
     RESTORE,
     SIGN,
     SKIP,
-    TMP,
     TOTAL,
     WORKSPACE_END,
     RuntimeHexIntSequence,
@@ -170,6 +168,11 @@ def _prepare_count_from_first_line(
 def _counted_record_body() -> str:
     """Read one token, decrement carried count, and advance one record."""
     r = _RelativeBuilder()
+
+    # SIGN aliases the following record's BACK cell.  The one-value first-line
+    # parse leaves that sentinel BACK set, so the first second-line token must
+    # explicitly zero SIGN rather than relying on virgin future tape.
+    r.clear(SIGN)
 
     # Skip horizontal whitespace before the required token.
     r.move(CH)
