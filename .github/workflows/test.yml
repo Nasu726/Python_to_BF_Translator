@@ -37,6 +37,7 @@ jobs:
               tests/test_bfhexcounted_extent.py
               tests/test_bfhexcounted_direct.py
               tests/test_bfhexdecimal.py
+              tests/test_bfhexdecimal_compact.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpasses.py
@@ -76,9 +77,6 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest pytest-xdist
       - name: Run ${{ matrix.suite }} tests
-        # Separate matrix entries get separate hosted runners.  Two xdist
-        # workers inside each runner use its CPU without the over-subscription
-        # caused by a single `-n auto` job.
         run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
       - name: Report scalable partition metrics
         if: matrix.suite == 'runtime'
@@ -92,12 +90,19 @@ jobs:
           from bfhexcounted import read_counted_two_line_s64s_and_sum
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
+          from bfhexdecimal import decimal_digit_kernel as direct_digit, negate_data_kernel as direct_negate
+          from bfhexdecimal_compact import decimal_digit_kernel as compact_digit, negate_data_kernel as compact_negate
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
+
+          print(f"direct_decimal_digit_source={len(direct_digit())}")
+          print(f"compact_decimal_digit_source={len(compact_digit())}")
+          print(f"direct_decimal_negate_source={len(direct_negate())}")
+          print(f"compact_decimal_negate_source={len(compact_negate())}")
 
           code = build_partition_program()
           print(f"partition_source_bytes={len(code)}")
@@ -136,81 +141,39 @@ jobs:
           data = f"{n}\n" + " ".join(["1"] * n) + "\n"
           for stage in ("read", "reverse_total", "partition", "reverse_ans", "full"):
               stage_code = stage_program(stage)
-              result = run_bf(
-                  stage_code,
-                  data,
-                  memory_size=30000,
-                  step_limit=1000000000,
-              )
+              result = run_bf(stage_code, data, memory_size=30000, step_limit=1000000000)
               print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
 
           movefused_code = stage_program("partition", run_movefused_partition_min_pass)
-          movefused_result = run_bf(
-              movefused_code,
-              data,
-              memory_size=30000,
-              step_limit=1000000000,
-          )
-          print(
-              f"partition_phase_movefused_source={len(movefused_code)} "
-              f"steps={movefused_result.steps}"
-          )
+          movefused_result = run_bf(movefused_code, data, memory_size=30000, step_limit=1000000000)
+          print(f"partition_phase_movefused_source={len(movefused_code)} steps={movefused_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
           seq.read_lf_terminated_s64s_and_sum(bf)
           line_code = optimize_bf(bf.code())
           line_data = " ".join(["1"] * 64) + "\n"
-          line_result = run_bf(
-              line_code,
-              line_data,
-              memory_size=30000,
-              step_limit=1000000000,
-          )
+          line_result = run_bf(line_code, line_data, memory_size=30000, step_limit=1000000000)
           print(f"partition_plain_line_reader_source={len(line_code)} steps_n64={line_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
           read_lf_terminated_s64s_and_sum_direct(bf, seq)
           direct_line_code = optimize_bf(bf.code())
-          direct_line_result = run_bf(
-              direct_line_code,
-              line_data,
-              memory_size=30000,
-              step_limit=1000000000,
-          )
-          print(
-              f"partition_direct_line_reader_source={len(direct_line_code)} "
-              f"steps_n64={direct_line_result.steps}"
-          )
+          direct_line_result = run_bf(direct_line_code, line_data, memory_size=30000, step_limit=1000000000)
+          print(f"partition_direct_line_reader_source={len(direct_line_code)} steps_n64={direct_line_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
           read_extent_counted(bf, seq)
           extent_code = optimize_bf(bf.code())
-          extent_result = run_bf(
-              extent_code,
-              data,
-              memory_size=30000,
-              step_limit=1000000000,
-          )
-          print(
-              f"partition_extent_counted_reader_source={len(extent_code)} "
-              f"steps_n64={extent_result.steps}"
-          )
+          extent_result = run_bf(extent_code, data, memory_size=30000, step_limit=1000000000)
+          print(f"partition_extent_counted_reader_source={len(extent_code)} steps_n64={extent_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
           read_direct_counted(bf, seq)
           direct_counted_code = optimize_bf(bf.code())
-          direct_counted_result = run_bf(
-              direct_counted_code,
-              data,
-              memory_size=30000,
-              step_limit=1000000000,
-          )
-          print(
-              f"partition_direct_counted_reader_source={len(direct_counted_code)} "
-              f"steps_n64={direct_counted_result.steps}"
-          )
+          direct_counted_result = run_bf(direct_counted_code, data, memory_size=30000, step_limit=1000000000)
+          print(f"partition_direct_counted_reader_source={len(direct_counted_code)} steps_n64={direct_counted_result.steps}")
           PY
