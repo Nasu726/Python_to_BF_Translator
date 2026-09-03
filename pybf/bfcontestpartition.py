@@ -8,7 +8,6 @@ in there.
 
 from __future__ import annotations
 
-from bf_runtime import BFResult
 from bfcore import BFEmitter, Int64Ref
 from bfhexio import consume_hex_word_to_binary64, propagate_field_back_after_consumed_markers
 from bfhexpartition import run_partition_min_pass
@@ -31,6 +30,53 @@ def _drain_required_first_line(bf: BFEmitter, cell: int = 0) -> None:
     bf.ptr = cell
 
 
+def _raw_size(bf: BFEmitter) -> int:
+    return sum(len(part) for part in bf.parts)
+
+
+def _build_partition_program(
+    *,
+    initial_ans: int,
+) -> tuple[str, dict[str, int]]:
+    bf = BFEmitter()
+    cumulative: dict[str, int] = {}
+
+    _drain_required_first_line(bf)
+    cumulative["drain_n"] = _raw_size(bf)
+
+    seq = RuntimeHexIntSequence(base=SEQUENCE_BASE)
+    seq.read_lf_terminated_s64s_and_sum(bf)
+    cumulative["read_and_sum"] = _raw_size(bf)
+
+    seq.propagate_total_back_to_first(bf)
+    cumulative["reverse_total"] = _raw_size(bf)
+
+    run_partition_min_pass(bf, seq, initial_ans=initial_ans)
+    cumulative["partition"] = _raw_size(bf)
+
+    propagate_field_back_after_consumed_markers(bf, seq, ANS)
+    cumulative["reverse_ans"] = _raw_size(bf)
+
+    result = Int64Ref(BINARY_BASE)
+    consume_hex_word_to_binary64(
+        bf,
+        hex_base=seq.base + ANS,
+        dst=result,
+        scratch_base=IO_SCRATCH_BASE,
+    )
+    cumulative["hex_to_binary"] = _raw_size(bf)
+
+    io = Binary64IO(bf, scratch_base=IO_SCRATCH_BASE)
+    io.print_s64(result, PRINT_WORKSPACE_BASE)
+    io.print_newline(NEWLINE_CELL)
+    raw = bf.code()
+    cumulative["decimal_print"] = len(raw)
+
+    code = optimize_bf(raw)
+    cumulative["optimized"] = len(code)
+    return code, cumulative
+
+
 def build_partition_program(*, initial_ans: int = 10_000_000) -> str:
     """Build standard BF for the two-line ABC partition program.
 
@@ -40,27 +86,17 @@ def build_partition_program(*, initial_ans: int = 10_000_000) -> str:
     eventual public lowering must make that precondition explicit in its
     structural/semantic guard rather than applying this path generally.
     """
-    bf = BFEmitter()
-    _drain_required_first_line(bf)
-
-    seq = RuntimeHexIntSequence(base=SEQUENCE_BASE)
-    seq.read_lf_terminated_s64s_and_sum(bf)
-    seq.propagate_total_back_to_first(bf)
-    run_partition_min_pass(bf, seq, initial_ans=initial_ans)
-
-    propagate_field_back_after_consumed_markers(bf, seq, ANS)
-    result = Int64Ref(BINARY_BASE)
-    consume_hex_word_to_binary64(
-        bf,
-        hex_base=seq.base + ANS,
-        dst=result,
-        scratch_base=IO_SCRATCH_BASE,
-    )
-
-    io = Binary64IO(bf, scratch_base=IO_SCRATCH_BASE)
-    io.print_s64(result, PRINT_WORKSPACE_BASE)
-    io.print_newline(NEWLINE_CELL)
-    return optimize_bf(bf.code())
+    code, _ = _build_partition_program(initial_ans=initial_ans)
+    return code
 
 
-__all__ = ["build_partition_program"]
+def partition_program_size_breakdown(
+    *,
+    initial_ans: int = 10_000_000,
+) -> dict[str, int]:
+    """Return cumulative emitted-byte checkpoints for source-budget work."""
+    _, cumulative = _build_partition_program(initial_ans=initial_ans)
+    return cumulative
+
+
+__all__ = ["build_partition_program", "partition_program_size_breakdown"]
