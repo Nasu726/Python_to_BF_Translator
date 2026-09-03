@@ -9,7 +9,7 @@ rather than inferred from the number of tokens present on the input line.
 from __future__ import annotations
 
 from bfcore import BFEmitter
-from bfhexcounted import read_counted_two_line_s64s_and_sum
+from bfhexcounted_extent import read_counted_two_line_s64s_and_sum
 from bfhexio import (
     print_record_hex_s64_compact,
     propagate_field_back_after_consumed_markers,
