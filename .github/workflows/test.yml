@@ -66,6 +66,7 @@ jobs:
               tests/test_bftokens.py
           - suite: frontend
             files: >-
+              tests/test_streaming_int_list.py
               tests/test_controlflow.py
               tests/test_input_lines.py
               tests/test_split_input.py
