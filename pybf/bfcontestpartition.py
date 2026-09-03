@@ -18,7 +18,7 @@ from bfhexio import (
 from bfhexpartition_addcandidate import run_partition_min_pass as run_partition_min_pass_general
 from bfhexpartition_boundedans import MAX_BOUNDED_NIBBLES, answer_extent
 from bfhexpartition_nonnegans import run_partition_min_pass as run_partition_min_pass_nonnegative
-from bfhexpartition_prefix import run_partition_min_pass as run_partition_min_pass_prefix
+from bfhexpartition_prefix_terminal import run_partition_min_pass_and_print_terminal
 from bfhexseq import ANS, RuntimeHexIntSequence
 from bfopt import optimize_bf
 
@@ -34,11 +34,12 @@ def _select_partition_lowering(initial_ans: int):
     """Choose a reader/pass pair whose record ABI matches the minimum lowering."""
     if 0 <= initial_ans < (1 << 63):
         if answer_extent(initial_ans) <= MAX_BOUNDED_NIBBLES:
-            # Store inclusive prefix sums during input. The second pass then
-            # consumes those prefixes directly instead of recomputing LEFT.
-            return read_counted_prefix, run_partition_min_pass_prefix
-        return read_counted_canonical, run_partition_min_pass_nonnegative
-    return read_counted_canonical, run_partition_min_pass_general
+            # Store inclusive prefix sums during input. The terminal pass exits
+            # on the final sentinel and prints ANS there directly, avoiding both
+            # the partition rewind and the runtime-N ANS backward transport.
+            return read_counted_prefix, run_partition_min_pass_and_print_terminal, True
+        return read_counted_canonical, run_partition_min_pass_nonnegative, False
+    return read_counted_canonical, run_partition_min_pass_general, False
 
 
 def _build_partition_program(
@@ -49,7 +50,7 @@ def _build_partition_program(
     cumulative: dict[str, int] = {}
 
     seq = RuntimeHexIntSequence(base=SEQUENCE_BASE)
-    reader, partition_runner = _select_partition_lowering(initial_ans)
+    reader, partition_runner, terminal_output = _select_partition_lowering(initial_ans)
     reader(bf, seq)
     cumulative["read_n_and_values"] = _raw_size(bf)
 
@@ -57,15 +58,18 @@ def _build_partition_program(
     cumulative["reverse_total"] = _raw_size(bf)
 
     partition_runner(bf, seq, initial_ans=initial_ans)
-    cumulative["partition"] = _raw_size(bf)
+    if terminal_output:
+        # The bounded stored-prefix runner includes final decimal output while
+        # the runtime pointer is already on the sentinel. It must be terminal.
+        cumulative["partition_and_output"] = _raw_size(bf)
+    else:
+        cumulative["partition"] = _raw_size(bf)
+        propagate_field_back_after_consumed_markers(bf, seq, ANS)
+        cumulative["reverse_ans"] = _raw_size(bf)
+        print_record_hex_s64_compact(bf, seq, field_base=ANS)
+        cumulative["decimal_print"] = _raw_size(bf)
 
-    propagate_field_back_after_consumed_markers(bf, seq, ANS)
-    cumulative["reverse_ans"] = _raw_size(bf)
-
-    print_record_hex_s64_compact(bf, seq, field_base=ANS)
     raw = bf.code()
-    cumulative["decimal_print"] = len(raw)
-
     code = optimize_bf(raw)
     cumulative["optimized"] = len(code)
     return code, cumulative
