@@ -1,110 +1,141 @@
 # Engineering State / Decision Log
 
-This file is a compact memory aid for long-running compiler work. It is **not** a chronological diary. Keep only information that can change future implementation decisions or prevent a repeated failure.
+This file is a compact memory aid for long-running compiler work. Keep only information that can change future implementation decisions or prevent a repeated failure.
 
 ## Retention policy
 
-Each item has a retention class.
+- **PERMANENT** — keep while the project exists unless the design is explicitly reversed.
+- **MILESTONE** — keep until the named milestone is completed, then replace it with the resulting invariant/decision.
+- **PR-LIFETIME** — keep until the named PR is merged/closed and the regression is protected on `main`.
 
-- **PERMANENT** — keep while the project exists unless the design decision is explicitly reversed.
-- **MILESTONE** — keep until the named milestone is completed, then replace with the resulting invariant/decision and delete obsolete detail.
-- **PR-LIFETIME** — keep until the named PR is merged/closed and the relevant regression test exists on `main`.
-- **DIAGNOSTIC** — keep only until the associated failure is fixed and protected by a regression test; then reduce to one sentence or delete.
-
-Do not keep successful CI run IDs or routine green-test history. Record success only when it establishes a new invariant or measured baseline.
+Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
 ---
 
-## Current target
+## Product target
 
-### [PERMANENT] Product target
+### [PERMANENT] Public contract
 
 - Public entry point remains ordinary Python source -> standalone standard Brainfuck (`><+-.,[]`).
 - Python is compile-time only; generated BF must not require Python/runtime services.
-- Primary practical target is competitive programming, currently **AtCoder Beginner Contest C without libraries**.
-- Source-size is a correctness-adjacent requirement because AtCoder limits submissions to 512 KiB.
-- ABC-C scale means designs must expect common constraints around **N <= 200,000**. A fixed 64-element list cannot be the final storage model.
-
-### [MILESTONE: runtime-sized sequence]
-
-A large runtime sequence must have **BF source size essentially independent of N**. Runtime steps and tape usage may grow with N; emitted source must not be statically unrolled N times.
-
-Acceptance direction:
-
-- `N=64` and `N=200000` should use the same runtime loop body / same generated algorithmic source shape.
-- Sequential processing should use cursor/sentinel walks rather than repeated general random-index machinery when data-flow proves this is safe.
-- If an input sequence is only consumed once, compiler streaming/fusion may avoid materializing it.
-- If it is consumed more than once (e.g. total sum then prefix pass), runtime storage is required.
-
----
-
-## Stable semantic decisions
-
-### [PERMANENT] Python list/reference semantics
-
-- `b = a` for lists is alias/reference assignment, not shallow copy and not deep copy.
-- `a.copy()` / `a[:]` are shallow copies.
-- `deepcopy(a)` will be an explicit compiler intrinsic; eventual goal is memoized object-graph copy.
-- Python list repetition semantics are preserved, including shared nested references in `[[0] * m] * n`.
+- Primary practical target is competitive-programming style programs, especially workloads with N around 200,000.
+- Source size is an acceptance constraint. Current contest regression must remain <= 512 KiB.
+- Runtime complexity matters independently of source size. Do not trade a small source reduction for value-proportional or otherwise explosive BF execution.
 
 ### [PERMANENT] Runtime / BF ABI
 
 - 8-bit wrapping tape cells.
-- Tape is zero-initialized before execution; compiler may rely on this to omit redundant clear operations.
-- Sufficient rightward tape is required by the abstract ABI.
+- Tape is zero-initialized before execution.
 - Standard byte I/O via `,` / `.`.
+- Generated code may require substantial rightward tape. AtCoder uses Tritium; large virtual tape is plausible, but an actual submission benchmark is still required before treating wall-clock feasibility as proven.
 
-### [MILESTONE: AtCoder runtime validation] Tritium tape reality
+### [PERMANENT] Python semantics
 
-AtCoder currently runs Brainfuck with **Tritium 1.2.73** using `tritium -b -e Main.bf`.
-
-Upstream Tritium on normal 64-bit Linux enables its huge-tape path when `mmap`/signal support is available. That implementation maps tape with `MAP_NORESERVE`; for byte cells the 64-bit path requests a multi-gigabyte virtual region rather than the fallback 1 Mi-cell allocation. Therefore a runtime sequence using millions of cells is technically plausible on AtCoder and should not be rejected merely because it exceeds 1 Mi cells.
-
-Retention condition: keep until an actual AtCoder submission or exact AtCoder Tritium build inspection confirms the large-tape behavior. Runtime time and resident-memory usage remain practical constraints even if virtual address space is large.
-
-### [PERMANENT] Sorting
-
-- Standard `list.sort()` target is stable bottom-up merge sort.
-- Worst-case O(n log n), O(n) auxiliary storage, in-place observable semantics, returns `None`.
-- Reverse sort must preserve stability; do not sort ascending then blindly reverse equal-key groups.
+- Signed integer work in the scalable contest slice uses fixed-width int64 wrap semantics.
+- `b = a` for lists is alias/reference assignment, not a copy.
+- `a.copy()` / `a[:]` are shallow copies.
+- Python list repetition must preserve shared nested references.
+- Standard `list.sort()` target is stable bottom-up merge sort; reverse sorting must preserve stability.
 
 ---
 
-## Current architecture direction
+## Current public scalable contest slice
 
-### [MILESTONE: runtime-sized sequence] Numeric/storage layout
+### [PR-LIFETIME: PR #6] Whole-program structural specialization
 
-Current public compact scalar work uses `Quad64Ref` (32 two-bit lanes plus markers) while fixed `list[int]` stores packed 8-byte values. Boundary conversions are expensive, so this split representation is not the intended large-array ABI.
+`pybf/compiler_partition.py` recognizes the complete data-flow shape:
 
-`pybf/bfbase4.py` now prototypes a radix-4 int64 representation:
+```python
+n = int(input())
+a = list(map(int, input().split()))
+total = 0
+for i in range(n):
+    total += a[i]
+ans = C
+left = 0
+for i in range(n):
+    left += a[i]
+    ans = min(ans, abs(total - 2 * left))
+print(ans)
+```
 
-- 32 radix-4 digits;
-- one value cell plus one traversal marker per lane;
-- 66 cells/word versus 99 for Quad;
-- source-compact runtime-lane copy/add validated by arithmetic CI;
-- subtraction/unsigned-compare are being validated next.
+Variable names are irrelevant; data-flow relationships are required. Near misses fall back to the generic compiler.
 
-Do not promote base-4 to the public ABI until add/sub/compare, signed behavior, decimal input/output, and sequence integration show acceptable runtime as well as source size. For a sequential record walker, per-value markers may later be avoidable because the record walker itself provides traversal state.
+The specialization is no longer dependent on “number of tokens == N”. First-line N is explicitly parsed and carried into the second-line reader:
 
-### [MILESTONE: runtime-sized sequence] Sequential storage primitive
+- exactly N values participate in the algorithm;
+- extra second-line tokens are drained but ignored;
+- a short second line zero-fills the missing participating values and does not read the next line;
+- N=0 is supported and still drains the list line;
+- negative N is normalized to zero by the counted reader.
 
-`pybf/bfstreamseq.py::RuntimeByteSequence` is the first proven runtime-sized contiguous sequence primitive.
+`bfcontestpartition.py` selects the faster nonnegative-answer minimum path when `0 <= initial_ans < 2**63`; otherwise it uses the general signed-min path.
 
-It demonstrates:
+### [PR-LIFETIME: PR #6] Current measured baseline
 
-- no compile-time capacity/N parameter;
-- one BF loop body grows storage at runtime;
-- source size does not grow with input length;
-- a second BF pass can replay the stored records;
-- a reverse marker walk restores the pointer to a known static anchor.
+Latest stable public program:
 
-This byte version is an isolated scalability proof, not public Python `list` semantics. Extend the same structure to numeric records rather than enlarging the old fixed-64 list.
+- optimized BF source: **438,702 bytes**;
+- 512 KiB headroom: **85,586 bytes**;
+- N=32 all-ones: **2,220,724** raw interpreter steps;
+- N=64 all-ones: **4,263,655** raw interpreter steps;
+- measured slope: **63,841.6 steps / added record**;
+- linear N=200,000 projection: **12,768,496,543 raw steps**.
 
-### [MILESTONE: runtime heap placement] Memory ordering / layout planning
+Raw interpreter steps are a regression/complexity proxy, not AtCoder wall-clock time. Tritium performs optimized/JIT execution. Do not claim N=200,000 is fast enough until tested with Tritium/AtCoder.
 
-Do not place huge runtime arrays between hot scalars/scratch/workspace. In Brainfuck, tape distance directly becomes emitted `<`/`>` characters.
+N=64 phase telemetry on the same public construction:
 
-Desired layout:
+- counted lexical reader: **1,182,801** cumulative steps;
+- reverse TOTAL propagation: **1,231,061** cumulative;
+- partition pass: **4,079,669** cumulative;
+- reverse ANS propagation: **4,097,595** cumulative;
+- decimal output/full program: **4,263,655**.
+
+The partition pass remains the dominant optimization target.
+
+### [PR-LIFETIME: PR #6] Runtime record design
+
+Current scalable numeric sequence uses fixed-stride hexadecimal int64 records. Core carried fields are DATA, TOTAL, LEFT and ANS plus marker/back links. The emitted source is independent of runtime N; tape use and execution scale with N.
+
+The current public reader is `bfhexcounted_lexfast.py`:
+
+- carries N with the record cursor;
+- uses direct decimal -> fixed-width hexadecimal accumulation;
+- preserves signed int64 wrap;
+- explicitly clears parser scratch that aliases future-record cells.
+
+Current public partition arithmetic uses:
+
+1. fused `LEFT += DATA` and `TOTAL - 2*LEFT` construction;
+2. destructive state transport to the next record;
+3. two's-complement absolute value;
+4. minimum propagation;
+5. compact decimal output.
+
+The canonical add-candidate decoder uses thresholds 8/16/24 rather than one 31-level source-unrolled decoder. This reduced public source from **458,094** to **438,702 bytes** with identical measured runtime.
+
+---
+
+## General runtime object/list foundation
+
+### [MILESTONE: general scalable Python lists]
+
+PR #6 also contains reusable but still experimental pieces:
+
+- compact packed-u32 primitives;
+- 32-bit object handles, with 0 reserved for null;
+- monotonic runtime identity allocation;
+- marker-walk heap blocks with type/length/capacity/next metadata;
+- packed 8-byte int64 payloads;
+- heap-backed list root and alias identity;
+- dynamic append/index experiments;
+- runtime-sized byte and packed sequence prototypes;
+- high-water-aware layout planning via `compiler_layout.py` / `PeakTempArena`.
+
+These are **not yet** the general public Python-list backend. The narrow partition specialization must not be mistaken for completion of scalable arbitrary list semantics.
+
+Desired memory ordering remains:
 
 ```text
 static scalars / small objects
@@ -115,129 +146,99 @@ compile-time temporary high-water region
 runtime heap / large sequences
 ```
 
-`PeakTempArena` is now wired only into the final public compiler through `compiler_layout.py`; legacy frontends retain `_TempArena`. `LayoutPlan` records the final temporary high-water boundary so runtime-sized storage can begin strictly after compile-time temporaries.
-
-Next step is using that measured boundary for actual runtime sequence/list placement. Do not expand a fixed-capacity list to 200000 static slots.
-
-### [MILESTONE: shared IR]
-
-Potential future frontend split:
-
-```text
-Python frontend --\
-                  -> typed contest IR -> BF backend
-C subset frontend-/
-```
-
-A C frontend is attractive if restricted to a contest-oriented subset (`int64_t`, `char`, arrays, if/for/while, functions, simple I/O). Do not attempt full ISO C first: pointers, arbitrary `malloc`, preprocessor, integer promotion, structs/unions, UB modeling, etc. would erase much of the simplicity advantage.
+Do not place huge runtime arrays between hot scalars or scratch; BF tape distance directly becomes `<` / `>` traffic and source.
 
 ---
 
-## Proven source-size lessons
+## Permanent source/runtime lessons
 
-### [PERMANENT] Avoid static expansion of runtime repetition
+### [PERMANENT] Prefer runtime repetition over static expansion
 
-Major successful reductions came from replacing Python-side/static BF expansion with a small BF runtime loop:
+If an operation logically repeats at runtime, first ask whether BF can contain one loop body instead of the compiler emitting one body per slot/lane/item. Major reductions came from runtime string iteration, list walkers, numeric lane loops, direct token parsing, and runtime record traversal.
 
-- string iteration streaming when safe;
-- list dynamic-index/append slot walks instead of per-capacity unrolling;
-- Quad add/sub/compare/copy lane loops;
-- compact decimal printing;
-- range induction-variable byte shadows when nonnegativity is proven;
-- fused `sum += values[i]` and `min(abs(...))` patterns where semantics permit.
+### [PERMANENT] Measure source and runtime separately
 
-General rule: **if the operation logically repeats at runtime, first ask whether the BF itself can contain one loop body rather than the compiler emitting one body per lane/slot/item.**
+A smaller or apparently simpler BF lowering can be slower. Promote an optimization only after correctness and measured source/runtime evaluation.
 
-### [PERMANENT] Host-language speed is secondary until BF size is compact
+Known examples from PR #6:
 
-Measured compilation improved from tens of seconds to ~1 second mainly by emitting less BF, without moving the compiler from Python. A Rust/C++ rewrite would not solve a 30 MB output-size problem.
+- first fused candidate experiment reduced source but worsened partition runtime;
+- `absfast` reduced apparent arithmetic structure but was much slower;
+- fused abs+min was correct but increased both source and runtime;
+- destructive state transport was a genuine runtime win;
+- tiered 8/16/24 candidate decoding was a genuine source win with no runtime loss.
 
-If native code is later justified, first candidate is the large-string/optimizer stage, not the Python AST frontend.
+### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 
----
+A rejected 31 -> 16+8+residual split assumed execution would fall through after a nonzero nested guard. It does not: `]` jumps back to its matching `[` while the control cell is nonzero. Sequentially splitting a bounded decoder is unsafe unless the residual is fully consumed inside the deepest active guard.
 
-## Important empirical baselines
+### [PERMANENT] Parser scratch may alias future record state
 
-### [PR-LIFETIME: PR #6] User-provided ABC-B prefix/partition program
+The runtime parser intentionally borrows cells in future-record workspace. A SIGN/BACK alias bug showed that these cells cannot be assumed zero on subsequent records. Explicitly clear scratch/flags at the point their invariant requires zero.
 
-Regression source is in `tests/test_compile_performance.py`.
+### [PERMANENT] Runtime count must travel with the cursor
 
-Latest stable compact-lowering baseline:
+For `range(n)` semantics, N cannot remain only at a fixed anchor while the parser advances through runtime-created records. Carry the count/extent with the cursor. Count extent can avoid a full 16-nibble nonzero rescan after each decrement.
 
-- final BF: **825,690 bytes**
-- compile: about **0.8-1.0 s** on GitHub runner
-- still fails only the 512 KiB gate; arithmetic/runtime/frontend shards are green.
+### [PERMANENT] Avoid value-proportional decimal arithmetic
 
-This program was later identified as an **ABC-B** solution, not ABC-C. Keep it as a useful lower-bound/regression fixture, but do not mistake passing it for ABC-C readiness.
-
-Earlier progression (retain only until PR #6 closes): roughly 40 MB / ~78 s -> 30.8 MB -> 16.5 MB -> 9.5 MB -> 4.3 MB -> 3.0 MB -> 2.2 MB -> 1.26 MB -> 0.85 MB. The exact intermediate numbers are not architectural requirements.
-
-### [PERMANENT] String-loop real submission result
-
-PR #5 reduced the reported `for c in s` example from about 10.6 MB to **199,730 bytes**, and the generated Brainfuck received an actual AtCoder AC. This validates runtime/streaming source-size optimization as a practical direction.
-
----
-
-## Failures / rejected approaches
-
-### [PERMANENT] Do not reintroduce full heap handle scans while handles are ordinal
-
-Early heap lookup compared the requested 4-byte handle against every allocated block and exceeded BF step limits. While allocation is monotonic and handles are 1-based block ordinals, use direct ordinal walking. A future free-list may replace this with an indirection table.
-
-### [PERMANENT] Heap reverse-walk coordinate bug
-
-A result-return lane walker once reused coordinates relative to the original block on the second BF-loop iteration, causing nontermination even at a 1B-command test limit. Runtime repeated-loop builders must explicitly rebase their relative coordinate origin when the BF loop moves to a new block.
-
-### [PERMANENT] Right-sentinel requirement for fixed list walkers
-
-A fixed-list lane walker once treated the following variable/control cell as the next-slot sentinel, causing capacity overflow/corruption. Any walker that peeks into a next slot needs a physically reserved sentinel independent of neighboring allocation contents.
-
-### [PERMANENT] Reject value-proportional decimal multiplication loops
-
-A packed decimal parser experiment implemented byte `*10` with nested loops proportional to the byte value. It saved only ~792 source bytes but exceeded 500M runtime BF steps. Do not trade tiny source savings for value-proportional runtime explosions. Prefer fixed-iteration shift/add or a different numeric lane representation.
+A packed decimal parser using value-proportional byte `*10` loops saved little source and exceeded enormous step budgets. Decimal kernels should have work bounded by representation width/digit count, not numeric byte value.
 
 ### [PERMANENT] Repository editing safety
 
-A partial fetch of `transpiler_v2.py` was accidentally used as full replacement, deleting the rest of the module and causing import failures (`clean_bf` missing). It was restored exactly from the previous blob.
+Never perform `partial fetch -> full replacement` on a foundational file. A previous partial replacement truncated `transpiler_v2.py`. Fetch the full current blob before replacement or isolate work in a new module.
 
-Rule: for large foundational files, never perform `partial fetch -> full contents replacement`. Use a full verified blob/file, a narrow new module/subclass, or Git tree/blob replacement from a known-good object.
+### [PERMANENT] Runtime walker coordinate discipline
 
-### [PR-LIFETIME: PR #6] Diagnostic step limits
+Repeated BF-loop builders that move to another record/block must rebase relative coordinates. Reusing coordinates relative to the previous block caused nontermination in an earlier heap return path.
 
-Do not "fix" heap/runtime failures by only increasing step limits. A temporary 1B limit proved a genuine nontermination bug; root-cause repair restored fast tests. Keep step budgets meaningful after diagnosis.
+### [PERMANENT] Sentinels must be physical storage, not neighboring variables
+
+Any walker that probes the next slot needs a reserved sentinel. Treating the next compiler allocation as an implicit sentinel caused overflow/corruption.
+
+### [PERMANENT] Do not mask bugs with step-limit increases
+
+Step limits are diagnostic and regression guards. Increase temporarily only to distinguish slowness from nontermination; fix the root cause and restore meaningful limits.
 
 ---
 
-## Current PR #6 working state
+## CI / acceptance gates
 
 ### [PR-LIFETIME: PR #6]
 
-- Branch: `abc-c-runtime-heap-1`
-- Experimental heap/object/list foundation exists but is **not yet the public list frontend**.
-- Public list semantics still rely on fixed-capacity storage for many paths.
-- CI is sharded (`arithmetic`, `runtime`, `frontend`, `contest`) and uses xdist inside jobs.
-- Current expected failure is the contest 512 KiB gate; other shards should remain green.
-- Final public compilation is routed through `compiler_layout.py` and high-water-aware `PeakTempArena`.
-- Runtime-sized byte sequence prototype is green and proves N-independent emitted source for contiguous runtime growth/replay.
-- Base-4 compact numeric prototype has green copy/add tests; sub/compare validation is in progress.
+CI is sharded into `arithmetic`, `runtime`, `frontend`, and `contest`, with xdist inside each job.
 
-Next implementation order:
+Do not relax these gates merely to land the PR:
 
-1. Finish base-4 add/sub/compare validation and reject it if runtime costs are poor.
-2. Build a runtime-sized numeric sequence on the contiguous record walker, using a representation that avoids per-element public-Quad conversion.
-3. Add scale/source-shape tests representing N up to 200000 without emitting N copies of code.
-4. Add decimal-token input directly into the scalable numeric sequence.
-5. Add sequential iteration/reduction over that sequence; then handle multi-pass cases such as the ABC-B fixture.
-6. Migrate ordinary Python `list(map(int, input().split()))` to scalable storage when safe/final semantics are ready.
-7. Only after scalable storage is stable, resume alias/deepcopy/sort work on top of it.
+- standard Brainfuck characters only;
+- <= 512 KiB contest source;
+- compile-performance guard;
+- end-to-end output correctness;
+- runtime-N source independence;
+- signed int64 boundary tests;
+- extra-token / short-line / N=0 counted-input semantics;
+- linear raw-step growth guard.
+
+Latest head before this document refresh had all four shards green.
 
 ---
 
-## Maintenance rule for this file
+## Next implementation order
+
+1. Keep the current specialization green and source <=512 KiB.
+2. Benchmark the generated program with actual Tritium/AtCoder rather than inferring wall-clock performance from the Python interpreter step count.
+3. Continue partition-pass optimization only when it produces a measured win; current phase telemetry says this is the dominant cost.
+4. Generalize reusable runtime numeric/list primitives rather than adding more one-off whole-program patterns where a shared lowering is practical.
+5. Wire scalable storage into ordinary Python `list(map(int, input().split()))` semantics when aliasing/indexing/multi-pass behavior is ready.
+6. Resume broader heap/list/deepcopy/sort work after the scalable numeric list ABI is stable.
+
+---
+
+## Maintenance rule
 
 At each meaningful design change:
 
-1. Update the relevant retained decision, rather than appending another duplicate paragraph.
-2. For a failed experiment, record **why it failed** and the general rule that prevents recurrence.
-3. For a successful CI run, normally record nothing. Only update a baseline if it changes an acceptance threshold or architectural conclusion.
-4. When a `MILESTONE`, `PR-LIFETIME`, or `DIAGNOSTIC` retention condition expires, delete obsolete detail immediately.
+1. update the relevant retained decision instead of appending a duplicate;
+2. for a failed experiment, record the reason and the general prevention rule;
+3. update a numeric baseline only when it changes an acceptance or architectural conclusion;
+4. delete obsolete MILESTONE/PR-LIFETIME details when their retention condition expires.
