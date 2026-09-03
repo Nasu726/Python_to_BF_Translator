@@ -1,12 +1,7 @@
 name: atcoder-tritium-benchmark
 
 on:
-  pull_request:
   workflow_dispatch:
-
-concurrency:
-  group: atcoder-tritium-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   benchmark:
