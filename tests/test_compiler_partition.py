@@ -112,6 +112,21 @@ def test_public_partition_specialization_honors_n_with_extra_list_tokens():
     assert result.input_consumed == len(input_data)
 
 
+def test_public_partition_specialization_zero_fills_short_line_without_crossing():
+    code = compile_source(SOURCE)
+    participating = [7, -3, 0, 0, 0]
+    input_data = "5\n7 -3\n999 1000\n"
+    second_line_end = len("5\n7 -3\n")
+    result = run_bf(
+        code,
+        input_data,
+        memory_size=30_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == f"{_reference(participating)}\n"
+    assert result.input_consumed == second_line_end
+
+
 def test_public_partition_specialization_honors_zero_n_and_drains_list_line():
     code = compile_source(SOURCE)
     input_data = "0\n10 20 30\n"
