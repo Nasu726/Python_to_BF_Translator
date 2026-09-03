@@ -63,6 +63,29 @@ def test_counted_input_exact_line_and_signed_values():
     assert _decode_s64(result.memory, seq.field(len(values), TOTAL)) == -1 + 7
 
 
+def test_counted_input_early_line_end_zero_fills_without_crossing_next_line():
+    code, seq = _program()
+    input_data = "5\n7 -3\n999 1000\n"
+    second_line_end = len("5\n7 -3\n")
+    result = run_bf(
+        code,
+        input_data,
+        memory_size=20_000,
+        step_limit=1_000_000_000,
+    )
+
+    assert result.pointer == seq.base
+    assert result.input_consumed == second_line_end
+    assert [_decode_s64(result.memory, seq.field(i, DATA)) for i in range(5)] == [
+        7,
+        -3,
+        0,
+        0,
+        0,
+    ]
+    assert _decode_s64(result.memory, seq.field(5, TOTAL)) == 4
+
+
 def test_counted_input_zero_n_drains_second_line_without_records():
     code, seq = _program()
     input_data = "0\n10 20 30\n"
