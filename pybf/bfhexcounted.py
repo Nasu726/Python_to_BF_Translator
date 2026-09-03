@@ -1,14 +1,14 @@
 """N-counted input for the runtime hexadecimal integer sequence.
 
 The initial scalable partition slice inferred the record count from the number
-of tokens on the second line.  That is sufficient for ordinary contest input,
-but it makes the optimization depend on an external input invariant.  This
-module carries the parsed first-line N through the record chain so the emitted
-runtime loop itself decides how many values participate in the algorithm.
+of tokens on the second line.  This module instead carries the parsed first-line
+N through the record chain so the emitted runtime loop itself decides how many
+values participate in the recognized ``range(n)`` passes.
 
-The implementation is intentionally isolated while its source-size/runtime
-trade-off is measured.  It reuses the audited signed-token parser and arithmetic
-kernels from ``bfhexseq`` rather than introducing a second numeric ABI.
+Extra tokens after N are drained to preserve one-line ``input()`` semantics. If
+the line ends before N values, remaining records are materialized as zeroes,
+matching the generic runtime's zero-initialized out-of-length list loads rather
+than reading into the following input line or looping forever at EOF.
 """
 
 from __future__ import annotations
@@ -132,9 +132,9 @@ def _prepare_count_from_first_line(
 ) -> None:
     """Read first-line N, move it to record-zero ANS, and seed its marker.
 
-    Reusing the existing line parser gives us identical signed-int64 behavior.
-    Negative N is normalized to zero because both Python ``range(n)`` loops in
-    the recognized program are empty for negative values.
+    Reusing the existing line parser gives identical signed-int64 behavior.
+    Negative N is normalized to zero because both recognized ``range(n)`` loops
+    are empty for negative values.
     """
     seq.read_lf_terminated_s64s_and_sum(bf)
 
@@ -166,17 +166,28 @@ def _prepare_count_from_first_line(
 
 @lru_cache(maxsize=1)
 def _counted_record_body() -> str:
-    """Read one token, decrement carried count, and advance one record."""
+    """Materialize one record, decrement carried count, and advance."""
     r = _RelativeBuilder()
 
+    # LEFT[0] is a carried Boolean saying the source line has already ended.
+    # Conditional input prevents missing values from consuming the next line or
+    # repeatedly reading EOF; the normal parser then sees a synthetic NUL and
+    # leaves DATA at its zero-initialized value.
+    r.clear(CH)
+    _flag_not(r, SKIP, LEFT)
+    r.move(SKIP)
+    r.emit("[")
+    r.add(SKIP, -1)
+    r.move(CH)
+    r.emit(",")
+    r.move(SKIP)
+    r.emit("]")
+
     # SIGN aliases the following record's BACK cell.  The one-value first-line
-    # parse leaves that sentinel BACK set, so the first second-line token must
+    # parse leaves that sentinel BACK set, so every second-line iteration must
     # explicitly zero SIGN rather than relying on virgin future tape.
     r.clear(SIGN)
 
-    # Skip horizontal whitespace before the required token.
-    r.move(CH)
-    r.emit(",")
     _is_hspace(r, SKIP, CH)
     r.move(SKIP)
     r.emit("[")
@@ -254,26 +265,20 @@ def _counted_record_body() -> str:
     r.move(GATE)
     r.emit("]")
 
-    # Preserve whether this token already consumed LF while the normal parser
-    # workspace is scrubbed. CONT/HAS_TOKEN are the two intentionally retained
-    # future-record cells in the existing layout.
+    # END_LINE is true both for a real LF/EOF and for the synthetic NUL used
+    # after a previous early line end. Carry it to the next record before the
+    # future-record parser workspace is scrubbed.
     r.copy_preserved(END_LINE, CONT, RESTORE)
     for cell in range(CH, WORKSPACE_END):
-        if cell not in (CONT, HAS_TOKEN):
+        if cell != CONT:
             r.clear(cell)
 
-    # TOTAL must reach the end sentinel even if the input line ends early.
+    # Every counted iteration is one logical range element.  Missing source
+    # tokens therefore leave DATA=0 but still consume one unit of N.
     _transfer_word(r, TOTAL, RECORD_STRIDE + TOTAL)
     r.set_const(RECORD_STRIDE + BACK, 1)
-
-    # Only an actual token consumes one unit of N and materializes a DATA record.
-    r.move(HAS_TOKEN)
-    r.emit("[")
-    r.add(HAS_TOKEN, -1)
     _decrement_hex_word(r, ANS)
     _transfer_word(r, ANS, RECORD_STRIDE + ANS)
-    r.move(HAS_TOKEN)
-    r.emit("]")
 
     _set_flag_if_word_nonzero(
         r,
@@ -283,8 +288,6 @@ def _counted_record_body() -> str:
         LEFT + 1,
     )
 
-    # Carry the line-end observation to the sentinel so extra list tokens can
-    # be drained only when N stopped the counted loop before LF.
     r.transfer(CONT, RECORD_STRIDE + LEFT)
     r.move(RECORD_STRIDE + MARKER)
     return r.code()
@@ -292,7 +295,7 @@ def _counted_record_body() -> str:
 
 @lru_cache(maxsize=1)
 def _drain_remaining_line_body() -> str:
-    """At a counted-loop sentinel, consume through LF/EOF only if needed."""
+    """At the counted-loop sentinel, consume through LF/EOF only if needed."""
     r = _RelativeBuilder()
     need = DATA
     ch = DATA + 1
@@ -336,11 +339,11 @@ def read_counted_two_line_s64s_and_sum(
     bf: BFEmitter,
     seq: RuntimeHexIntSequence,
 ) -> None:
-    """Read ``N`` then exactly N participating integers from the next line.
+    """Read ``N`` then materialize exactly max(N, 0) integer records.
 
-    Extra second-line tokens are drained to preserve ``input()`` line semantics.
-    The end sentinel receives TOTAL; the persistent DATA records contain exactly
-    the first max(N, 0) values when the line supplies that many tokens.
+    Extra second-line tokens are drained. If the line supplies fewer than N
+    tokens, the remaining DATA records are zero-filled without crossing into a
+    following line. The end sentinel receives the carried TOTAL.
     """
     if seq.base < 0:
         raise ValueError("sequence base must be non-negative")
@@ -349,8 +352,6 @@ def read_counted_two_line_s64s_and_sum(
     bf.move(seq.base + MARKER)
     bf.emit("[" + _counted_record_body() + "]")
 
-    # Runtime pointer is the zero-marker sentinel.  Drain only if the Nth token
-    # ended before LF, then follow BACK to the fixed record-zero anchor.
     bf.emit(_drain_remaining_line_body())
     bf.emit(">" * BACK)
     bf.emit("[" + "<" * RECORD_STRIDE + "]")
