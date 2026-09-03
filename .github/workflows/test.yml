@@ -40,6 +40,7 @@ jobs:
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
+              tests/test_bfhexseq_direct.py
               tests/test_bflists.py
               tests/test_bfmemory.py
               tests/test_bfobjects.py
@@ -93,6 +94,7 @@ jobs:
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
+          from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
 
           code = build_partition_program()
@@ -164,6 +166,21 @@ jobs:
               step_limit=1000000000,
           )
           print(f"partition_plain_line_reader_source={len(line_code)} steps_n64={line_result.steps}")
+
+          bf = BFEmitter()
+          seq = RuntimeHexIntSequence(base=320)
+          read_lf_terminated_s64s_and_sum_direct(bf, seq)
+          direct_line_code = optimize_bf(bf.code())
+          direct_line_result = run_bf(
+              direct_line_code,
+              line_data,
+              memory_size=30000,
+              step_limit=1000000000,
+          )
+          print(
+              f"partition_direct_line_reader_source={len(direct_line_code)} "
+              f"steps_n64={direct_line_result.steps}"
+          )
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
