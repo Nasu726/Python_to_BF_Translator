@@ -26,7 +26,9 @@ Do not record routine green CI runs. Record only baselines or results that affec
 
 - 8-bit wrapping tape cells, zero-initialized tape, standard byte I/O via `,` / `.`.
 - Scalable numeric records are 66-cell fixed-stride hexadecimal int64 records with MARKER/BACK plus DATA/TOTAL/LEFT/ANS words.
-- Generated code may require substantial rightward tape. AtCoder uses Tritium; raw interpreter steps are only a regression/complexity proxy. An actual Tritium/AtCoder benchmark is still required before claiming N=200,000 wall-clock feasibility.
+- Generated code may require substantial rightward tape.
+- AtCoder's 2025-10 Brainfuck environment is Tritium 1.2.73. Its published install recipe clones `rdebath/Brainfuck`, checks out commit `14a729d`, runs `make` / `make install` in `tritium`, and executes `tritium -b -e Main.bf`.
+- GitHub Actions can reproduce that source revision and command, but its host packages/CPU are not identical to AtCoder. Tritium's build auto-detects optional backends, so Actions wall time is strong evidence of practicality rather than an exact AtCoder timing prediction.
 
 ### [PERMANENT] Python semantics
 
@@ -77,7 +79,7 @@ Latest public bounded-prefix program on CI:
 - N=32 all-ones: **1,600,192** raw interpreter steps;
 - N=64 all-ones: **2,998,259** raw interpreter steps;
 - measured slope: **43,689.6 steps / added record**;
-- linear N=200,000 projection: **8,738,120,875 raw steps**.
+- linear N=200,000 raw-step projection: **8,738,120,875 raw steps**.
 
 For comparison, the retained pre-prefix baseline was 438,702 bytes / 4,263,655 N64 steps / 63,841.6 steps per record. The current path is therefore about 17% smaller in source and about 30% lower in the N64 raw-step proxy.
 
@@ -90,7 +92,23 @@ N=64 all-ones component telemetry:
 - reusable stored-prefix partition pass: **2,836,565** cumulative;
 - terminal direct-sentinel full program: **2,998,259** steps.
 
-The two largest remaining runtime targets are now the counted reader and stored-prefix candidate construction. Minimum/gating work has been reduced to a comparatively small remainder.
+Raw Python-interpreter steps remain useful for deterministic regression profiling, but they dramatically overstate optimized Tritium execution cost.
+
+### [PR-LIFETIME: PR #6] Exact Tritium-revision benchmark
+
+`tools/bench_tritium_partition.py` plus the manual `atcoder-tritium-benchmark` workflow reproduce AtCoder's published Tritium source revision (`14a729d`, reporting version 1.2.73) and execution command. On a GitHub-hosted Ubuntu runner, N=200,000 was executed three times for each deterministic distribution and every run produced the independently computed expected answer.
+
+Median elapsed wall times:
+
+- all `1`: **0.09 s**;
+- all `-1`: **0.16 s**;
+- all `65535`: **0.18 s**;
+- repeating `(5, -2, 10, 1234, -77)`: **0.14 s**;
+- deterministic values in roughly `[-500000, 500000)`: **0.27 s**.
+
+Peak RSS was about **19 MB** for all five N=200,000 cases. A separate size-scaling run observed N=64/1,000/10,000/50,000/200,000 all-ones at approximately 0.03/0.03/0.05/0.09/0.26 s on another hosted runner.
+
+Conclusion: practical N=200,000 execution under Tritium is no longer the main blocker for this vertical slice. The exact AtCoder host may differ, so this is not a promise of identical contest timing, but it is sufficient to deprioritize further narrow micro-optimization relative to generalizing the compiler backend.
 
 ### [PR-LIFETIME: PR #6] Bounded-prefix fast path
 
@@ -185,6 +203,10 @@ Known rejected experiments from PR #6:
 
 The last experiment also exposed an ABI bug: LEFT[15] is the live count extent. Scratch-lane optimizations must respect count/parser fields that share the same runtime record.
 
+### [PERMANENT] Raw BF step counts and optimized-interpreter wall time are different metrics
+
+The Python reference interpreter is intentionally literal and excellent for deterministic complexity/regression checks. Tritium performs substantial static optimization and JIT/optimized execution. Billions of literal BF operations can therefore correspond to sub-second execution for this structured program. Keep both metrics: do not replace correctness-oriented raw-step gates with noisy wall-clock CI, and do not use raw steps alone to reject a practically fast Tritium program.
+
 ### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 
 A rejected 31 -> 16+8+residual split assumed execution would fall through after a nonzero nested guard. It does not: `]` jumps back to its matching `[` while the control cell is nonzero. Sequentially splitting a bounded decoder is unsafe unless the residual is fully consumed inside the deepest active guard.
@@ -223,7 +245,7 @@ Step limits are diagnostic and regression guards. Increase temporarily only to d
 
 ### [PR-LIFETIME: PR #6]
 
-CI is sharded into `arithmetic`, `runtime`, `frontend`, and `contest`, with xdist inside each job. Runtime telemetry is part of the main test workflow. Experimental benchmark workflow is manual-only.
+CI is sharded into `arithmetic`, `runtime`, `frontend`, and `contest`, with xdist inside each job. Runtime raw-step telemetry is part of the main test workflow. Exact Tritium wall-time benchmarking is manual-only because it clones/builds an external project and is inherently host-sensitive.
 
 Do not relax these gates merely to land the PR:
 
@@ -243,12 +265,13 @@ The current runtime shard executes 114 tests including the terminal sentinel reg
 
 ## Next implementation order
 
-1. Keep the current specialization green and <=512 KiB.
-2. Benchmark the generated program with actual Tritium/AtCoder; do not infer wall-clock feasibility from Python raw-step telemetry.
-3. Optimize the two remaining dominant components: counted lexical/prefix reader and stored-prefix candidate construction. Require wins across mixed, large-positive, and negative distributions, not only all-ones.
-4. Generalize reusable runtime numeric/list primitives rather than adding more one-off whole-program patterns where a shared lowering is practical.
-5. Wire scalable storage into ordinary Python `list(map(int, input().split()))` semantics when aliasing/indexing/multi-pass behavior is ready.
-6. Resume broader heap/list/deepcopy/sort work after the scalable numeric list ABI is stable.
+1. Keep the proven 363,109-byte bounded-prefix specialization green and retain the manual exact-Tritium benchmark as a performance harness.
+2. **Shift primary effort back to general compiler semantics:** make scalable runtime numeric/list storage available to ordinary Python lowering instead of adding more whole-program special cases.
+3. First generalization target: `list(map(int, input().split()))` as a runtime-sized int64 list with correct length, indexing, iteration, aliasing, and repeated passes.
+4. Reuse the record/heap/list primitives already present in PR #6; define one stable list ABI before adding more operations.
+5. Then extend common list operations (`append`, copy/slice where supported, iteration, nested/reference behavior) and connect them to the normal AST/transpiler paths.
+6. Resume broader heap/list/deepcopy/sort work once the scalable numeric-list path is stable.
+7. Return to reader/candidate micro-optimization only if a real program or Tritium benchmark exposes it as a practical bottleneck.
 
 ---
 
