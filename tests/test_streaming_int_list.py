@@ -101,19 +101,39 @@ print(s)
     assert result.output == "106\n"
 
 
-def test_abc200_style_large_linear_consumer_is_not_capacity_bound():
-    # ABC200 C has N <= 2e5 and begins with the same runtime-sized integer-list
-    # input/linear-consumer shape.  This test exercises that producer/consumer
-    # scale axis without yet requiring the later 200-bucket container lowering.
+def test_abc153_b_common_raccoon_vs_monster_samples():
+    # ABC153 B: N <= 1e5.  The normal explicit-loop solution is exactly the
+    # runtime input-list -> scalar fold shape this optimization targets.
     source = """
+h, n = map(int, input().split())
 a = list(map(int, input().split()))
-c = 0
+total = 0
 for x in a:
-    if x % 200 == 0:
-        c += 1
-print(c)
+    total += x
+if total >= h:
+    print("Yes")
+else:
+    print("No")
 """
     code = _compile(source)
-    values = list(range(400))
-    result = _run(code, " ".join(map(str, values)) + "\n")
-    assert result.output == "2\n"
+    assert _run(code, "10 3\n4 5 6\n").output == "Yes\n"
+    assert _run(code, "20 3\n4 5 6\n").output == "No\n"
+    assert _run(code, "210 5\n31 41 59 26 53\n").output == "Yes\n"
+    assert _run(code, "211 5\n31 41 59 26 53\n").output == "No\n"
+
+
+def test_abc103_c_modulo_summation_samples():
+    # For ABC103 C, max f(m) = sum(a_i - 1), so a standard accepted-shape
+    # implementation is another direct streaming fold over the input list.
+    source = """
+n = int(input())
+a = list(map(int, input().split()))
+ans = 0
+for x in a:
+    ans += x - 1
+print(ans)
+"""
+    code = _compile(source)
+    assert _run(code, "3\n3 4 6\n").output == "10\n"
+    assert _run(code, "5\n7 46 11 20 11\n").output == "90\n"
+    assert _run(code, "7\n994 518 941 851 647 2 581\n").output == "4527\n"
