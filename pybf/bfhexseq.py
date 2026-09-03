@@ -440,7 +440,10 @@ class RuntimeHexIntSequence:
         bf.emit(">" * BACK)
 
         r = _RelativeBuilder(initial_pos=BACK)
-        _transfer_word(r, TOTAL - BACK, TOTAL - BACK - RECORD_STRIDE)
+        # Coordinates stay relative to the current record marker even though the
+        # BF pointer starts at BACK. Transfer all sixteen TOTAL nibbles; using
+        # TOTAL-BACK here would silently omit the most-significant nibble.
+        _transfer_word(r, TOTAL, TOTAL - RECORD_STRIDE)
         r.move(BACK - RECORD_STRIDE)
         bf.emit("[" + r.code() + "]")
 
