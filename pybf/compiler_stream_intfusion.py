@@ -1,10 +1,10 @@
 """Streaming fusion for single-use ``list(map(int, input().split()))`` values.
 
 This layer eliminates a temporary Python list when it is produced from one
-input line and immediately consumed by exactly one ``for x in list`` loop with
-no later uses.  The optimization is structural and semantics-preserving for the
-accepted shape: tokens are parsed one-at-a-time into the normal scalar target,
-so emitted Brainfuck source and runtime storage are independent of line length.
+input line and consumed by exactly one later ``for x in list`` loop with no
+other uses.  Input-free scalar/setup statements may occur between producer and
+consumer.  Tokens are parsed one-at-a-time into the normal scalar target, so
+emitted Brainfuck source and runtime storage are independent of line length.
 
 This is intentionally a producer/consumer optimization, not a replacement for
 full mutable list semantics.  Programs that retain, index, alias, sort or reuse
@@ -81,42 +81,44 @@ def _simple_int_list_input_assignment(node: ast.stmt) -> str | None:
 class PythonToBFStream(_BasePythonToBFStream):
     """Established generic compiler plus dead-list producer/consumer fusion."""
 
-    def _can_fuse_input_int_list_for(
+    def _find_input_int_list_consumer(
         self,
         body: list[ast.stmt],
         index: int,
-    ) -> bool:
-        if index + 1 >= len(body):
-            return False
-
+    ) -> int | None:
         source = _simple_int_list_input_assignment(body[index])
-        loop = body[index + 1]
-        if source is None or not isinstance(loop, ast.For):
-            return False
-        if not (
-            isinstance(loop.iter, ast.Name)
-            and loop.iter.id == source
-            and isinstance(loop.target, ast.Name)
-            and loop.target.id in self.variables
-            and loop.target.id != source
-        ):
-            return False
+        if source is None:
+            return None
 
-        # Reading input inside the consumer would change byte-stream ordering
-        # relative to first materializing the source line.
-        if _contains_input_call(loop.body) or _contains_input_call(loop.orelse):
-            return False
+        for loop_index in range(index + 1, len(body)):
+            stmt = body[loop_index]
+            if (
+                isinstance(stmt, ast.For)
+                and isinstance(stmt.iter, ast.Name)
+                and stmt.iter.id == source
+            ):
+                if not (
+                    isinstance(stmt.target, ast.Name)
+                    and stmt.target.id in self.variables
+                    and stmt.target.id != source
+                ):
+                    return None
+                if _contains_input_call(stmt.body) or _contains_input_call(stmt.orelse):
+                    return None
+                for nested in stmt.body + stmt.orelse:
+                    if _mentions_name(nested, source):
+                        return None
+                for later in body[loop_index + 1 :]:
+                    if _mentions_name(later, source):
+                        return None
+                return loop_index
 
-        # The list object itself must be dead except as this loop's iterator.
-        # That excludes len/index/alias/mutation/reuse and keeps this transform a
-        # true allocation elimination rather than a change to list semantics.
-        for stmt in loop.body + loop.orelse:
-            if _mentions_name(stmt, source):
-                return False
-        for stmt in body[index + 2 :]:
-            if _mentions_name(stmt, source):
-                return False
-        return True
+            # Delaying materialization past another input() would reorder the
+            # byte stream. Any other use of the list requires real list state.
+            if _contains_input_call([stmt]) or _mentions_name(stmt, source):
+                return None
+
+        return None
 
     def _compile_streaming_input_int_list_for(self, node: ast.For) -> None:
         assert isinstance(node.target, ast.Name)
@@ -212,9 +214,12 @@ class PythonToBFStream(_BasePythonToBFStream):
         i = 0
         while i < len(tree.body):
             part_start = len(self.bf.parts)
-            if self._can_fuse_input_int_list_for(tree.body, i):
+            consumer_index = self._find_input_int_list_consumer(tree.body, i)
+            if consumer_index is not None:
                 first = tree.body[i]
-                loop = tree.body[i + 1]
+                for setup_stmt in tree.body[i + 1 : consumer_index]:
+                    self.compile_stmt(setup_stmt)
+                loop = tree.body[consumer_index]
                 assert isinstance(loop, ast.For)
                 mark = self.temps.mark()
                 try:
@@ -222,7 +227,7 @@ class PythonToBFStream(_BasePythonToBFStream):
                 finally:
                     self.temps.rewind(mark)
                 self._record_size(first, part_start)
-                i += 2
+                i = consumer_index + 1
                 continue
 
             if self._can_fuse_input_string_for(tree.body, i):
