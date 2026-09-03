@@ -35,6 +35,7 @@ jobs:
               tests/test_bfheap.py
               tests/test_bfhexcounted.py
               tests/test_bfhexcounted_extent.py
+              tests/test_bfhexdecimal.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
               tests/test_bfhexpasses.py
