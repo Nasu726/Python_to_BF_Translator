@@ -32,6 +32,7 @@ jobs:
             files: >-
               tests/test_bfdynlist.py
               tests/test_bfheap.py
+              tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
               tests/test_bflists.py
               tests/test_bfmemory.py
