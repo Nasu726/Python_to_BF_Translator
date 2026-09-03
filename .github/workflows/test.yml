@@ -33,6 +33,7 @@ jobs:
               tests/test_bfcontestpartition.py
               tests/test_bfdynlist.py
               tests/test_bfheap.py
+              tests/test_bfhexcounted.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
