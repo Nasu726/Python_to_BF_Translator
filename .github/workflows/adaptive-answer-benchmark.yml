@@ -1,10 +1,59 @@
-name: experimental-benchmark
+name: atcoder-tritium-benchmark
 
 on:
+  pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: atcoder-tritium-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  note:
+  benchmark:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - run: echo "Ad-hoc performance experiments now live in the main runtime telemetry or git history."
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build exact AtCoder Tritium revision
+        run: |
+          git clone --quiet https://github.com/rdebath/Brainfuck.git /tmp/Brainfuck
+          git -C /tmp/Brainfuck checkout --quiet 14a729d
+          make -C /tmp/Brainfuck/tritium -j2
+          sudo make -C /tmp/Brainfuck/tritium install
+          command -v tritium
+      - name: Generate current public Brainfuck and inputs
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python tools/bench_tritium_partition.py --program Main.bf
+          python - <<'PY'
+          from pathlib import Path
+          for n in (64, 1000, 10000, 50000, 200000):
+              Path(f'input_{n}.txt').write_text(
+                  f'{n}\n' + ' '.join(['1'] * n) + '\n',
+                  encoding='ascii',
+              )
+          PY
+          wc -c Main.bf input_*.txt
+      - name: Benchmark AtCoder command
+        shell: bash
+        run: |
+          set +e
+          for n in 64 1000 10000 50000 200000; do
+            echo "=== n=$n ==="
+            rm -f "output_${n}.txt" "time_${n}.txt"
+            /usr/bin/time -f 'elapsed=%e user=%U sys=%S maxrss_kb=%M exit=%x' -o "time_${n}.txt" \
+              timeout 120s tritium -b -e Main.bf < "input_${n}.txt" > "output_${n}.txt"
+            status=$?
+            cat "time_${n}.txt" || true
+            printf 'status=%s output=' "$status"
+            cat "output_${n}.txt" || true
+            echo
+            if [ "$status" -eq 0 ] && [ "$(tr -d '\r\n' < "output_${n}.txt")" != "0" ]; then
+              echo "wrong output for n=$n" >&2
+              exit 1
+            fi
+          done
