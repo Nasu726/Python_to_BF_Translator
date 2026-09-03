@@ -69,6 +69,33 @@ def test_scalable_partition_vertical_slice_executes_end_to_end():
         assert result.output == f"{_reference(values)}\n"
 
 
+def test_scalable_partition_execution_steps_grow_linearly_with_runtime_n():
+    code = build_partition_program()
+    measured = []
+    for n in (8, 16, 32):
+        values = [1] * n
+        result = run_bf(
+            code,
+            f"{n}\n" + " ".join(map(str, values)) + "\n",
+            memory_size=30_000,
+            step_limit=1_000_000_000,
+        )
+        assert result.output == f"{_reference(values)}\n"
+        measured.append(result.steps)
+
+    first_increment = measured[1] - measured[0]
+    second_increment = measured[2] - measured[1]
+    assert first_increment > 0
+    assert second_increment > 0
+    # Doubling the number of added records doubles the added work.  Leave a
+    # small constant-factor margin for decimal-output and input-length effects,
+    # while still detecting accidental quadratic record scans.
+    assert second_increment < first_increment * 2.25, (
+        f"unexpected runtime-step growth: steps={measured}, "
+        f"increments={[first_increment, second_increment]}"
+    )
+
+
 def test_scalable_partition_vertical_slice_fits_submission_limit():
     code = build_partition_program()
     sizes = partition_program_size_breakdown()
