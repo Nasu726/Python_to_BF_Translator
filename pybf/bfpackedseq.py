@@ -161,14 +161,15 @@ def _flag_not(
     dst: int,
     src: int,
 ) -> None:
-    """dst = not src for a preserved Boolean src."""
+    """dst = not src for a preserved Boolean src, including dst==GATE."""
+    scratch = LINE_TMP if dst == GATE else GATE
     r.set_const(dst, 1)
-    r.copy_preserved(src, GATE, RESTORE)
-    r.move(GATE)
+    r.copy_preserved(src, scratch, RESTORE)
+    r.move(scratch)
     r.emit("[")
-    r.add(GATE, -1)
+    r.add(scratch, -1)
     r.clear(dst)
-    r.move(GATE)
+    r.move(scratch)
     r.emit("]")
 
 
