@@ -75,3 +75,25 @@ jobs:
         # workers inside each runner use its CPU without the over-subscription
         # caused by a single `-n auto` job.
         run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
+      - name: Report scalable partition metrics
+        if: matrix.suite == 'runtime'
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python - <<'PY'
+          from bf_runtime import run_bf
+          from bfcontestpartition import build_partition_program, partition_program_size_breakdown
+
+          code = build_partition_program()
+          print(f"partition_source_bytes={len(code)}")
+          print(f"partition_size_breakdown={partition_program_size_breakdown()}")
+          for n in (32, 64):
+              data = f"{n}\n" + " ".join(["1"] * n) + "\n"
+              result = run_bf(
+                  code,
+                  data,
+                  memory_size=30000,
+                  step_limit=1000000000,
+              )
+              print(f"partition_steps_n{n}={result.steps}")
+          PY
