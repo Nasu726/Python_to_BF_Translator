@@ -15,13 +15,8 @@ from functools import lru_cache
 
 from bfcore import BFEmitter
 from bfhexcandidate_move import move_state_and_total_minus_double_left_into_data
-from bfhexpartition import (
-    MASK64,
-    _abs_data_inplace,
-    _consume_data_into_left,
-    _nibble_ge8,
-    _set_hex_const,
-)
+from bfhexpartition import MASK64, _nibble_ge8, _set_hex_const
+from bfhexpartition_fastops import abs_data_inplace, consume_data_into_left
 from bfhexradixfast import map_total_base16_threshold
 from bfhexseq import (
     ANS,
@@ -167,9 +162,9 @@ def _min_and_move_ans_with_data(r: _RelativeBuilder) -> None:
 
 def _partition_body() -> str:
     r = _RelativeBuilder()
-    _consume_data_into_left(r)
+    consume_data_into_left(r)
     move_state_and_total_minus_double_left_into_data(r)
-    _abs_data_inplace(r)
+    abs_data_inplace(r)
     _min_and_move_ans_with_data(r)
     r.move(RECORD_STRIDE + MARKER)
     return r.code()
