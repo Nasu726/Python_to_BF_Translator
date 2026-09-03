@@ -18,38 +18,43 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pytest
-      - name: Test prefix-retaining lowering
+      - name: Test fused prefix-sum reader
         env:
           PYTHONPATH: pybf
-        run: python -m pytest -q tests/test_bfhexpartition_prefix.py
-      - name: Compare canonical and prefix-retaining pipelines
+        run: python -m pytest -q tests/test_bfhexcounted_prefixfused.py
+      - name: Compare prefix readers
         env:
           PYTHONPATH: pybf
         run: |
           python - <<'PY'
           from bf_runtime import run_bf
           from bfcore import BFEmitter
-          from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as canonical_reader
           from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum as prefix_reader
-          from bfhexpartition_zeroans import run_partition_min_pass as canonical_partition
-          from bfhexpartition_prefix import run_partition_min_pass as prefix_partition
+          from bfhexcounted_prefixfused import read_counted_two_line_s64s_and_sum as fused_reader
+          from bfhexpartition_prefix import run_partition_min_pass
           from bfhexseq import RuntimeHexIntSequence
           from bfopt import optimize_bf
 
-          def program(reader, partition):
+          def program(reader):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
               reader(bf, seq)
               seq.propagate_total_back_to_first(bf)
-              partition(bf, seq, initial_ans=10_000_000)
+              run_partition_min_pass(bf, seq, initial_ans=10_000_000)
               return optimize_bf(bf.code())
 
-          programs = {
-              'canonical': program(canonical_reader, canonical_partition),
-              'prefix': program(prefix_reader, prefix_partition),
-          }
+          def reader_program(reader):
+              bf = BFEmitter()
+              seq = RuntimeHexIntSequence(base=320)
+              reader(bf, seq)
+              return optimize_bf(bf.code())
+
+          programs = {'prefix': program(prefix_reader), 'fused': program(fused_reader)}
+          readers = {'prefix': reader_program(prefix_reader), 'fused': reader_program(fused_reader)}
           for name, code in programs.items():
               print(f'{name}_partition_source={len(code)}')
+          for name, code in readers.items():
+              print(f'{name}_reader_source={len(code)}')
 
           cases = {
               'ones': [1] * 64,
@@ -60,7 +65,10 @@ jobs:
           }
           for case_name, values in cases.items():
               data = f'{len(values)}\n' + ' '.join(map(str, values)) + '\n'
+              for name, code in readers.items():
+                  result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
+                  print(f'{case_name}_{name}_reader_steps={result.steps}')
               for name, code in programs.items():
                   result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
-                  print(f'{case_name}_{name}_steps={result.steps}')
+                  print(f'{case_name}_{name}_partition_steps={result.steps}')
           PY
