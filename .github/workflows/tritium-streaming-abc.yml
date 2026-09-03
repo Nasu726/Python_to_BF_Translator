@@ -1,12 +1,7 @@
 name: tritium-streaming-abc
 
 on:
-  pull_request:
   workflow_dispatch:
-
-concurrency:
-  group: tritium-streaming-abc-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   abc153-b:
