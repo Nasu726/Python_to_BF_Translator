@@ -15,6 +15,7 @@ read, so no full-nibble preserved copy is needed.
 
 from __future__ import annotations
 
+from bfhexradixfast import map_total_base16_threshold
 from bfhexseq import (
     DATA,
     HEX_DIGITS,
@@ -23,7 +24,6 @@ from bfhexseq import (
     RECORD_STRIDE,
     TOTAL,
     _RelativeBuilder,
-    _map_total_base16,
 )
 
 
@@ -115,7 +115,7 @@ def move_state_and_total_minus_double_left_into_data(r: _RelativeBuilder) -> Non
         # acc is guaranteed in 0..31. Map it once to the candidate nibble.
         # src_total is now zero and can hold the mapped digit; LEFT[0] is zero
         # once nibble zero has been consumed and serves as the carry temporary.
-        _map_total_base16(r, acc, mapped, carry_tmp)
+        map_total_base16_threshold(r, acc, mapped, carry_tmp)
         r.transfer(mapped, DATA + i)
         r.transfer(carry_tmp, sub_carry)
 
