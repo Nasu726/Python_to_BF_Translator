@@ -1,12 +1,16 @@
 """Fuse LEFT += DATA with partition candidate/state transport.
 
-For each hexadecimal digit the old implementation first materializes
-``LEFT = LEFT + DATA`` and a second pass immediately consumes that LEFT again
+For each hexadecimal digit the older implementation first materialized
+``LEFT = LEFT + DATA`` and a second pass immediately consumed that LEFT again
 to form ``TOTAL - 2*LEFT``.  This kernel combines both operations.
 
 The outgoing addition carry and doubling carry are encoded together in MARKER:
 0=(0,0), 1=(0,1), 2=(1,0), 3=(1,1).  The subtraction carry lives in DATA[0]
 after nibble zero has been consumed.  No extra record cells are required.
+
+The bounded sum decoder is tiered at the only state-changing thresholds
+8, 16 and 24.  The final 0..7 residual is consumed inside the active threshold
+24 branch, so no nonzero control value reaches a closing bounded guard.
 """
 
 from __future__ import annotations
@@ -29,15 +33,7 @@ def _apply_combined_incoming_carries(
     x: int,
     candidate_acc: int,
 ) -> None:
-    """Consume MARKER's encoded (add, double) carries into this nibble.
-
-    State transitions are arranged so a three-level bounded decoder implements
-    the four states without an extra temporary cell:
-
-    * state 1: doubling carry only -> candidate -= 1
-    * state 2: addition carry only -> x += 1
-    * state 3: both effects
-    """
+    """Consume MARKER's encoded (add, double) carries into this nibble."""
     for step in range(1, 4):
         r.move(MARKER)
         r.emit("[")
@@ -45,16 +41,41 @@ def _apply_combined_incoming_carries(
         if step == 1:
             r.add(candidate_acc, -1)
         elif step == 2:
-            # Transition from encoded state 1 to state 2: undo the doubling
-            # effect and apply the addition carry.
             r.add(candidate_acc, 1)
             r.add(x, 1)
         else:
-            # State 3 has both carries, so re-apply the doubling effect.
             r.add(candidate_acc, -1)
     for _ in range(3):
         r.move(MARKER)
         r.emit("]")
+
+
+def _ordinary_sum_unit(r: _RelativeBuilder, *, next_left: int, candidate_acc: int) -> None:
+    r.add(next_left, 1)
+    r.add(candidate_acc, -2)
+
+
+def _threshold_sum_unit(
+    r: _RelativeBuilder,
+    *,
+    step: int,
+    next_left: int,
+    candidate_acc: int,
+) -> None:
+    if step == 8:
+        r.add(next_left, 1)
+        r.add(candidate_acc, 14)
+        r.set_const(MARKER, 1)
+    elif step == 16:
+        r.clear(next_left)
+        r.add(candidate_acc, 14)
+        r.set_const(MARKER, 2)
+    elif step == 24:
+        r.add(next_left, 1)
+        r.add(candidate_acc, 14)
+        r.set_const(MARKER, 3)
+    else:
+        raise ValueError("unexpected threshold")
 
 
 def _consume_sum_into_next_left_and_candidate(
@@ -64,43 +85,52 @@ def _consume_sum_into_next_left_and_candidate(
     next_left: int,
     candidate_acc: int,
 ) -> None:
-    """Consume x in 0..31, producing x%16 and candidate correction.
-
-    The candidate accumulator already contains
-    ``TOTAL_digit + 15 + subtraction_carry - incoming_double_carry``.
-    Every ordinary unit of the new LEFT digit subtracts two.  At new-left
-    thresholds 8, 0-after-wrap, and 8-after-wrap, adding 14 instead of
-    subtracting 2 performs the required +16 radix compensation while updating
-    the encoded outgoing carry state.
-    """
+    """Consume x in 0..31 with nested 8/16/24 threshold tiers."""
     r.clear(next_left)
-    for step in range(1, 32):
-        r.move(x)
-        r.emit("[")
-        r.add(x, -1)
 
-        if step == 16:
-            # 15 -> 0 after the addition radix wraps.  Addition carry becomes
-            # one, doubling carry resets to zero: encoded state 2.
-            r.clear(next_left)
-            r.add(candidate_acc, 14)
-            r.set_const(MARKER, 2)
-        else:
-            r.add(next_left, 1)
-            if step == 8:
-                # new LEFT crosses 7 -> 8 before any addition wrap.
-                r.add(candidate_acc, 14)
-                r.set_const(MARKER, 1)
-            elif step == 24:
-                # Wrapped new LEFT crosses 7 -> 8 with addition carry set.
-                r.add(candidate_acc, 14)
-                r.set_const(MARKER, 3)
+    def emit_group(start: int) -> None:
+        # start is 1, 9 or 17; each group accounts for exactly eight units.
+        for offset in range(8):
+            step = start + offset
+            r.move(x)
+            r.emit("[")
+            r.add(x, -1)
+            if step in (8, 16, 24):
+                _threshold_sum_unit(
+                    r,
+                    step=step,
+                    next_left=next_left,
+                    candidate_acc=candidate_acc,
+                )
+                if step < 24:
+                    # The next bounded group is emitted inside this active
+                    # deepest guard.  If x is already zero, its first '[' skips
+                    # the whole nested group and all outer closings see zero.
+                    emit_group(step + 1)
+                else:
+                    # After unit 24 the residual is 0..7 and there are no more
+                    # state thresholds.  Finish it before bounded guards close.
+                    r.move(x)
+                    r.emit("[")
+                    r.add(x, -1)
+                    _ordinary_sum_unit(
+                        r,
+                        next_left=next_left,
+                        candidate_acc=candidate_acc,
+                    )
+                    r.move(x)
+                    r.emit("]")
             else:
-                r.add(candidate_acc, -2)
+                _ordinary_sum_unit(
+                    r,
+                    next_left=next_left,
+                    candidate_acc=candidate_acc,
+                )
+        for _ in range(8):
+            r.move(x)
+            r.emit("]")
 
-    for _ in range(31):
-        r.move(x)
-        r.emit("]")
+    emit_group(1)
 
 
 def add_data_and_move_state_total_minus_double_left_into_total(
@@ -113,10 +143,7 @@ def add_data_and_move_state_total_minus_double_left_into_total(
     sum, next.LEFT holds the updated prefix, and current TOTAL holds
     ``TOTAL - 2*next.LEFT`` modulo 2**64.  DATA/current LEFT are dead scratch.
     """
-    subtraction_carry = DATA  # DATA[0], free after nibble zero is consumed
-
-    # Consume the active record marker.  There are no incoming add/double
-    # carries for the least-significant digit.
+    subtraction_carry = DATA
     r.add(MARKER, -1)
 
     for i in range(HEX_DIGITS):
@@ -127,10 +154,8 @@ def add_data_and_move_state_total_minus_double_left_into_total(
         next_left = RECORD_STRIDE + LEFT + i
         candidate_out = TOTAL + i
 
-        # x = old LEFT digit + DATA digit.  This also frees candidate_acc.
         r.transfer(candidate_acc, x)
 
-        # Move the live total right while building the local candidate base.
         r.clear(candidate_acc)
         r.clear(next_total)
         r.move(src_total)
@@ -143,7 +168,6 @@ def add_data_and_move_state_total_minus_double_left_into_total(
         r.add(candidate_acc, 15)
 
         if i == 0:
-            # Radix-complement subtraction starts with carry one.
             r.add(candidate_acc, 1)
         else:
             r.transfer(subtraction_carry, candidate_acc)
@@ -160,9 +184,6 @@ def add_data_and_move_state_total_minus_double_left_into_total(
             candidate_acc=candidate_acc,
         )
 
-        # candidate_acc is guaranteed in 0..31 by the compensation schedule.
-        # DATA[0] is free after nibble zero and carries the subtraction radix
-        # bit across all later digits.
         map_total_base16_threshold(
             r,
             candidate_acc,
@@ -170,7 +191,6 @@ def add_data_and_move_state_total_minus_double_left_into_total(
             subtraction_carry,
         )
 
-    # Fixed-width overflow/carry state is dead at the 64-bit boundary.
     r.clear(MARKER)
     r.clear(subtraction_carry)
 
