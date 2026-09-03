@@ -35,6 +35,7 @@ jobs:
               tests/test_bfheap.py
               tests/test_bfhexcounted.py
               tests/test_bfhexcounted_extent.py
+              tests/test_bfhexcounted_direct.py
               tests/test_bfhexdecimal.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
@@ -90,6 +91,7 @@ jobs:
           from bfcore import BFEmitter
           from bfhexcounted import read_counted_two_line_s64s_and_sum
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
+          from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
@@ -195,5 +197,20 @@ jobs:
           print(
               f"partition_extent_counted_reader_source={len(extent_code)} "
               f"steps_n64={extent_result.steps}"
+          )
+
+          bf = BFEmitter()
+          seq = RuntimeHexIntSequence(base=320)
+          read_direct_counted(bf, seq)
+          direct_counted_code = optimize_bf(bf.code())
+          direct_counted_result = run_bf(
+              direct_counted_code,
+              data,
+              memory_size=30000,
+              step_limit=1000000000,
+          )
+          print(
+              f"partition_direct_counted_reader_source={len(direct_counted_code)} "
+              f"steps_n64={direct_counted_result.steps}"
           )
           PY
