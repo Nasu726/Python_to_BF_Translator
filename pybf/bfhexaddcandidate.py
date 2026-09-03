@@ -66,58 +66,41 @@ def _consume_sum_into_next_left_and_candidate(
 ) -> None:
     """Consume x in 0..31, producing x%16 and candidate correction.
 
-    Only thresholds 8, 16 and 24 change carry state.  The first sixteen units
-    are decoded with bounded guards.  If a wrapped residual remains, another
-    eight guards reach threshold 24, after which at most seven ordinary units
-    remain and can use one tiny runtime loop.  This is equivalent to the older
-    31-level decoder but emits and executes fewer nested guards.
+    The candidate accumulator already contains
+    ``TOTAL_digit + 15 + subtraction_carry - incoming_double_carry``.
+    Every ordinary unit of the new LEFT digit subtracts two.  At new-left
+    thresholds 8, 0-after-wrap, and 8-after-wrap, adding 14 instead of
+    subtracting 2 performs the required +16 radix compensation while updating
+    the encoded outgoing carry state.
     """
     r.clear(next_left)
-
-    # First radix: detect the 8 doubling threshold and 16 addition wrap.
-    for step in range(1, 17):
+    for step in range(1, 32):
         r.move(x)
         r.emit("[")
         r.add(x, -1)
-        if step == 8:
-            r.add(next_left, 1)
-            r.add(candidate_acc, 14)
-            r.set_const(MARKER, 1)
-        elif step == 16:
+
+        if step == 16:
+            # 15 -> 0 after the addition radix wraps.  Addition carry becomes
+            # one, doubling carry resets to zero: encoded state 2.
             r.clear(next_left)
             r.add(candidate_acc, 14)
             r.set_const(MARKER, 2)
         else:
             r.add(next_left, 1)
-            r.add(candidate_acc, -2)
-    for _ in range(16):
+            if step == 8:
+                # new LEFT crosses 7 -> 8 before any addition wrap.
+                r.add(candidate_acc, 14)
+                r.set_const(MARKER, 1)
+            elif step == 24:
+                # Wrapped new LEFT crosses 7 -> 8 with addition carry set.
+                r.add(candidate_acc, 14)
+                r.set_const(MARKER, 3)
+            else:
+                r.add(candidate_acc, -2)
+
+    for _ in range(31):
         r.move(x)
         r.emit("]")
-
-    # Wrapped low digit: threshold eight corresponds to original total 24.
-    for step in range(1, 9):
-        r.move(x)
-        r.emit("[")
-        r.add(x, -1)
-        r.add(next_left, 1)
-        if step == 8:
-            r.add(candidate_acc, 14)
-            r.set_const(MARKER, 3)
-        else:
-            r.add(candidate_acc, -2)
-    for _ in range(8):
-        r.move(x)
-        r.emit("]")
-
-    # After threshold 24 the residual is at most seven and has no further
-    # state transition, so a simple bounded-by-contract loop is sufficient.
-    r.move(x)
-    r.emit("[")
-    r.add(x, -1)
-    r.add(next_left, 1)
-    r.add(candidate_acc, -2)
-    r.move(x)
-    r.emit("]")
 
 
 def add_data_and_move_state_total_minus_double_left_into_total(
