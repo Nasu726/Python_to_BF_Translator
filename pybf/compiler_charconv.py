@@ -132,14 +132,10 @@ class _InferenceRewrite(ast.NodeTransformer):
             and isinstance(node.value, ast.Name)
             and node.value.id in self.char_lists
         ):
-            # A load from the special list is a one-character string value.
             return ast.copy_location(ast.Constant(value="x"), node)
         return node
 
     def visit_Call(self, node: ast.Call):
-        # Recognize outer representation-preserving forms before visiting their
-        # children.  Otherwise list(input()) would become input() before the
-        # enclosing join gets a chance to identify the char-list view.
         join_arg = _empty_join_arg(node)
         if isinstance(join_arg, ast.Name) and join_arg.id in self.char_lists:
             return ast.copy_location(ast.Constant(value=""), node)
@@ -184,9 +180,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             list_capacity=list_capacity,
         )
 
-    # ------------------------------------------------------------------
-    # source-shape predicates
-    # ------------------------------------------------------------------
     def _is_char_list_subscript(self, node: ast.AST) -> bool:
         return (
             isinstance(node, ast.Subscript)
@@ -217,9 +210,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             return True
         return super()._expr_is_string(node)
 
-    # ------------------------------------------------------------------
-    # character-list view
-    # ------------------------------------------------------------------
     @staticmethod
     def _constant_int(node: ast.AST) -> int | None:
         if isinstance(node, ast.Constant) and type(node.value) is int:
@@ -251,18 +241,42 @@ class PythonToBFStream(_BasePythonToBFStream):
         index = self._new_word()
         self.backend.copy64(index, raw)
 
+        length = self._new_word()
         zero = self._new_word(0)
+        self.backend.string_length(length, ref, self.temps.cell())
+
+        # Python negative indexing: normalize once by the current logical
+        # length.  Values still negative after that are out of range.
         negative = self.temps.cell()
         self.backend.slt64(negative, index, zero)
         self.bf.begin_while(negative)
         self.bf.add_const(negative, -1)
-        length = self._new_word()
         summed = self._new_word()
-        self.backend.string_length(length, ref, self.temps.cell())
         self.backend.add64(summed, index, length)
         self.backend.copy64(index, summed)
         self.bf.end_while(negative)
-        return self._index_word_to_byte(index)
+
+        # Physical selection is byte-sized because StringRef capacity <=255.
+        # Prove the normalized index is in [0, len) before dropping high bits;
+        # otherwise map it to 255, which is outside every valid StringRef slot.
+        valid = self.temps.cell()
+        still_negative = self.temps.cell()
+        self.backend.slt64(valid, index, length)
+        self.backend.slt64(still_negative, index, zero)
+        self.bf.begin_while(still_negative)
+        self.bf.add_const(still_negative, -1)
+        self.bf.clear(valid)
+        self.bf.end_while(still_negative)
+
+        out = self._index_word_to_byte(index)
+        invalid = self.temps.cell()
+        invalid_tmp = self.temps.cell()
+        self._flag_not(invalid, valid, invalid_tmp)
+        self.bf.begin_while(invalid)
+        self.bf.add_const(invalid, -1)
+        self.bf.set_const(out, 255)
+        self.bf.end_while(invalid)
+        return out
 
     def _load_char_list_subscript(self, node: ast.Subscript):
         assert isinstance(node.value, ast.Name)
@@ -296,7 +310,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             if self.strings[node.id].capacity == 1:
                 return self._eval_string(node)
         if self._is_char_list_subscript(node):
-            return self._load_char_list_subscript(node)  # type: ignore[arg-type]
+            return self._load_char_list_subscript(node)
         raise self._error(
             node,
             "character-list assignment requires a statically one-character string",
@@ -323,9 +337,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.bf.end_while(match)
         self.backend._clear_scratch()
 
-    # ------------------------------------------------------------------
-    # int <-> decimal string
-    # ------------------------------------------------------------------
     @staticmethod
     def _signed64(value: int) -> int:
         raw = value & ((1 << 64) - 1)
@@ -390,8 +401,6 @@ class PythonToBFStream(_BasePythonToBFStream):
 
             self.bf.begin_while(process)
             self.bf.add_const(process, -1)
-
-            # result = result*10 + digit modulo the project's int64 ABI.
             self.backend.copy64(twice, result)
             self.backend.copy64(eight, result)
             self.backend.shl1_inplace(twice)
@@ -502,14 +511,12 @@ class PythonToBFStream(_BasePythonToBFStream):
                     raise self._error(arg, "invalid decimal integer string") from exc
             if self._expr_is_string(arg):
                 return self._parse_decimal_string(self._eval_string(arg))
-            # int(int_value) is an identity under the fixed int64 ABI.
             return self.compile_expr(arg)
-
         return super().compile_expr(node)
 
     def _eval_string(self, node: ast.AST):
         if self._is_char_list_subscript(node):
-            return self._load_char_list_subscript(node)  # type: ignore[arg-type]
+            return self._load_char_list_subscript(node)
 
         if self._is_empty_char_join(node):
             arg = _empty_join_arg(node)
@@ -527,8 +534,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             if isinstance(arg, ast.Name) and arg.id in self.char_list_names:
                 raise self._error(arg, "str(character_list) list repr is not lowered yet")
             if self._expr_is_string(arg):
-                # Use virtual dispatch rather than super() so nested str(...)
-                # and char-list subscripts retain their extended semantics.
                 return self._eval_string(arg)
             if isinstance(arg, ast.Constant) and type(arg.value) is int:
                 value = self._signed64(arg.value)
@@ -539,9 +544,6 @@ class PythonToBFStream(_BasePythonToBFStream):
 
         return super()._eval_string(node)
 
-    # ------------------------------------------------------------------
-    # statements / output
-    # ------------------------------------------------------------------
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Assign):
             if (
