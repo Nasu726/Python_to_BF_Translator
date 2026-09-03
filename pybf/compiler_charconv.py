@@ -1,6 +1,6 @@
 """Character-list views and explicit int/string conversions.
 
-This layer keeps two common contest idioms cheap:
+This layer keeps two common contest idioms cheap::
 
     chars = list(input())
     ...
@@ -13,8 +13,8 @@ semantics for names created by ``list(input())``.
 
 The same layer also lowers explicit ``str(int64)`` and ``int(str)`` conversions.
 The project intentionally retains its signed-int64 ABI; dynamic string parsing
-therefore targets ordinary ASCII signed-decimal contest input rather than
-CPython arbitrary-precision integers.
+targets ordinary ASCII signed-decimal contest input rather than CPython
+arbitrary-precision integers.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from compiler_stream_intfusion import CompileError
 from compiler_stream_intfusion import PythonToBFStream as _BasePythonToBFStream
 
 
-_INT_TEXT_SCAN_CELLS = 21  # sign + signed-int64 decimal digits + spare terminator
+_INT_TEXT_SCAN_CELLS = 21  # sign + 19/20 decimal digits + NUL headroom
 
 
 def _is_input_call(node: ast.AST) -> bool:
@@ -76,6 +76,44 @@ def _direct_char_list_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _char_value_names(tree: ast.AST, char_lists: set[str]) -> set[str]:
+    """Infer names that are statically one-character strings.
+
+    This is intentionally narrower than general string inference.  It exists so
+    code such as ``tmp = chars[i]; chars[j] = tmp`` can preserve the fact that
+    ``tmp`` contains exactly one character even when its physical StringRef has
+    the normal string capacity.
+    """
+    result: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if not isinstance(target, ast.Name):
+                    continue
+                value = node.value
+                one_char = (
+                    isinstance(value, ast.Subscript)
+                    and isinstance(value.value, ast.Name)
+                    and value.value.id in char_lists
+                ) or (isinstance(value, ast.Name) and value.id in result)
+                if one_char and target.id not in result:
+                    result.add(target.id)
+                    changed = True
+            elif (
+                isinstance(node, ast.For)
+                and isinstance(node.iter, ast.Name)
+                and node.iter.id in char_lists
+                and isinstance(node.target, ast.Name)
+                and node.target.id not in result
+            ):
+                result.add(node.target.id)
+                changed = True
+    return result
+
+
 class _InferenceRewrite(ast.NodeTransformer):
     """Teach the established static allocator about representation aliases.
 
@@ -86,14 +124,30 @@ class _InferenceRewrite(ast.NodeTransformer):
     def __init__(self, char_lists: set[str]) -> None:
         self.char_lists = char_lists
 
-    def visit_Call(self, node: ast.Call):
+    def visit_Subscript(self, node: ast.Subscript):
         node = self.generic_visit(node)
-        assert isinstance(node, ast.Call)
+        assert isinstance(node, ast.Subscript)
+        if (
+            isinstance(node.ctx, ast.Load)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in self.char_lists
+        ):
+            # A load from the special list is a one-character string value.
+            return ast.copy_location(ast.Constant(value="x"), node)
+        return node
+
+    def visit_Call(self, node: ast.Call):
+        # Recognize outer representation-preserving forms before visiting their
+        # children.  Otherwise list(input()) would become input() before the
+        # enclosing join gets a chance to identify the char-list view.
+        join_arg = _empty_join_arg(node)
+        if isinstance(join_arg, ast.Name) and join_arg.id in self.char_lists:
+            return ast.copy_location(ast.Constant(value=""), node)
+        if join_arg is not None and _is_list_input(join_arg):
+            return ast.copy_location(ast.Constant(value=""), node)
 
         if _is_list_input(node):
-            # list(input()) and input() share the same physical byte buffer in
-            # this compiler layer; only the source-level mutability differs.
-            return ast.copy_location(node.args[0], node)
+            return ast.copy_location(copy.deepcopy(node.args[0]), node)
 
         if (
             isinstance(node.func, ast.Name)
@@ -103,13 +157,8 @@ class _InferenceRewrite(ast.NodeTransformer):
         ):
             return ast.copy_location(ast.Constant(value=""), node)
 
-        join_arg = _empty_join_arg(node)
-        if (
-            isinstance(join_arg, ast.Name)
-            and join_arg.id in self.char_lists
-        ) or _is_list_input(join_arg) if join_arg is not None else False:
-            return ast.copy_location(ast.Constant(value=""), node)
-
+        node = self.generic_visit(node)
+        assert isinstance(node, ast.Call)
         return node
 
 
@@ -124,6 +173,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         list_capacity: int = 64,
     ) -> None:
         self.char_list_names = _direct_char_list_names(tree)
+        self.char_value_names = _char_value_names(tree, self.char_list_names)
         inference_tree = copy.deepcopy(tree)
         inference_tree = _InferenceRewrite(self.char_list_names).visit(inference_tree)
         assert isinstance(inference_tree, ast.Module)
@@ -150,7 +200,8 @@ class PythonToBFStream(_BasePythonToBFStream):
             return arg.id in self.char_list_names
         return arg is not None and _is_list_input(arg)
 
-    def _is_str_call(self, node: ast.AST) -> bool:
+    @staticmethod
+    def _is_str_call(node: ast.AST) -> bool:
         return (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -184,8 +235,8 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _index_word_to_byte(self, index) -> int:
         out = self.temps.cell()
-        self.bf.clear(out)
         gate = self.temps.cell()
+        self.bf.clear(out)
         for bit, weight in enumerate((1, 2, 4, 8, 16, 32, 64, 128)):
             self.backend.copy_cell(index.bit(bit), gate, self.backend.s0)
             self.bf.begin_while(gate)
@@ -223,9 +274,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         if constant is not None and constant >= 0:
             if constant >= ref.capacity:
                 raise self._error(node, "constant character-list index exceeds capacity")
-            self.backend.copy_cell(
-                ref.char(constant), result.char(0), self.backend.s0
-            )
+            self.backend.copy_cell(ref.char(constant), result.char(0), self.backend.s0)
             self.backend._clear_scratch()
             return result
 
@@ -240,6 +289,8 @@ class PythonToBFStream(_BasePythonToBFStream):
                     node,
                     "string-backed character lists currently require one-character assignments",
                 )
+            return self._eval_string(node)
+        if isinstance(node, ast.Name) and node.id in self.char_value_names:
             return self._eval_string(node)
         if isinstance(node, ast.Name) and node.id in self.strings:
             if self.strings[node.id].capacity == 1:
@@ -340,7 +391,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.bf.begin_while(process)
             self.bf.add_const(process, -1)
 
-            # result = result*10 + digit, modulo the project's int64 ABI.
+            # result = result*10 + digit modulo the project's int64 ABI.
             self.backend.copy64(twice, result)
             self.backend.copy64(eight, result)
             self.backend.shl1_inplace(twice)
@@ -471,11 +522,14 @@ class PythonToBFStream(_BasePythonToBFStream):
             return dst
 
         if self._is_str_call(node):
-            arg = node.args[0]  # type: ignore[union-attr]
+            assert isinstance(node, ast.Call)
+            arg = node.args[0]
             if isinstance(arg, ast.Name) and arg.id in self.char_list_names:
                 raise self._error(arg, "str(character_list) list repr is not lowered yet")
             if self._expr_is_string(arg):
-                return super()._eval_string(arg)
+                # Use virtual dispatch rather than super() so nested str(...)
+                # and char-list subscripts retain their extended semantics.
+                return self._eval_string(arg)
             if isinstance(arg, ast.Constant) and type(arg.value) is int:
                 value = self._signed64(arg.value)
                 dst = self._new_string()
@@ -496,9 +550,7 @@ class PythonToBFStream(_BasePythonToBFStream):
                 and node.targets[0].id in self.char_list_names
                 and _is_list_input(node.value)
             ):
-                self.backend.read_line(
-                    self.strings[node.targets[0].id], self.workspace_base
-                )
+                self.backend.read_line(self.strings[node.targets[0].id], self.workspace_base)
                 return
 
             if (
