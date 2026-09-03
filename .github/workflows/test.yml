@@ -97,6 +97,7 @@ jobs:
           from bf_runtime import run_bf
           from bfcontestpartition import build_partition_program, partition_program_size_breakdown
           from bfcore import BFEmitter
+          from bfhexaddcandidate import add_data_and_move_state_total_minus_double_left_into_total
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
           from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as read_lexfast_counted
@@ -106,11 +107,11 @@ jobs:
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
           from bfhexpartition_minfused import run_partition_min_pass as run_minfused_partition_min_pass
-          from bfhexpartition_totalcandidate import run_partition_min_pass as run_totalcandidate_partition_min_pass
+          from bfhexpartition_totalcandidate import _abs_total_inplace, run_partition_min_pass as run_totalcandidate_partition_min_pass
           from bfhexpartition_addcandidate import run_partition_min_pass as run_addcandidate_partition_min_pass
           from bfhexpartition_nonnegans import run_partition_min_pass as run_nonnegans_partition_min_pass
           from bfhexpartition_absfast import run_partition_min_pass as run_absfast_partition_min_pass
-          from bfhexseq import ANS, RuntimeHexIntSequence
+          from bfhexseq import ANS, BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence, _RelativeBuilder
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
 
@@ -152,12 +153,37 @@ jobs:
               print_record_hex_s64_compact(bf, seq, field_base=ANS)
               return optimize_bf(bf.code())
 
+          def partial_partition_program(*, include_abs):
+              bf = BFEmitter()
+              seq = RuntimeHexIntSequence(base=320)
+              read_lexfast_counted(bf, seq)
+              seq.propagate_total_back_to_first(bf)
+
+              r = _RelativeBuilder()
+              add_data_and_move_state_total_minus_double_left_into_total(r)
+              if include_abs:
+                  _abs_total_inplace(r)
+              r.move(RECORD_STRIDE + MARKER)
+
+              bf.move(seq.base + MARKER)
+              bf.emit("[" + r.code() + "]")
+              bf.emit(">" * BACK)
+              bf.emit("[" + "<" * RECORD_STRIDE + "]")
+              bf.emit("<" * BACK)
+              bf.ptr = seq.base
+              return optimize_bf(bf.code())
+
           n = 64
           data = f"{n}\n" + " ".join(["1"] * n) + "\n"
           for stage in ("read", "reverse_total", "partition", "reverse_ans", "full"):
               stage_code = stage_program(stage)
               result = run_bf(stage_code, data, memory_size=30000, step_limit=1000000000)
               print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
+
+          for label, include_abs in (("candidate_only", False), ("candidate_abs", True)):
+              partial_code = partial_partition_program(include_abs=include_abs)
+              partial_result = run_bf(partial_code, data, memory_size=30000, step_limit=1000000000)
+              print(f"partition_phase_{label}_source={len(partial_code)} steps={partial_result.steps}")
 
           for label, runner in (
               ("movefused", run_movefused_partition_min_pass),
