@@ -22,6 +22,7 @@ from bfhexpartition import (
     _nibble_ge8,
     _set_hex_const,
 )
+from bfhexradixfast import map_total_base16_threshold
 from bfhexseq import (
     ANS,
     BACK,
@@ -33,7 +34,6 @@ from bfhexseq import (
     TOTAL,
     RuntimeHexIntSequence,
     _RelativeBuilder,
-    _map_total_base16,
 )
 
 
@@ -84,7 +84,7 @@ def _min_and_move_ans_with_data(r: _RelativeBuilder) -> None:
         r.emit("]")
 
         # DATA is zero now and can hold the dead difference digit.
-        _map_total_base16(r, total, candidate, MARKER)
+        map_total_base16_threshold(r, total, candidate, MARKER)
 
     # MARKER==1 means candidate >= ans.  Convert to unsigned candidate < ans.
     ult = LEFT
