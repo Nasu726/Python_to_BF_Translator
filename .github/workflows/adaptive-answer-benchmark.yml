@@ -1,0 +1,51 @@
+name: adaptive-answer-benchmark
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: adaptive-answer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pytest
+      - name: Test adaptive answer lowering
+        env:
+          PYTHONPATH: pybf
+        run: python -m pytest -q tests/test_bfhexpartition_adaptiveans.py
+      - name: Compare bounded and adaptive answer widths
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python - <<'PY'
+          from bf_runtime import run_bf
+          from bfcore import BFEmitter
+          from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum
+          from bfhexpartition_boundedans import run_partition_min_pass as bounded
+          from bfhexpartition_adaptiveans import run_partition_min_pass as adaptive
+          from bfhexseq import RuntimeHexIntSequence
+          from bfopt import optimize_bf
+
+          def program(runner):
+              bf = BFEmitter()
+              seq = RuntimeHexIntSequence(base=320)
+              read_counted_two_line_s64s_and_sum(bf, seq)
+              seq.propagate_total_back_to_first(bf)
+              runner(bf, seq, initial_ans=10_000_000)
+              return optimize_bf(bf.code())
+
+          data = '64\n' + ' '.join(['1'] * 64) + '\n'
+          for name, runner in [('bounded', bounded), ('adaptive', adaptive)]:
+              code = program(runner)
+              result = run_bf(code, data, memory_size=30000, step_limit=1000000000)
+              print(f'{name}_partition_source={len(code)} steps_n64={result.steps}')
+          PY
