@@ -48,6 +48,7 @@ jobs:
               tests/test_bfhexpartition_boundedans.py
               tests/test_bfhexpartition_adaptiveans.py
               tests/test_bfhexpartition_zeroans.py
+              tests/test_bfhexpartition_prefix.py
               tests/test_bfhexpartition_absfast.py
               tests/test_bfhexradixfast.py
               tests/test_bfhexpasses.py
@@ -100,17 +101,17 @@ jobs:
           from bf_runtime import run_bf
           from bfcontestpartition import build_partition_program, partition_program_size_breakdown
           from bfcore import BFEmitter
-          from bfhexaddcandidate import add_data_and_move_state_total_minus_double_left_into_total
           from bfhexcounted_extent import read_counted_two_line_s64s_and_sum as read_extent_counted
           from bfhexcounted_direct import read_counted_two_line_s64s_and_sum as read_direct_counted
           from bfhexcounted_lexfast import read_counted_two_line_s64s_and_sum as read_lexfast_counted
+          from bfhexcounted_prefix import read_counted_two_line_s64s_and_sum as read_prefix_counted
           from bfhexdecimal import decimal_digit_kernel as direct_digit, negate_data_kernel as direct_negate
           from bfhexdecimal_compact import decimal_digit_kernel as compact_digit, negate_data_kernel as compact_negate
+          from bfhexcandidate_prefix import move_total_minus_double_prefix_into_total
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition_totalcandidate import _abs_total_inplace
-          from bfhexpartition_boundedans import run_partition_min_pass as run_bounded
-          from bfhexpartition_adaptiveans import run_partition_min_pass as run_adaptive
           from bfhexpartition_zeroans import run_partition_min_pass as run_zero_aware
+          from bfhexpartition_prefix import run_partition_min_pass as run_prefix
           from bfhexseq import ANS, BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence, _RelativeBuilder
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
@@ -135,10 +136,10 @@ jobs:
           print(f"partition_steps_per_added_record={slope:.1f}")
           print(f"partition_raw_step_projection_n200000={projected:.0f}")
 
-          def stage_program(stage, partition_runner=run_zero_aware):
+          def stage_program(stage, *, reader=read_prefix_counted, partition_runner=run_prefix):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              read_lexfast_counted(bf, seq)
+              reader(bf, seq)
               if stage == "read":
                   return optimize_bf(bf.code())
               seq.propagate_total_back_to_first(bf)
@@ -153,13 +154,13 @@ jobs:
               print_record_hex_s64_compact(bf, seq, field_base=ANS)
               return optimize_bf(bf.code())
 
-          def partial_partition_program(*, include_abs):
+          def partial_prefix_partition_program(*, include_abs):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
-              read_lexfast_counted(bf, seq)
+              read_prefix_counted(bf, seq)
               seq.propagate_total_back_to_first(bf)
               r = _RelativeBuilder()
-              add_data_and_move_state_total_minus_double_left_into_total(r)
+              move_total_minus_double_prefix_into_total(r)
               if include_abs:
                   _abs_total_inplace(r)
               r.move(RECORD_STRIDE + MARKER)
@@ -179,14 +180,13 @@ jobs:
               print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
 
           for label, include_abs in (("candidate_only", False), ("candidate_abs", True)):
-              partial_code = partial_partition_program(include_abs=include_abs)
+              partial_code = partial_prefix_partition_program(include_abs=include_abs)
               partial_result = run_bf(partial_code, data, memory_size=30000, step_limit=1000000000)
-              print(f"partition_phase_{label}_source={len(partial_code)} steps={partial_result.steps}")
+              print(f"partition_phase_prefix_{label}_source={len(partial_code)} steps={partial_result.steps}")
 
-          for label, runner in (("bounded", run_bounded), ("adaptive", run_adaptive), ("zero_aware", run_zero_aware)):
-              candidate_code = stage_program("partition", runner)
-              candidate_result = run_bf(candidate_code, data, memory_size=30000, step_limit=1000000000)
-              print(f"partition_phase_{label}_source={len(candidate_code)} steps={candidate_result.steps}")
+          old_code = stage_program("partition", reader=read_lexfast_counted, partition_runner=run_zero_aware)
+          old_result = run_bf(old_code, data, memory_size=30000, step_limit=1000000000)
+          print(f"partition_phase_old_zero_aware_source={len(old_code)} steps={old_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
@@ -203,14 +203,12 @@ jobs:
           direct_line_result = run_bf(direct_line_code, line_data, memory_size=30000, step_limit=1000000000)
           print(f"partition_direct_line_reader_source={len(direct_line_code)} steps_n64={direct_line_result.steps}")
 
-          bf = BFEmitter()
-          seq = RuntimeHexIntSequence(base=320)
-          read_extent_counted(bf, seq)
-          extent_code = optimize_bf(bf.code())
-          extent_result = run_bf(extent_code, data, memory_size=30000, step_limit=1000000000)
-          print(f"partition_extent_counted_reader_source={len(extent_code)} steps_n64={extent_result.steps}")
-
-          for label, reader in (("direct_counted", read_direct_counted), ("lexfast_counted", read_lexfast_counted)):
+          for label, reader in (
+              ("extent_counted", read_extent_counted),
+              ("direct_counted", read_direct_counted),
+              ("lexfast_counted", read_lexfast_counted),
+              ("prefix_counted", read_prefix_counted),
+          ):
               bf = BFEmitter()
               seq = RuntimeHexIntSequence(base=320)
               reader(bf, seq)
