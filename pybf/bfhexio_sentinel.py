@@ -1,15 +1,17 @@
-"""Direct final output from a runtime-sequence sentinel record.
+"""Terminal compact output from the current runtime-sequence sentinel.
 
-A sequential carried-state pass leaves its final ANS word on the zero-marker
-sentinel and then rewinds the BF pointer to record zero.  The established output
-path first transports that ANS word back through every record before invoking
-the compact decimal printer.
+A carried-state partition loop exits with the runtime pointer on its zero-marker
+sentinel.  The reusable pass normally rewinds to record zero, transports ANS
+backward through every record, and starts the compact decimal printer there.
+For a terminal program tail none of those relocations are required: the
+sentinel itself can serve as the printer's logical record zero.
 
-This helper instead walks once to the sentinel, temporarily makes that record a
-local record-zero by clearing its BACK cell, and runs the existing compact
-printer as relative Brainfuck.  After output it restores the sentinel BACK link
-and rewinds to the real record zero.  No runtime-N answer-word transport is
-needed and the existing decimal conversion implementation remains canonical.
+The helper below therefore assumes the runtime pointer is already on the final
+sentinel MARKER.  It clears that sentinel's BACK cell so the existing reverse
+printer terminates locally, then emits the existing compact printer as relative
+Brainfuck.  The runtime pointer finishes on the same sentinel MARKER.  Because
+that location depends on input N, callers must treat this as a terminal tail and
+must not emit further pointer-sensitive code through BFEmitter afterwards.
 """
 
 from __future__ import annotations
@@ -18,12 +20,12 @@ from functools import lru_cache
 
 from bfcore import BFEmitter
 from bfhexio import print_record_hex_s64_compact
-from bfhexseq import ANS, BACK, MARKER, RECORD_STRIDE, RuntimeHexIntSequence
+from bfhexseq import ANS, BACK, RuntimeHexIntSequence
 
 
 @lru_cache(maxsize=None)
-def _relative_compact_printer(field_base: int) -> str:
-    """Return compact-printer BF whose logical record zero is current pointer."""
+def relative_compact_printer_code(field_base: int = ANS) -> str:
+    """Return compact-printer BF rooted at the current runtime pointer."""
     local = BFEmitter()
     local_seq = RuntimeHexIntSequence(base=0)
     print_record_hex_s64_compact(local, local_seq, field_base=field_base)
@@ -32,37 +34,17 @@ def _relative_compact_printer(field_base: int) -> str:
     return local.code()
 
 
-def print_sentinel_hex_s64_compact(
-    bf: BFEmitter,
-    seq: RuntimeHexIntSequence,
-    *,
-    field_base: int = ANS,
-) -> None:
-    """Print the final sentinel field directly and return to real record zero.
+def emit_terminal_sentinel_print(bf: BFEmitter, *, field_base: int = ANS) -> None:
+    """Print a final sentinel field when runtime pointer is on its MARKER.
 
-    Preconditions match ``propagate_field_back_after_consumed_markers``:
-    materialized record markers have been consumed, each successor/sentinel has
-    BACK=1, record zero has BACK=0, and the final carried word is on the
-    sentinel.  The runtime records are dead after this call except for their
-    use as compact-printer scratch.
+    The sentinel BACK is 1 for non-empty sequences and 0 when record zero is
+    itself the sentinel.  Clearing it is correct in both cases and makes the
+    sentinel a local origin for the compact printer's reverse decimal walk.
+    This function is intentionally terminal: BFEmitter cannot statically track
+    the input-dependent sentinel address after the call.
     """
-    # Starting from record 1 BACK, walk to the first unmaterialized BACK=0 and
-    # step one record left.  We are now on the sentinel BACK.
-    bf.move(seq.base + RECORD_STRIDE + BACK)
-    bf.emit("[" + ">" * RECORD_STRIDE + "]")
-    bf.emit("<" * RECORD_STRIDE)
-
-    # Make the sentinel a temporary local origin for the existing printer.
-    bf.emit("[-]")
-    bf.emit("<" * BACK)
-    bf.emit(_relative_compact_printer(field_base))
-
-    # The relative printer returns to sentinel MARKER.  Restore the original
-    # BACK=1 invariant, then follow BACK links to the actual record-zero BACK.
-    bf.emit(">" * BACK + "+")
-    bf.emit("[" + "<" * RECORD_STRIDE + "]")
-    bf.emit("<" * BACK)
-    bf.ptr = seq.base
+    bf.emit(">" * BACK + "[-]" + "<" * BACK)
+    bf.emit(relative_compact_printer_code(field_base))
 
 
-__all__ = ["print_sentinel_hex_s64_compact"]
+__all__ = ["emit_terminal_sentinel_print", "relative_compact_printer_code"]
