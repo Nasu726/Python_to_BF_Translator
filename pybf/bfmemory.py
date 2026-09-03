@@ -1,13 +1,13 @@
 """Compile-time tape layout helpers.
 
 Module-level Python variables normally live for the whole program, but many
-contest-style temporaries have non-overlapping lexical lifetimes.  Reusing
-those blocks materially reduces pointer travel and tape footprint.
+contest-style temporaries have non-overlapping lexical lifetimes. Reusing those
+blocks materially reduces pointer travel and tape footprint.
 
 Loops need special care: a value used before another assignment in the loop
-may still be live across the back edge.  To stay correct without a full CFG
+may still be live across the back edge. To stay correct without a full CFG
 liveness solver, every name mentioned inside a ``for``/``while`` is pinned and
-never shares storage.  Non-loop names use conservative lexical intervals.
+never shares storage. Non-loop names use conservative lexical intervals.
 """
 
 from __future__ import annotations
@@ -58,8 +58,15 @@ class _LoopNames(ast.NodeVisitor):
 def allocate_live_blocks(tree: ast.AST, sizes: dict[str, int]) -> tuple[dict[str, MemoryBlock], int]:
     """Allocate statically-sized variables with safe, conservative reuse.
 
-    Returns ``(name -> block, static_top)``.  All requested sizes must be
-    positive.  Names occurring in loops are pinned to unique blocks.
+    Returns ``(name -> block, static_top)``. All requested sizes must be
+    positive. Names occurring in loops are pinned to unique blocks.
+
+    The compiler keeps its hottest scratch cells immediately after the static
+    region. For pinned loop variables, placing large aggregate blocks first
+    leaves small scalar blocks next to that scratch boundary. This is only a
+    layout heuristic -- it does not change liveness or aliasing -- but it avoids
+    emitting enormous pointer runs through a fixed-capacity list every time a
+    scalar bit operation touches shared scratch.
     """
 
     if any(size <= 0 for size in sizes.values()):
@@ -71,9 +78,12 @@ def allocate_live_blocks(tree: ast.AST, sizes: dict[str, int]) -> tuple[dict[str
     loops.visit(tree)
 
     # Pinned variables are allocated first and never enter the free list.
+    # Larger blocks go toward tape cell zero; small scalar blocks then sit near
+    # static_top, where the compact compiler places its hot scratch/workspace.
     result: dict[str, MemoryBlock] = {}
     top = 0
-    for name in sorted(loops.names & sizes.keys()):
+    pinned = loops.names & sizes.keys()
+    for name in sorted(pinned, key=lambda item: (-sizes[item], item)):
         size = sizes[name]
         result[name] = MemoryBlock(top, size)
         top += size

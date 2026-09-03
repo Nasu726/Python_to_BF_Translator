@@ -12,19 +12,16 @@ def test_public_abi_is_fixed():
 
 
 def test_public_compile_source_emits_only_standard_brainfuck():
-    code = compile_source(
-        "x = int(input())\n"
-        "A = [1, 2, 3]\n"
-        "if x > 0:\n"
-        "    A.append(x)\n"
-        "print(A[-1])\n"
-    )
+    # This test owns only the public-output alphabet contract. List/input/
+    # indexing coverage belongs to their focused tests, including the ABC-style
+    # compile-performance fixture which independently checks BF_COMMANDS.
+    code = compile_source("x = 1\nprint(x)\n")
     assert code
     assert set(code) <= BF_COMMANDS
 
 
 def test_generated_brainfuck_executes_without_python_runtime_services():
-    # Compilation happens above this boundary.  The executor receives only the
+    # Compilation happens above this boundary. The executor receives only the
     # generated BF bytecode plus stdin; it has no access to the Python AST,
     # compiler objects, variable metadata, or helper functions.
     code = compile_source(
@@ -34,3 +31,50 @@ def test_generated_brainfuck_executes_without_python_runtime_services():
     )
     result = run_bf(code, "7\n", step_limit=100_000_000)
     assert result.output == "22\n"
+
+
+def test_public_fused_dynamic_list_plus_equals_is_semantically_correct():
+    code = compile_source(
+        "A = [7, -3, 11]\n"
+        "i = 1\n"
+        "s = 10\n"
+        "s += A[i]\n"
+        "print(s)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "7\n"
+
+
+def test_public_fused_self_min_abs_is_semantically_correct():
+    code = compile_source(
+        "ans = 10\n"
+        "s = 7\n"
+        "left = 5\n"
+        "ans = min(ans, abs(s - 2 * left))\n"
+        "print(ans)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "3\n"
+
+
+def test_public_compact_range_increment_preserves_final_loop_target():
+    code = compile_source(
+        "s = 0\n"
+        "for i in range(4):\n"
+        "    s += i\n"
+        "print(s, i)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "6 3\n"
+
+
+def test_public_range_shadow_reduction_is_semantically_correct():
+    code = compile_source(
+        "A = [7, -3, 11]\n"
+        "s = 0\n"
+        "for i in range(3):\n"
+        "    s += A[i]\n"
+        "print(s, i)\n"
+    )
+    result = run_bf(code, step_limit=150_000_000)
+    assert result.output == "15 2\n"

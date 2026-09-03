@@ -1,0 +1,60 @@
+name: atcoder-tritium-benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build exact AtCoder Tritium revision
+        run: |
+          git clone --quiet https://github.com/rdebath/Brainfuck.git /tmp/Brainfuck
+          git -C /tmp/Brainfuck checkout --quiet 14a729d
+          make -C /tmp/Brainfuck/tritium -j2
+          sudo make -C /tmp/Brainfuck/tritium install
+          command -v tritium
+      - name: Generate current public Brainfuck and N200k inputs
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python tools/bench_tritium_partition.py --program Main.bf
+          for pattern in ones negative-ones ffff mixed deterministic; do
+            python tools/bench_tritium_partition.py \
+              --no-program \
+              --pattern "$pattern" \
+              --n 200000 \
+              --input "input_${pattern}.txt" \
+              --expected "expected_${pattern}.txt"
+          done
+          wc -c Main.bf input_*.txt
+      - name: Benchmark exact AtCoder command three times
+        shell: bash
+        run: |
+          set +e
+          for pattern in ones negative-ones ffff mixed deterministic; do
+            echo "=== pattern=$pattern n=200000 ==="
+            for trial in 1 2 3; do
+              rm -f "output_${pattern}_${trial}.txt" "time_${pattern}_${trial}.txt"
+              /usr/bin/time -f 'elapsed=%e user=%U sys=%S maxrss_kb=%M exit=%x' \
+                -o "time_${pattern}_${trial}.txt" \
+                timeout 120s tritium -b -e Main.bf \
+                < "input_${pattern}.txt" > "output_${pattern}_${trial}.txt"
+              status=$?
+              printf 'trial=%s status=%s ' "$trial" "$status"
+              cat "time_${pattern}_${trial}.txt" || true
+              if [ "$status" -eq 0 ]; then
+                if ! cmp -s "output_${pattern}_${trial}.txt" "expected_${pattern}.txt"; then
+                  echo "wrong output for pattern=$pattern trial=$trial" >&2
+                  diff -u "expected_${pattern}.txt" "output_${pattern}_${trial}.txt" || true
+                  exit 1
+                fi
+              fi
+            done
+            printf 'expected=' && cat "expected_${pattern}.txt"
+          done
