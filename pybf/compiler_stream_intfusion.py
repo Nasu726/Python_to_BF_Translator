@@ -192,17 +192,12 @@ class PythonToBFStream(_BasePythonToBFStream):
 
         # A break in the middle of the line must consume the rest of that line
         # so the following input() starts correctly.  If the breaking token
-        # itself consumed LF, line_open == 0 and we must not touch the next line.
+        # itself consumed LF, line_open == 0 and drain_to_line_end is a no-op.
         self.backend.copy_cell(broke, drain_gate, self.backend.s0)
         self.bf.begin_while(drain_gate)
         self.bf.add_const(drain_gate, -1)
         self.backend.copy_cell(line_open, drain_active, self.backend.s0)
-        self.bf.begin_while(drain_active)
-        self.bf.add_const(drain_active, -1)
-        self.bf.set_const(drain_active, 1)
         self.backend.drain_to_line_end(drain_active, self.workspace_base)
-        self.bf.clear(drain_active)
-        self.bf.end_while(drain_active)
         self.bf.end_while(drain_gate)
 
         self._compile_guarded_else(node.orelse, broke)
