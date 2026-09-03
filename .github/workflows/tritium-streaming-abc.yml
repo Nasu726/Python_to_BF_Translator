@@ -1,0 +1,54 @@
+name: tritium-streaming-abc
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tritium-streaming-abc-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  abc153-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build exact AtCoder Tritium revision
+        run: |
+          git clone --quiet https://github.com/rdebath/Brainfuck.git /tmp/Brainfuck
+          git -C /tmp/Brainfuck checkout --quiet 14a729d
+          make -C /tmp/Brainfuck/tritium -j2
+          sudo make -C /tmp/Brainfuck/tritium install
+          tritium --version || true
+      - name: Compile ABC153 B-style Python and generate max-N inputs
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python tools/bench_tritium_streaming_abc.py \
+            --n 100000 --pattern ones \
+            --program Main.bf --input input_ones.txt --expected expected_ones.txt
+          for pattern in mixed max; do
+            python tools/bench_tritium_streaming_abc.py \
+              --no-program --n 100000 --pattern "$pattern" \
+              --input "input_${pattern}.txt" --expected "expected_${pattern}.txt"
+          done
+          wc -c Main.bf input_*.txt
+      - name: Run exact AtCoder command
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pattern in ones mixed max; do
+            echo "=== ABC153-B pattern=$pattern n=100000 ==="
+            for trial in 1 2 3; do
+              /usr/bin/time -f 'elapsed=%e user=%U sys=%S maxrss_kb=%M exit=%x' \
+                -o "time_${pattern}_${trial}.txt" \
+                timeout 120s tritium -b -e Main.bf \
+                < "input_${pattern}.txt" > "output_${pattern}_${trial}.txt"
+              cat "time_${pattern}_${trial}.txt"
+              cmp "output_${pattern}_${trial}.txt" "expected_${pattern}.txt"
+            done
+          done
