@@ -1,8 +1,9 @@
 """Final streaming compiler router with narrow scalable whole-program lowering.
 
 The established generic implementation lives in ``compiler_stream_generic``.
-This module only adds structurally guarded whole-program specializations before
-falling back to that implementation unchanged.
+``compiler_stream_intfusion`` adds semantics-preserving producer/consumer
+fusion for dead runtime input lists, while this module keeps the separately
+proven whole-program specializations in front of that generic path.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ import ast
 
 from bfopt import optimize_bf
 from compiler_partition import lower_partition_program_if_supported
-from compiler_stream_generic import CompileError
-from compiler_stream_generic import PythonToBFStream as _GenericPythonToBFStream
+from compiler_stream_intfusion import CompileError
+from compiler_stream_intfusion import PythonToBFStream as _GenericPythonToBFStream
 
 
 class PythonToBFStream(_GenericPythonToBFStream):
