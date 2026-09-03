@@ -160,6 +160,30 @@ PR #6 also contains reusable but still experimental pieces:
 
 These are **not yet** the general public Python-list backend. The narrow partition specialization must not be mistaken for completion of scalable arbitrary list semantics.
 
+### [MILESTONE: general scalable Python lists] Deferred generic route experiment
+
+A generic heap-backed `list[int]` AST route was prototyped near the end of PR #6 and intentionally removed from the merge candidate after measurement. The prototype remains recoverable from branch history (`e79a12c` introduced `compiler_dynint.py`; `5417e27` added its tests).
+
+What worked with runtime-sized input beyond the old 64-element fixed list capacity:
+
+- runtime `len` and index 69 on a 70-element list;
+- runtime and Python-style negative indexing;
+- `b = a` alias identity plus `append` visibility through both names;
+- emitted-source independence from runtime line length.
+
+What failed the acceptance bar:
+
+- iterating a 70-element list twice exceeded the existing **1,000,000,000 raw-step guard**.
+
+This was not treated as a reason to raise the guard. The current correctness-first representation compounds two expensive traversals: each list operation starts from the list head, and each object-handle dereference performs ordinal heap lookup from the heap origin. Repeated sequential access therefore acquires O(n²)-style work with very large BF constants before the list is remotely contest-sized.
+
+Required architectural direction before public dynamic-list lowering:
+
+1. make sequential iteration a true forward walk rather than repeated indexed lookup;
+2. prefer chunked/contiguous list storage so nearby elements are physically nearby on tape;
+3. avoid resolving every element handle by rescanning from the heap origin;
+4. only then reconnect the generic AST route and restore >64-element repeated-pass tests.
+
 Desired memory ordering remains:
 
 ```text
@@ -206,6 +230,10 @@ The last experiment also exposed an ABI bug: LEFT[15] is the live count extent. 
 ### [PERMANENT] Raw BF step counts and optimized-interpreter wall time are different metrics
 
 The Python reference interpreter is intentionally literal and excellent for deterministic complexity/regression checks. Tritium performs substantial static optimization and JIT/optimized execution. Billions of literal BF operations can therefore correspond to sub-second execution for this structured program. Keep both metrics: do not replace correctness-oriented raw-step gates with noisy wall-clock CI, and do not use raw steps alone to reject a practically fast Tritium program.
+
+### [PERMANENT] Do not build list iteration from repeated indexed heap lookup
+
+On the current one-element-per-block heap, a 70-element two-pass generic list iteration exceeded 1,000,000,000 raw steps even though direct length/index/alias tests were correct. Sequential operations need a carried physical/chunk cursor. Repeated `get(index)` from head plus ordinal handle lookup from heap origin is an architectural anti-pattern for scalable BF containers.
 
 ### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 
@@ -265,13 +293,12 @@ The current runtime shard executes 114 tests including the terminal sentinel reg
 
 ## Next implementation order
 
-1. Keep the proven 363,109-byte bounded-prefix specialization green and retain the manual exact-Tritium benchmark as a performance harness.
-2. **Shift primary effort back to general compiler semantics:** make scalable runtime numeric/list storage available to ordinary Python lowering instead of adding more whole-program special cases.
-3. First generalization target: `list(map(int, input().split()))` as a runtime-sized int64 list with correct length, indexing, iteration, aliasing, and repeated passes.
-4. Reuse the record/heap/list primitives already present in PR #6; define one stable list ABI before adding more operations.
-5. Then extend common list operations (`append`, copy/slice where supported, iteration, nested/reference behavior) and connect them to the normal AST/transpiler paths.
-6. Resume broader heap/list/deepcopy/sort work once the scalable numeric-list path is stable.
-7. Return to reader/candidate micro-optimization only if a real program or Tritium benchmark exposes it as a practical bottleneck.
+1. Merge PR #6 with the proven 363,109-byte bounded-prefix specialization, runtime/object foundation, and manual exact-Tritium benchmark; do not expose the deferred generic dynamic-list prototype.
+2. Start the next PR at the container representation level: add a chunked/contiguous int64 list layout and a carried sequential walker that does not resolve each element through heap-origin ordinal lookup.
+3. Re-run the >64-element generic tests from commits `e79a12c` / `5417e27`, especially repeated passes, under the unchanged raw-step guard.
+4. Once the container is scalable, reconnect `list(map(int, input().split()))`, `len`, indexing, aliasing, `append`, and iteration to ordinary AST lowering.
+5. Then extend copy/slice, nested/reference behavior, deepcopy and stable sort on top of the stable list ABI.
+6. Return to partition reader/candidate micro-optimization only if a real Tritium benchmark exposes it as a practical bottleneck.
 
 ---
 
