@@ -123,6 +123,7 @@ class PythonToBFStream(_BasePythonToBFStream):
     def _compile_streaming_input_int_list_for(self, node: ast.For) -> None:
         assert isinstance(node.target, ast.Name)
         target = self.variables[node.target.id]
+        token = self._packed_input_token()
 
         active = self.temps.cell()
         has_token = self.temps.cell()
@@ -154,17 +155,23 @@ class PythonToBFStream(_BasePythonToBFStream):
             drain_active,
         ):
             self.bf.clear(cell)
+        self.backend.packed64.clear(token)
 
         self.bf.set_const(active, 1)
         self.bf.begin_while(active)
         self.bf.add_const(active, -1)
 
-        self.backend.read_s64_line_token(
-            target,
+        # The final generic compiler stores scalars as Quad64Ref rather than the
+        # old contiguous Boolean Int64Ref.  Parse through the same packed-token
+        # ABI used by PythonToBFQuad, then expand/copy into the loop target.
+        self.backend.read_packed_s64_line_token(
+            token,
             has_token,
             end_line,
             self.workspace_base,
         )
+        self.backend.copy64(target, token)
+        self.backend.packed64.clear(token)
 
         self.backend.copy_cell(has_token, token_gate, self.backend.s0)
         self.bf.begin_while(token_gate)
@@ -202,6 +209,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.backend.drain_to_line_end(drain_active, self.workspace_base)
         self.bf.end_while(drain_gate)
 
+        self.backend.packed64.clear(token)
         self._compile_guarded_else(node.orelse, broke)
 
     def compile_module(self, tree: ast.AST) -> str:
