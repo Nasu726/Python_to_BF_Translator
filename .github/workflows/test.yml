@@ -40,6 +40,7 @@ jobs:
               tests/test_bfhexdecimal_compact.py
               tests/test_bfhexpartition.py
               tests/test_bfhexpartition_movefused.py
+              tests/test_bfhexpartition_minfused.py
               tests/test_bfhexpasses.py
               tests/test_bfhexseq.py
               tests/test_bfhexseq_direct.py
@@ -95,6 +96,7 @@ jobs:
           from bfhexio import print_record_hex_s64_compact, propagate_field_back_after_consumed_markers
           from bfhexpartition import run_partition_min_pass
           from bfhexpartition_movefused import run_partition_min_pass as run_movefused_partition_min_pass
+          from bfhexpartition_minfused import run_partition_min_pass as run_minfused_partition_min_pass
           from bfhexseq import ANS, RuntimeHexIntSequence
           from bfhexseq_direct import read_lf_terminated_s64s_and_sum_direct
           from bfopt import optimize_bf
@@ -144,9 +146,13 @@ jobs:
               result = run_bf(stage_code, data, memory_size=30000, step_limit=1000000000)
               print(f"partition_phase_{stage}_source={len(stage_code)} steps={result.steps}")
 
-          movefused_code = stage_program("partition", run_movefused_partition_min_pass)
-          movefused_result = run_bf(movefused_code, data, memory_size=30000, step_limit=1000000000)
-          print(f"partition_phase_movefused_source={len(movefused_code)} steps={movefused_result.steps}")
+          for label, runner in (
+              ("movefused", run_movefused_partition_min_pass),
+              ("minfused", run_minfused_partition_min_pass),
+          ):
+              candidate_code = stage_program("partition", runner)
+              candidate_result = run_bf(candidate_code, data, memory_size=30000, step_limit=1000000000)
+              print(f"partition_phase_{label}_source={len(candidate_code)} steps={candidate_result.steps}")
 
           bf = BFEmitter()
           seq = RuntimeHexIntSequence(base=320)
