@@ -1,0 +1,119 @@
+from bf_runtime import run_bf
+from compiler_layout import compile_source
+
+
+STEP_LIMIT = 1_000_000_000
+
+
+def _compile(source: str) -> str:
+    code = compile_source(source, string_capacity=8, list_capacity=4)
+    assert set(code) <= set("><+-.,[]")
+    return code
+
+
+def _run(code: str, data: str):
+    return run_bf(
+        code,
+        data,
+        memory_size=120_000,
+        step_limit=STEP_LIMIT,
+    )
+
+
+def test_single_use_input_list_streams_beyond_configured_capacity():
+    source = """
+a = list(map(int, input().split()))
+s = 0
+for x in a:
+    s += x
+print(s)
+"""
+    code = _compile(source)
+    values = list(range(70))
+    result = _run(code, " ".join(map(str, values)) + "\n")
+    assert result.output == f"{sum(values)}\n"
+
+
+def test_streaming_int_list_handles_signed_values_and_empty_line():
+    source = """
+a = list(map(int, input().split()))
+s = 0
+for x in a:
+    s += x
+print(s)
+"""
+    code = _compile(source)
+    signed = [7, -3, 0, 11, -20, 5]
+    assert _run(code, " ".join(map(str, signed)) + "\n").output == "0\n"
+    assert _run(code, "\n").output == "0\n"
+
+
+def test_streaming_int_list_source_is_runtime_length_independent():
+    source = """
+a = list(map(int, input().split()))
+s = 0
+for x in a:
+    s += x
+print(s)
+"""
+    code = _compile(source)
+    source_size = len(code)
+    short = _run(code, "1 2 3\n")
+    values = [1] * 120
+    long = _run(code, " ".join(map(str, values)) + "\n")
+    assert len(code) == source_size
+    assert short.output == "6\n"
+    assert long.output == "120\n"
+
+
+def test_streaming_int_list_break_drains_rest_of_line_before_next_input():
+    source = """
+a = list(map(int, input().split()))
+s = 0
+for x in a:
+    if x == 3:
+        break
+    s += x
+y = int(input())
+print(s, y)
+"""
+    code = _compile(source)
+    middle = _run(code, "1 2 3 4 5\n9\n")
+    final = _run(code, "1 2 3\n9\n")
+    assert middle.output == "3 9\n"
+    assert final.output == "3 9\n"
+
+
+def test_streaming_int_list_continue_and_for_else_match_python():
+    source = """
+a = list(map(int, input().split()))
+s = 0
+for x in a:
+    if x < 0:
+        continue
+    s += x
+else:
+    s += 100
+print(s)
+"""
+    code = _compile(source)
+    result = _run(code, "1 -10 2 -20 3\n")
+    assert result.output == "106\n"
+
+
+def test_abc200_style_large_linear_consumer_is_not_capacity_bound():
+    # ABC200 C has N <= 2e5 and begins with the same runtime-sized integer-list
+    # input/linear-consumer shape.  This test exercises that producer/consumer
+    # scale axis without yet requiring the later 200-bucket container lowering.
+    source = """
+a = list(map(int, input().split()))
+c = 0
+for x in a:
+    if x % 200 == 0:
+        c += 1
+print(c)
+"""
+    code = _compile(source)
+    values = list(range(400))
+    result = _run(code, " ".join(map(str, values)) + "\n")
+    assert result.output == "2\n"
