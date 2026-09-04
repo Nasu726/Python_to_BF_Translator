@@ -100,7 +100,7 @@ print("".join(chars))
 
 `list(input())` と `"".join(chars)` の変換自体は、同じbyte payloadに対するviewとして扱います。別のstring変数へ代入した場合はPythonのimmutable string semanticsを保つためsnapshot copyを作ります。
 
-現在このrestricted viewで対応するのは、1文字load/store、runtime/負index、`len`、iteration、1文字temporaryを使うswap、empty-separator joinです。一般のmutable `list[str]` と同一ではないため、multi-character element assignment、alias assignment、insert/delete/append、直接のlist repr出力などは未対応です。
+現在このrestricted viewで対応するのは、1文字load/store、runtime/負index、`len`、iteration、1文字temporaryを使うswap、empty-separator joinです。element storeに使えるliteral/値は現行のNUL終端byte ABIに合わせて **code point 1..255のnon-NUL 1-byte文字**に限定します。一般のmutable `list[str]` と同一ではないため、multi-character element assignment、NUL要素、255を超えるUnicode文字、alias assignment、insert/delete/append、直接のlist repr出力などは未対応です。
 
 runtime `IndexError` の伝播もまだありません。範囲外character indexは暫定runtime contractとしてempty load / no-op storeになり、低byteへwrapして別要素を壊さないことを保証します。
 
