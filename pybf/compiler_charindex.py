@@ -32,18 +32,28 @@ from compiler_charconv import CompileError, _is_list_input
 from compiler_charconv import PythonToBFStream as _BasePythonToBFStream
 
 
+def _is_nonzero_byte_char_constant(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and len(node.value) == 1
+        and 1 <= ord(node.value) <= 255
+    )
+
+
 def _must_char_value_names(tree: ast.AST, char_lists: set[str]) -> set[str]:
-    """Return names whose every write is provably a one-character string.
+    """Return names whose every write is provably a one-byte character.
 
     The earlier compatibility layer used an existential rule: once a name had
     ever received ``chars[i]`` it remained classified as one-character forever.
-    That is unsound after a later assignment such as ``tmp = "XY"``.  Character
+    That is unsound after a later assignment such as ``tmp = "XY"``. Character
     stores would then silently use only ``tmp[0]``.
 
     This conservative must-analysis records every simple assignment / for-loop
     write that the current compiler understands and compares that count with all
-    ``Store`` occurrences for the name.  A name qualifies only when every write
+    ``Store`` occurrences for the name. A name qualifies only when every write
     is accounted for and every producer is itself known to be one character.
+    Literal producers must additionally fit the current non-NUL byte-string ABI.
     """
     stores: dict[str, int] = {}
     writes: dict[str, list[tuple[str, ast.AST]]] = {}
@@ -95,11 +105,7 @@ def _must_char_value_names(tree: ast.AST, char_lists: set[str]) -> set[str]:
                         and producer.id in char_lists
                     )
                 else:
-                    ok = (
-                        isinstance(producer, ast.Constant)
-                        and isinstance(producer.value, str)
-                        and len(producer.value) == 1
-                    ) or (
+                    ok = _is_nonzero_byte_char_constant(producer) or (
                         isinstance(producer, ast.Subscript)
                         and isinstance(producer.value, ast.Name)
                         and producer.value.id in char_lists
@@ -134,7 +140,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         )
 
         # Tighten the compatibility layer's provisional character-name
-        # inference before statement lowering starts.  Type/layout inference has
+        # inference before statement lowering starts. Type/layout inference has
         # already happened, but this set only controls whether a later mutable
         # character-list store is semantically permitted.
         self.char_value_names = _must_char_value_names(tree, self.char_list_names)
@@ -160,6 +166,15 @@ class PythonToBFStream(_BasePythonToBFStream):
         if name is None:
             return None
         return self.char_list_lengths[name]
+
+    def _char_value(self, node: ast.AST):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if not _is_nonzero_byte_char_constant(node):
+                raise self._error(
+                    node,
+                    "character-list assignment requires one non-NUL byte character",
+                )
+        return super()._char_value(node)
 
     def compile_expr(self, node: ast.AST):
         if (
