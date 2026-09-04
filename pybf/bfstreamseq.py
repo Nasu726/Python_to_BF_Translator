@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from bfcore import BFEmitter
-from bfpacked import PackedU32Ref
+from bfpacked import PackedU32Core, PackedU32Ref
+from bfpacked64 import PackedI64Ref
 
 
 RECORD_STRIDE = 15
@@ -232,6 +233,115 @@ def _copy_cell_preserved(bf: BFEmitter, src: int, dst: int, tmp: int) -> None:
     bf.add_const(tmp, -1)
     bf.add_const(src, 1)
     bf.end_while(tmp)
+
+
+def _set_zero_flag_fixed(
+    bf: BFEmitter,
+    result: int,
+    src: int,
+    tmp: int,
+    helper: int,
+) -> None:
+    """Fixed-address counterpart of ``_set_zero_flag``."""
+    bf.set_const(result, 1)
+    _copy_cell_preserved(bf, src, tmp, helper)
+    bf.begin_while(tmp)
+    bf.clear(tmp)
+    bf.clear(result)
+    bf.end_while(tmp)
+
+
+def _extract_packed_sign(
+    bf: BFEmitter,
+    src: int,
+    byte: int,
+    quotient: int,
+    parity: int,
+    gate: int,
+) -> None:
+    """Extract bit 7 of ``src`` into ``byte``, preserving ``src``."""
+    _copy_cell_preserved(bf, src, byte, quotient)
+
+    # Seven bounded divisions by two leave floor(src / 128), which is exactly
+    # the sign bit of the packed int64's most-significant byte.
+    for _ in range(7):
+        bf.clear(quotient)
+        bf.clear(parity)
+        bf.begin_while(byte)
+        bf.add_const(byte, -1)
+        bf.set_const(gate, 1)
+        bf.begin_while(parity)
+        bf.add_const(parity, -1)
+        bf.clear(gate)
+        bf.add_const(quotient, 1)
+        bf.end_while(parity)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        bf.add_const(parity, 1)
+        bf.end_while(gate)
+        bf.end_while(byte)
+        bf.begin_while(quotient)
+        bf.add_const(quotient, -1)
+        bf.add_const(byte, 1)
+        bf.end_while(quotient)
+        bf.clear(parity)
+        bf.clear(gate)
+
+
+def _subtract_u32_consuming(
+    bf: BFEmitter,
+    dst: PackedU32Ref,
+    subtrahend: PackedU32Ref,
+    *,
+    scratch_base: int,
+) -> None:
+    """``dst -= subtrahend``; map underflow to ``0xffffffff``.
+
+    The subtrahend is scratch and is consumed. Work is bounded by four byte
+    values (at most 1,020 decrement iterations), never by the represented u32.
+    """
+    borrow = scratch_base
+    gate = scratch_base + 1
+    tmp = scratch_base + 2
+    helper = scratch_base + 3
+    bf.clear(borrow)
+
+    for byte_index in range(4):
+        dst_byte = dst.byte(byte_index)
+        sub_byte = subtrahend.byte(byte_index)
+
+        # Apply the incoming borrow once and replace it with this byte's
+        # outgoing borrow.
+        bf.clear(gate)
+        bf.begin_while(borrow)
+        bf.add_const(borrow, -1)
+        bf.add_const(gate, 1)
+        bf.end_while(borrow)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        _set_zero_flag_fixed(bf, borrow, dst_byte, tmp, helper)
+        bf.add_const(dst_byte, -1)
+        bf.end_while(gate)
+
+        # A byte-sized amount can cross zero at most once. Preserve that fact
+        # in ``borrow`` while consuming the magnitude byte.
+        bf.begin_while(sub_byte)
+        bf.add_const(sub_byte, -1)
+        _set_zero_flag_fixed(bf, gate, dst_byte, tmp, helper)
+        bf.add_const(dst_byte, -1)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        bf.set_const(borrow, 1)
+        bf.end_while(gate)
+        bf.end_while(sub_byte)
+
+    bf.begin_while(borrow)
+    bf.add_const(borrow, -1)
+    for byte_index in range(4):
+        bf.set_const(dst.byte(byte_index), 0xFF)
+    bf.end_while(borrow)
+    for cell in range(scratch_base, scratch_base + 4):
+        bf.clear(cell)
 
 
 @lru_cache(maxsize=2)
@@ -528,9 +638,136 @@ class RuntimeByteSequence:
 
     @property
     def _fixed_access_tmp(self) -> int:
-        # The left sentinel payload is not sequence data. Keep one fixed cell
-        # for preserving copies made before/after a runtime-relative walk.
-        return self.left_sentinel + PAYLOAD0
+        # COUNT is unused in the permanent left sentinel. Keeping the copy
+        # helper here leaves its eight payload cells available for signed-index
+        # normalization state.
+        return self.left_sentinel + COUNT
+
+    @property
+    def _normalized_index(self) -> PackedU32Ref:
+        return PackedU32Ref(self.left_sentinel + PAYLOAD0)
+
+    @property
+    def _normalization_scratch_base(self) -> int:
+        return self.left_sentinel + PAYLOAD0 + 4
+
+    def _clear_normalization_workspace(self, bf: BFEmitter) -> None:
+        for cell in range(
+            self.left_sentinel + PAYLOAD0,
+            self.left_sentinel + RECORD_STRIDE,
+        ):
+            bf.clear(cell)
+
+    def _normalize_signed_index(
+        self,
+        bf: BFEmitter,
+        index: PackedI64Ref,
+    ) -> PackedU32Ref:
+        """Normalize a packed signed-int64 index into the internal u32 ABI.
+
+        Negative values use ``len + index`` exactly once. Values still outside
+        ``[0, len)`` are represented as ``0xffffffff``; the S1c locator already
+        maps that value to empty-load/no-op-store for every possible u32 length.
+        The signed source is preserved.
+        """
+        normalized = self._normalized_index
+        magnitude = PackedU32Ref(self.base + LENGTH)
+        scratch = self._normalization_scratch_base
+        s0, s1, s2, s3 = range(scratch, scratch + 4)
+        packed = PackedU32Core(bf, scratch)
+
+        self._clear_normalization_workspace(bf)
+        for byte_index in range(4):
+            bf.clear(magnitude.byte(byte_index))
+
+        _extract_packed_sign(bf, index.byte(7), s0, s1, s2, s3)
+        bf.set_const(s1, 1)  # non-negative gate
+
+        bf.begin_while(s0)
+        bf.add_const(s0, -1)
+        bf.clear(s1)
+
+        # Default negative result is the guaranteed out-of-range sentinel.
+        for byte_index in range(4):
+            bf.set_const(normalized.byte(byte_index), 0xFF)
+
+        # Only -1..-(2**32-1) can possibly normalize into a u32-length
+        # sequence. Their upper four bytes are all 0xff and their low word is
+        # nonzero. This also rejects -2**32 before its low-word negation wraps.
+        bf.set_const(s0, 1)
+        for byte_index in range(4, 8):
+            _copy_cell_preserved(bf, index.byte(byte_index), s2, s3)
+            bf.add_const(s2, 1)
+            bf.begin_while(s2)
+            bf.clear(s2)
+            bf.clear(s0)
+            bf.end_while(s2)
+
+        bf.set_const(s1, 1)  # low word is zero until a nonzero byte is seen
+        for byte_index in range(4):
+            _copy_cell_preserved(bf, index.byte(byte_index), s2, s3)
+            bf.begin_while(s2)
+            bf.clear(s2)
+            bf.clear(s1)
+            bf.end_while(s2)
+        bf.begin_while(s1)
+        bf.add_const(s1, -1)
+        bf.clear(s0)
+        bf.end_while(s1)
+
+        bf.begin_while(s0)
+        bf.add_const(s0, -1)
+
+        # magnitude = two's-complement negate(low_u32(index)).
+        for byte_index in range(4):
+            out = magnitude.byte(byte_index)
+            bf.set_const(out, 0xFF)
+            _copy_cell_preserved(bf, index.byte(byte_index), s1, s2)
+            bf.begin_while(s1)
+            bf.add_const(s1, -1)
+            bf.add_const(out, -1)
+            bf.end_while(s1)
+        packed.increment(magnitude)
+
+        packed.copy(normalized, self.length_ref)
+        _subtract_u32_consuming(
+            bf,
+            normalized,
+            magnitude,
+            scratch_base=scratch,
+        )
+        bf.end_while(s0)
+        bf.end_while(s0)
+
+        # Non-negative values are valid u32 candidates only when their upper
+        # four bytes are zero. Range against length remains the locator's job.
+        bf.begin_while(s1)
+        bf.add_const(s1, -1)
+        for byte_index in range(4):
+            bf.set_const(normalized.byte(byte_index), 0xFF)
+        bf.set_const(s0, 1)
+        for byte_index in range(4, 8):
+            _copy_cell_preserved(bf, index.byte(byte_index), s2, s3)
+            bf.begin_while(s2)
+            bf.clear(s2)
+            bf.clear(s0)
+            bf.end_while(s2)
+        bf.begin_while(s0)
+        bf.add_const(s0, -1)
+        for byte_index in range(4):
+            _copy_cell_preserved(
+                bf,
+                index.byte(byte_index),
+                normalized.byte(byte_index),
+                s2,
+            )
+        bf.end_while(s0)
+        bf.end_while(s1)
+
+        for cell in range(scratch, scratch + 4):
+            bf.clear(cell)
+        bf.move(self.base)
+        return normalized
 
     def _copy_index_to_base(self, bf: BFEmitter, index: PackedU32Ref) -> None:
         for byte_index in range(LENGTH_BYTES):
@@ -794,6 +1031,22 @@ class RuntimeByteSequence:
         bf.emit("[" + _store_located_body() + "]")
         bf.emit(_finish_store_code())
         bf.ptr = self.base
+
+    def load_byte_signed(self, bf: BFEmitter, dst: int, index: PackedI64Ref) -> None:
+        """Load using Python-style signed negative-index normalization."""
+        self._check_layout()
+        normalized = self._normalize_signed_index(bf, index)
+        self.load_byte(bf, dst, normalized)
+        self._clear_normalization_workspace(bf)
+        bf.move(self.base)
+
+    def store_byte_signed(self, bf: BFEmitter, index: PackedI64Ref, src: int) -> None:
+        """Store using Python-style signed negative-index normalization."""
+        self._check_layout()
+        normalized = self._normalize_signed_index(bf, index)
+        self.store_byte(bf, normalized, src)
+        self._clear_normalization_workspace(bf)
+        bf.move(self.base)
 
 
 __all__ = [

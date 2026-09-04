@@ -3,6 +3,7 @@ import pytest
 from bf_runtime import BF_COMMANDS, run_bf
 from bfcore import BFEmitter
 from bfpacked import PackedU32Ref
+from bfpacked64 import PackedI64Ref
 from bfstreamseq import (
     BACK,
     COUNT,
@@ -51,6 +52,11 @@ def _expected_counts(length):
 
 def _raw_u32(value):
     return "".join(chr((value >> (8 * byte_index)) & 0xFF) for byte_index in range(4))
+
+
+def _raw_i64(value):
+    value &= (1 << 64) - 1
+    return "".join(chr((value >> (8 * byte_index)) & 0xFF) for byte_index in range(8))
 
 
 def _dynamic_load_program():
@@ -106,6 +112,53 @@ def _dynamic_swap_program():
     return bf.code(), seq, left_index, right_index
 
 
+def _dynamic_signed_load_program():
+    bf = BFEmitter()
+    index = PackedI64Ref(0)
+    dst = 8
+    for byte_index in range(8):
+        bf.move(index.byte(byte_index))
+        bf.emit(",")
+
+    seq = RuntimeByteSequence(base=64)
+    seq.read_lf_terminated_bytes(bf)
+    seq.load_byte_signed(bf, dst, index)
+    seq.write_all_bytes(bf)
+    return bf.code(), seq, index, dst
+
+
+def _dynamic_signed_store_program():
+    bf = BFEmitter()
+    index = PackedI64Ref(0)
+    src = 8
+    for byte_index in range(8):
+        bf.move(index.byte(byte_index))
+        bf.emit(",")
+    bf.move(src)
+    bf.emit(",")
+
+    seq = RuntimeByteSequence(base=64)
+    seq.read_lf_terminated_bytes(bf)
+    seq.store_byte_signed(bf, index, src)
+    seq.write_all_bytes(bf)
+    return bf.code(), seq, index, src
+
+
+def _dynamic_signed_normalization_program():
+    bf = BFEmitter()
+    index = PackedI64Ref(0)
+    for byte_index in range(8):
+        bf.move(index.byte(byte_index))
+        bf.emit(",")
+
+    seq = RuntimeByteSequence(base=64)
+    for byte_index in range(4):
+        bf.move(seq.length_ref.byte(byte_index))
+        bf.emit(",")
+    normalized = seq._normalize_signed_index(bf, index)
+    return bf.code(), seq, index, normalized
+
+
 def _assert_runtime_scratch_is_clean(result, seq, length):
     record_count = len(_expected_counts(length))
     for record in range(record_count + 1):
@@ -113,6 +166,12 @@ def _assert_runtime_scratch_is_clean(result, seq, length):
         assert result.memory[record_base + LENGTH : record_base + LENGTH + LENGTH_BYTES] == [
             0
         ] * LENGTH_BYTES
+
+
+def _assert_normalization_scratch_is_clean(result, seq):
+    assert result.memory[
+        seq.left_sentinel + PAYLOAD0 : seq.left_sentinel + RECORD_STRIDE
+    ] == [0] * PAYLOAD_BYTES
 
 
 def test_runtime_sized_byte_sequence_roundtrips_empty_and_nonempty_lines():
@@ -363,3 +422,120 @@ def test_runtime_index_operations_compose_into_character_swaps(length, left, rig
     assert set(code) <= BF_COMMANDS
     assert len(code) < 128 * 1024
     _assert_runtime_scratch_is_clean(result, seq, length)
+
+
+SIGNED_INDEX_CASES = (
+    (0, -1),
+    (1, -1),
+    (9, -1),
+    (9, -9),
+    (9, -10),
+    (17, -16),
+    (257, -1),
+    (257, -257),
+    (257, -258),
+    (257, 255),
+    (257, 256),
+    (257, 257),
+    (1, 1 << 32),
+    (1, -(1 << 32)),
+    (1, (1 << 63) - 1),
+    (1, -(1 << 63)),
+)
+
+
+@pytest.mark.parametrize(("length", "index"), SIGNED_INDEX_CASES)
+def test_runtime_signed_index_load_normalizes_once(length, index):
+    code, seq, index_ref, dst = _dynamic_signed_load_program()
+    payload = _payload(length)
+    result = run_bf(
+        code,
+        _raw_i64(index) + payload + "\n",
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    expected = ord(payload[index]) if -length <= index < length and length else 0
+    assert result.memory[dst] == expected
+    assert result.output == payload
+    assert _u32_at(result.memory, index_ref.base) == (index & 0xFFFFFFFF)
+    assert _u32_at(result.memory, index_ref.base + 4) == ((index >> 32) & 0xFFFFFFFF)
+    assert _u32_at(result.memory, seq.length_ref.base) == length
+    assert result.pointer == seq.base
+    _assert_runtime_scratch_is_clean(result, seq, length)
+    _assert_normalization_scratch_is_clean(result, seq)
+
+
+@pytest.mark.parametrize(("length", "index"), SIGNED_INDEX_CASES)
+def test_runtime_signed_index_store_normalizes_once(length, index):
+    code, seq, index_ref, src = _dynamic_signed_store_program()
+    payload = _payload(length)
+    replacement = "Z"
+    result = run_bf(
+        code,
+        _raw_i64(index) + replacement + payload + "\n",
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    expected = payload
+    if -length <= index < length and length:
+        normalized = index % length if index < 0 else index
+        expected = payload[:normalized] + replacement + payload[normalized + 1 :]
+
+    assert result.output == expected
+    assert result.memory[src] == ord(replacement)
+    assert _u32_at(result.memory, index_ref.base) == (index & 0xFFFFFFFF)
+    assert _u32_at(result.memory, index_ref.base + 4) == ((index >> 32) & 0xFFFFFFFF)
+    assert _u32_at(result.memory, seq.length_ref.base) == length
+    assert result.pointer == seq.base
+    _assert_runtime_scratch_is_clean(result, seq, length)
+    _assert_normalization_scratch_is_clean(result, seq)
+
+
+def test_runtime_signed_index_programs_remain_source_compact():
+    load_code, *_ = _dynamic_signed_load_program()
+    store_code, *_ = _dynamic_signed_store_program()
+
+    assert set(load_code) <= BF_COMMANDS
+    assert set(store_code) <= BF_COMMANDS
+    assert len(load_code) < 40 * 1024
+    assert len(store_code) < 40 * 1024
+
+
+@pytest.mark.parametrize(
+    ("length", "index", "expected"),
+    (
+        (0, -1, 0xFFFFFFFF),
+        (255, -1, 254),
+        (255, -255, 0),
+        (255, -256, 0xFFFFFFFF),
+        (256, -1, 255),
+        (256, -256, 0),
+        (256, -257, 0xFFFFFFFF),
+        (65_535, -65_535, 0),
+        (65_536, -65_535, 1),
+        (65_536, -65_536, 0),
+        (65_536, -65_537, 0xFFFFFFFF),
+        (0xFFFFFFFF, -0xFFFFFFFF, 0),
+        (0xFFFFFFFF, -(1 << 32), 0xFFFFFFFF),
+        (17, 0xFFFFFFFF, 0xFFFFFFFF),
+        (17, 1 << 32, 0xFFFFFFFF),
+    ),
+)
+def test_signed_index_normalization_handles_packed_borrow_boundaries(
+    length, index, expected
+):
+    code, seq, index_ref, normalized = _dynamic_signed_normalization_program()
+    result = run_bf(
+        code,
+        _raw_i64(index) + _raw_u32(length),
+        memory_size=1_024,
+        step_limit=100_000_000,
+    )
+
+    assert _u32_at(result.memory, normalized.base) == expected
+    assert _u32_at(result.memory, seq.length_ref.base) == length
+    assert _u32_at(result.memory, index_ref.base) == (index & 0xFFFFFFFF)
+    assert _u32_at(result.memory, index_ref.base + 4) == ((index >> 32) & 0xFFFFFFFF)
+    assert result.pointer == seq.base
