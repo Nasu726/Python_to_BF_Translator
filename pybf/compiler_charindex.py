@@ -1,21 +1,26 @@
 """Range-safe compact indexing for string-backed character-list views.
 
 ``compiler_charconv`` establishes the source-level view semantics. This layer
-removes a correctness-first constant-index shortcut that could touch hidden NUL
-suffix slots when an index was below static capacity but beyond the current
-logical input length. Until runtime IndexError propagation exists, every
-out-of-range dynamic or constant index is consistently mapped to the reserved
-selector 255 and therefore loads empty / stores nothing.
+makes indexing logically range-safe and source-compact.
+
+The correctness-first implementation selected a runtime index by emitting one
+absolute-address comparison for every possible string slot. At capacity 255 a
+single store produced tens of megabytes of Brainfuck because every candidate
+repeated long pointer travel to shared scratch. The current implementation uses
+preserving rotations instead:
+
+    rotate payload left index times -> operate on slot 0 -> rotate right back
+
+Each rotation body contains only adjacent destructive transfers and is emitted
+once; runtime index affects execution count, not generated source size. The
+payload and explicit terminator are restored exactly except for the requested
+one-character replacement.
 
 The currently supported character-list view permits element replacement but no
 append/delete/insert. Its logical length is therefore immutable between
 ``list(input())`` assignments. We cache that length once in a persistent Quad64
 word and reuse it for every later index check instead of rescanning up to 255
 string cells on every access.
-
-Character loads also use a capacity-one temporary StringRef. A list element is
-known to be exactly one character, so allocating/clearing the full scalar
-string capacity only bloated generated Brainfuck.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from compiler_charconv import PythonToBFStream as _BasePythonToBFStream
 
 
 class PythonToBFStream(_BasePythonToBFStream):
-    """Character-view compiler with safe logical-length indexing."""
+    """Character-view compiler with safe rotation-based indexing."""
 
     def __init__(
         self,
@@ -100,9 +105,90 @@ class PythonToBFStream(_BasePythonToBFStream):
         self._flag_not(invalid, valid, invalid_tmp)
         self.bf.begin_while(invalid)
         self.bf.add_const(invalid, -1)
+        # 255 is outside every valid StringRef payload slot (0..254).
         self.bf.set_const(out, 255)
         self.bf.end_while(invalid)
         return out
+
+    def _rotate_payload_left_once(self, ref) -> None:
+        """Rotate all payload bytes left by one, preserving terminator zero."""
+        saved = ref.terminator
+        self.bf.clear(saved)
+
+        # Move old slot 0 into the adjacent-after-payload saved cell.  The long
+        # pointer distance is emitted once in this reusable runtime body.
+        first = ref.char(0)
+        self.bf.begin_while(first)
+        self.bf.add_const(first, -1)
+        self.bf.add_const(saved, 1)
+        self.bf.end_while(first)
+
+        # Every destination is zero because its previous contents were consumed
+        # by the preceding transfer, so no per-slot scratch or clear is needed.
+        for i in range(ref.capacity - 1):
+            dst = ref.char(i)
+            src = ref.char(i + 1)
+            self.bf.begin_while(src)
+            self.bf.add_const(src, -1)
+            self.bf.add_const(dst, 1)
+            self.bf.end_while(src)
+
+        tail = ref.char(ref.capacity - 1)
+        self.bf.begin_while(saved)
+        self.bf.add_const(saved, -1)
+        self.bf.add_const(tail, 1)
+        self.bf.end_while(saved)
+
+    def _rotate_payload_right_once(self, ref) -> None:
+        """Rotate all payload bytes right by one, preserving terminator zero."""
+        saved = ref.terminator
+        self.bf.clear(saved)
+
+        tail = ref.char(ref.capacity - 1)
+        self.bf.begin_while(tail)
+        self.bf.add_const(tail, -1)
+        self.bf.add_const(saved, 1)
+        self.bf.end_while(tail)
+
+        for i in range(ref.capacity - 1, 0, -1):
+            dst = ref.char(i)
+            src = ref.char(i - 1)
+            self.bf.begin_while(src)
+            self.bf.add_const(src, -1)
+            self.bf.add_const(dst, 1)
+            self.bf.end_while(src)
+
+        first = ref.char(0)
+        self.bf.begin_while(saved)
+        self.bf.add_const(saved, -1)
+        self.bf.add_const(first, 1)
+        self.bf.end_while(saved)
+
+    def _rotation_controls(self, index_byte: int) -> tuple[int, int, int]:
+        """Return left-count, right-count, and one-shot valid access gate."""
+        left_turns = self.temps.cell()
+        right_turns = self.temps.cell()
+        invalid = self.temps.cell()
+        valid = self.temps.cell()
+        valid_tmp = self.temps.cell()
+
+        self.backend.copy_cell(index_byte, left_turns, self.backend.s0)
+        self.backend.copy_cell(index_byte, right_turns, self.backend.s0)
+        self.backend._eq_byte_const(invalid, index_byte, 255)
+        self._flag_not(valid, invalid, valid_tmp)
+        return left_turns, right_turns, valid
+
+    def _rotate_left_n(self, ref, turns: int) -> None:
+        self.bf.begin_while(turns)
+        self.bf.add_const(turns, -1)
+        self._rotate_payload_left_once(ref)
+        self.bf.end_while(turns)
+
+    def _rotate_right_n(self, ref, turns: int) -> None:
+        self.bf.begin_while(turns)
+        self.bf.add_const(turns, -1)
+        self._rotate_payload_right_once(ref)
+        self.bf.end_while(turns)
 
     def _load_char_list_subscript(self, node: ast.Subscript):
         assert isinstance(node.value, ast.Name)
@@ -112,12 +198,18 @@ class PythonToBFStream(_BasePythonToBFStream):
         if constant is not None and constant >= ref.capacity:
             raise self._error(node, "constant character-list index exceeds capacity")
 
-        # Even a nonnegative constant below static capacity must be checked
-        # against the runtime logical length. Example: index 10 into "abc"
-        # must not expose the otherwise hidden cleared suffix cell 10.
         index_byte = self._char_list_runtime_index_byte(node.slice, ref)
+        left_turns, right_turns, valid = self._rotation_controls(index_byte)
         result = self._new_char_buffer()
-        self._load_string_char_at(result, ref, index_byte)
+        self.backend.clear_string(result)
+
+        self.bf.begin_while(valid)
+        self.bf.add_const(valid, -1)
+        self._rotate_left_n(ref, left_turns)
+        self.backend.copy_cell(ref.char(0), result.char(0), self.backend.s0)
+        self._rotate_right_n(ref, right_turns)
+        self.bf.end_while(valid)
+        self.backend._clear_scratch()
         return result
 
     def _store_char_list_subscript(self, node: ast.Subscript, value) -> None:
@@ -129,13 +221,14 @@ class PythonToBFStream(_BasePythonToBFStream):
             raise self._error(node, "constant character-list index exceeds capacity")
 
         index_byte = self._char_list_runtime_index_byte(node.slice, ref)
-        match = self.temps.cell()
-        for i in range(ref.capacity):
-            self.backend._eq_byte_const(match, index_byte, i)
-            self.bf.begin_while(match)
-            self.bf.add_const(match, -1)
-            self.backend.copy_cell(value.char(0), ref.char(i), self.backend.s0)
-            self.bf.end_while(match)
+        left_turns, right_turns, valid = self._rotation_controls(index_byte)
+
+        self.bf.begin_while(valid)
+        self.bf.add_const(valid, -1)
+        self._rotate_left_n(ref, left_turns)
+        self.backend.copy_cell(value.char(0), ref.char(0), self.backend.s0)
+        self._rotate_right_n(ref, right_turns)
+        self.bf.end_while(valid)
         self.backend._clear_scratch()
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
