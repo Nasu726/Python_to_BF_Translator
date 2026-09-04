@@ -55,6 +55,40 @@ print("".join(chars))
     assert result.output == "xy\n"
 
 
+def test_join_assignment_snapshots_mutable_character_view():
+    source = '''
+chars = list(input())
+text = "".join(chars)
+chars[0] = "X"
+print(text)
+print("".join(chars))
+'''
+    code = _compile(source)
+    result = run_bf(code, "abc\n", memory_size=120_000, step_limit=1_000_000_000)
+    # Direct join can be a zero-copy view, but assigning the resulting Python
+    # string must snapshot the value because strings are immutable and later
+    # list mutation must not change ``text``.
+    assert result.output == "abc\nXbc\n"
+
+
+def test_direct_join_list_input_stays_below_atcoder_source_limit():
+    source = '''
+print("".join(list(input())))
+'''
+    code = compile_source(source, string_capacity=255, list_capacity=4)
+    assert set(code) <= BF_COMMANDS
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"direct join(list(input())) emitted {len(code):,} bytes"
+    )
+    result = run_bf(
+        code,
+        "brainfuck\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "brainfuck\n"
+
+
 def test_one_runtime_char_store_stays_below_atcoder_source_limit():
     source = '''
 chars = list(input())
