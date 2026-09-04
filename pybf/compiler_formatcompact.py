@@ -1,18 +1,23 @@
 """Source-compact signed-int64 -> string formatting.
 
 The decimal digit generator in the Quad backend is already source-compact and
-is shared with ``print(int)``.  The original ``str(int)`` lowering became huge
+is shared with ``print(int)``. The original ``str(int)`` lowering became huge
 because every emitted decimal character selected one of up to 21 destination
 string slots through a statically expanded dynamic-index store.
 
 This layer keeps the existing decimal generator but builds the destination
-string by preserving rotations.  Each accepted output byte rotates the payload
-left once and is moved into the now-zero tail.  A final ``remaining`` rotation
+string by preserving rotations. Each accepted output byte rotates the payload
+left once and is moved into the now-zero tail. A final ``remaining`` rotation
 loop completes exactly one full cycle, leaving the characters in canonical
-prefix order.  No runtime destination selector is needed.
+prefix order. No runtime destination selector is needed.
+
+For the common ``s = str(n)`` statement, formatting is performed directly into
+``s`` rather than formatting a 255-byte temporary and then snapshot-copying it.
 """
 
 from __future__ import annotations
+
+import ast
 
 from bfquad import WORD_CELLS
 from compiler_decimalconv import CompileError
@@ -35,7 +40,7 @@ class PythonToBFStream(_BasePythonToBFStream):
     ) -> None:
         """Append ``ascii_cell`` to the rotation-built string if capacity remains.
 
-        ``ascii_cell`` is consumed when appended.  ``remaining`` is a byte
+        ``ascii_cell`` is consumed when appended. ``remaining`` is a byte
         counter because fixed StringRef capacity is at most 255.
         """
         self.bf.clear(room)
@@ -53,8 +58,8 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.add_const(remaining, -1)
         self.bf.end_while(room)
 
-    def _format_int_string(self, src):
-        dst = self._new_string()
+    def _format_int_string_into(self, dst, src) -> None:
+        """Write signed ``src`` into existing ``dst`` in canonical string form."""
         self.backend.clear_string(dst)
 
         magnitude = self._new_word()
@@ -68,7 +73,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.bf.clear(cell)
         self.bf.set_const(remaining, dst.capacity)
 
-        # Emit '-' first when needed.  Negation is modulo 2**64, so INT64_MIN
+        # Emit '-' first when needed. Negation is modulo 2**64, so INT64_MIN
         # becomes the unsigned magnitude 2**63 as required by decimal output.
         self.backend.copy_cell(src.bit(63), sign, self.backend.s0)
         self.bf.begin_while(sign)
@@ -91,7 +96,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         for cell in (started, control, tmp, helper):
             self.bf.clear(cell)
 
-        # Twenty compile-time digit lanes are small and deterministic.  The
+        # Twenty compile-time digit lanes are small and deterministic. The
         # expensive operation that used to explode source size was selecting a
         # destination slot; each selected digit now uses one local rotation
         # append instead.
@@ -119,7 +124,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.bf.end_while(control)
 
         # k output bytes performed k left rotations and occupy the last k
-        # payload slots in order.  Completing capacity-k rotations restores the
+        # payload slots in order. Completing capacity-k rotations restores the
         # canonical prefix representation with a zero suffix.
         self.bf.begin_while(remaining)
         self.bf.add_const(remaining, -1)
@@ -127,7 +132,35 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.end_while(remaining)
         self.bf.clear(dst.terminator)
         self.backend._clear_scratch()
+
+    def _format_int_string(self, src):
+        dst = self._new_string()
+        self._format_int_string_into(dst, src)
         return dst
+
+    def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        # ``s = str(integer_expression)`` needs no intermediate Python string:
+        # the expression value is evaluated first and then formatted directly
+        # into s. String-valued ``str(s)`` keeps the normal snapshot path.
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in self.strings
+            and node.targets[0].id not in self.char_list_names
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "str"
+            and len(node.value.args) == 1
+            and not node.value.keywords
+        ):
+            arg = node.value.args[0]
+            if not self._expr_is_string(arg):
+                value = self.compile_expr(arg)
+                self._format_int_string_into(self.strings[node.targets[0].id], value)
+                return
+
+        return super()._compile_stmt_inner(node)
 
 
 __all__ = ["CompileError", "PythonToBFStream"]
