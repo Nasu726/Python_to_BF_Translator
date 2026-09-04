@@ -40,6 +40,23 @@ print("".join(chars))
 def test_cached_length_refreshes_when_char_list_is_read_again():
     source = '''
 chars = list(input())
+print(len(chars))
+chars = list(input())
+print(len(chars))
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "abcdef\nxy\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "6\n2\n"
+
+
+def test_cached_length_guards_store_after_char_list_is_read_again():
+    source = '''
+chars = list(input())
 chars[4] = "X"
 chars = list(input())
 chars[4] = "Q"
