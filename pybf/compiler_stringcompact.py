@@ -2,7 +2,7 @@
 
 Character-list work exposed a broader fixed-string problem: generic ``read_line``,
 ``copy_string`` and ``print_string`` statically repeat distant scratch traffic
-for every one of 255 payload slots.  Explicit ``int(str)`` / ``str(int)`` needs
+for every one of 255 payload slots. Explicit ``int(str)`` / ``str(int)`` needs
 ordinary scalar strings to remain practical too.
 
 This layer reuses the same rotation invariant for scalar strings:
@@ -13,7 +13,7 @@ This layer reuses the same rotation invariant for scalar strings:
   destination, then both values end in canonical form;
 * printing rotates one full cycle while outputting nonzero slot-zero bytes.
 
-All three preserve the NUL-terminated byte-string ABI.  Runtime work grows with
+All three preserve the NUL-terminated byte-string ABI. Runtime work grows with
 the fixed capacity, but emitted source contains only one body for each runtime
 loop instead of one absolute-address body per slot.
 """
@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import ast
 
-from compiler_charconv import _empty_join_arg, _is_input_call
+from compiler_charconv import _empty_join_arg, _is_input_call, _is_list_input
 from compiler_chario import CompileError
 from compiler_chario import PythonToBFStream as _BasePythonToBFStream
 
@@ -172,13 +172,24 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _eval_string(self, node: ast.AST):
         if isinstance(node, ast.Name) and node.id in self.strings:
-            # Python strings are immutable.  Consumers may inspect the stable
+            # Python strings are immutable. Consumers may inspect the stable
             # source directly; assignment creates the required snapshot below.
             return self.strings[node.id]
         if _is_input_call(node):
             result = self._new_string()
             self._read_string_ref_compact(result)
             return result
+
+        # ``"".join(list(input()))`` has no persistent mutable-list identity to
+        # preserve. Read the physical line directly into the string result; the
+        # list/join syntax is representation-only and does not materialize a
+        # second runtime container.
+        join_arg = _empty_join_arg(node)
+        if join_arg is not None and _is_list_input(join_arg):
+            result = self._new_string()
+            self._read_string_ref_compact(result)
+            return result
+
         return super()._eval_string(node)
 
     def _assign_string_to(self, target: ast.Name, value) -> None:
@@ -190,7 +201,7 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         # Avoid input -> temporary string -> destination copy for the common
-        # single-target assignment.  Multiple-target assignment still falls
+        # single-target assignment. Multiple-target assignment still falls
         # back to evaluate-once + compact snapshot semantics.
         if (
             isinstance(node, ast.Assign)
