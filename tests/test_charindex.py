@@ -138,6 +138,26 @@ print(second[-1])
     assert result.output == "b\nz\n"
 
 
+def test_char_list_payload_liveness_uses_original_ast_reads():
+    source = '''
+chars = list(input())
+other = input()
+print(chars[0])
+print(other)
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "abc\nXYZ\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    # Type-inference rewriting turns chars[0] into a string-shaped placeholder.
+    # Liveness must still see the original chars read; otherwise `other` can
+    # reuse and overwrite the same fixed string block before this access.
+    assert result.output == "a\nXYZ\n"
+
+
 def test_join_assignment_snapshots_mutable_character_view():
     source = '''
 chars = list(input())
