@@ -125,45 +125,86 @@ scalability and random-index runtime performance are separate engineering
 problems, and both must pass before maximum-constraint ABC199 C support can be
 claimed.
 
-### Stage S1 — runtime-sized flat byte-sequence primitive
+### Stage S1 — extend the existing runtime-sized byte-sequence primitive
 
-Build a standalone Brainfuck runtime primitive whose generated source size does
-not depend on the runtime line length.
+Do **not** create a second dynamic-byte storage system. `pybf/bfstreamseq.py`
+already provides `RuntimeByteSequence`, a proven first scalable-storage slice:
 
-Initial scope:
+- generated BF source size is independent of runtime line length;
+- LF-terminated input grows records at runtime;
+- sequential replay is source-compact;
+- a permanent left sentinel returns the tape head to a known static anchor;
+- the rolling scratch window overlaps only future, still-zero records;
+- the existing tests already cover empty/nonempty round trips and a runtime
+  length beyond the historical tiny examples.
 
-- storage begins strictly after `LayoutPlan.runtime_base()`;
-- one runtime-sized flat byte sequence is supported by the first specialization;
-- input appends bytes until physical line end without a compile-time 255-byte
-  ceiling;
-- runtime length is tracked explicitly;
-- sequential iteration and output are source-compact and preserve the sequence;
-- index load/store and negative-index normalization are correct even if the
-  first implementation uses linear head movement;
-- no Python runtime or nonstandard BF instruction is introduced.
+S1 therefore extends this existing primitive instead of replacing it.
 
-Planned implementation units:
+The current record is nine cells:
 
 ```text
-pybf/bfdynbytes.py             # runtime byte-sequence record/layout primitives
-pybf/compiler_dynchars.py      # safe source-shape specialization/router
- tests/test_bfdynbytes.py       # primitive correctness + source-independence
- tests/test_dynamic_charlist.py # ordinary-Python integration
+[marker][payload byte][7 reserved payload bytes]
 ```
 
-Exact filenames may change if an existing runtime-sequence module is a cleaner
-home, but the primitive/compiler/test separation should remain.
+The first implementation materializes only one byte per record even though the
+record already reserves eight payload lanes. The preferred next representation
+is therefore **up to eight characters per materialized record**. A logical
+runtime index can be decomposed as:
+
+```text
+record = index >> 3
+lane   = index & 7
+```
+
+This preserves the capacity-independent runtime walker while reducing
+persistent tape distance by roughly a factor of eight. It is still a linear
+record walk in the worst case; S3 decides whether that is fast enough in
+practice.
+
+S1 implementation order:
+
+1. add explicit runtime length metadata without updating a distant static cell
+   on every input byte; carry/update length near the moving input walker and
+   propagate the final value back to the fixed sequence header/sentinel once;
+2. turn the eight reserved payload bytes into a real chunked record while
+   preserving the existing end-sentinel and return-to-base invariants;
+3. add source-compact sequential iteration/output for partial final chunks;
+4. add non-negative runtime index load/store using `record=index>>3` and a
+   bounded 0..7 lane selector;
+5. add negative-index normalization and range checks against cached runtime
+   length;
+6. add a cursor-aware access API so later frontend lowering can retain the
+   current logical/physical position instead of unconditionally returning to
+   origin between adjacent accesses.
+
+Expected implementation units:
+
+```text
+pybf/bfstreamseq.py              # extend existing RuntimeByteSequence
+ tests/test_bfstreamseq.py        # primitive correctness, length and chunking
+ tests/test_dynamic_charlist.py   # added in S2 for ordinary-Python integration
+```
 
 S1 acceptance gates:
 
-- lengths 0, 1, 32, 255, 256, 1024 and a multi-thousand-byte line;
+- lengths 0, 1, 7, 8, 9, 32, 255, 256, 1024 and a multi-thousand-byte line;
 - generated BF source size independent of those runtime lengths;
-- exact input/output preservation;
+- exact input/output preservation, including partial final chunks;
+- exact runtime `len` metadata;
 - positive/negative index load and replacement;
+- indices 255/256 and values above one byte of index state do not wrap;
 - out-of-range access follows the project's temporary empty-load/no-op-store
   contract until runtime exceptions exist;
 - standard BF eight-command output only;
-- no overlap with compile-time temporary high-water storage.
+- no overlap with compile-time temporary high-water storage;
+- raw-step telemetry for sequential and indexed operations is recorded before
+  frontend integration.
+
+The heap-backed `bfdynlist`/`bfheap` machinery remains useful for later true
+object identity and multiple dynamic objects, but its current linked/handle
+lookup is not the default backing for this flat character sequence. The flat
+contiguous runtime records are substantially closer to the access pattern needed
+for strings and ABC199 C.
 
 ### Stage S2 — restricted dynamic character-list frontend
 
@@ -289,7 +330,8 @@ approximated with integer arithmetic.
 2. Land PR #8 (restricted character-list views + explicit `int`/`str`
    conversions) after the stacked base is handled; keep its fixed-capacity scope
    explicit.
-3. Implement Stage S1 runtime-sized flat byte sequence.
+3. Extend `bfstreamseq.RuntimeByteSequence` through Stage S1: runtime length,
+   eight-byte chunking, indexed load/store, negative normalization and cursor.
 4. Integrate Stage S2 restricted dynamic character-list lowering.
 5. Run Stage S3 scaling/Tritium benchmarks and decide the ABC199 C maximum-scale
    claim from measurements, not from capacity alone.
