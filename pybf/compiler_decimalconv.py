@@ -1,8 +1,10 @@
 """Source-compact runtime decimal-string parsing for the final compiler.
 
 ``compiler_charconv`` establishes the type/view semantics,
-``compiler_charindex`` provides preserving rotation indexing, and
-``compiler_chario`` removes fixed-slot expansion from character-list I/O.
+``compiler_charindex`` provides preserving rotation indexing,
+``compiler_chario`` removes fixed-slot expansion from character-list I/O, and
+``compiler_stringcompact`` applies the same compact primitives to ordinary
+scalar-string read/copy/print operations.
 
 The first runtime-loop parser still used generic dynamic string indexing. At
 public capacity 255 that expanded to 12 MB because each character fetch emitted
@@ -26,8 +28,8 @@ from __future__ import annotations
 import ast
 
 from compiler_charconv import _is_input_call
-from compiler_chario import CompileError
-from compiler_chario import PythonToBFStream as _BasePythonToBFStream
+from compiler_stringcompact import CompileError
+from compiler_stringcompact import PythonToBFStream as _BasePythonToBFStream
 
 
 class PythonToBFStream(_BasePythonToBFStream):
@@ -184,7 +186,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         ):
             arg = node.args[0]
 
-            # Preserve the established packed int(input()) reader.  Routing
+            # Preserve the established packed int(input()) reader. Routing
             # this form through string materialization is both slower and much
             # larger in emitted BF.
             if _is_input_call(arg):
