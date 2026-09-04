@@ -1,5 +1,7 @@
+import pytest
+
 from bf_runtime import run_bf
-from compiler_layout import compile_source
+from compiler_layout import CompileError, compile_source
 
 
 BF_COMMANDS = set("><+-.,[]")
@@ -47,6 +49,30 @@ print("".join(chars))
     code = _compile(source)
     result = run_bf(code, "abcdef\n", memory_size=120_000, step_limit=1_000_000_000)
     assert result.output == "abQdef\n"
+
+
+def test_named_one_character_literal_can_be_stored():
+    source = '''
+chars = list(input())
+mark = "Q"
+chars[1] = mark
+print("".join(chars))
+'''
+    code = _compile(source)
+    result = run_bf(code, "abc\n", memory_size=120_000, step_limit=1_000_000_000)
+    assert result.output == "aQc\n"
+
+
+def test_char_value_name_rejects_later_multichar_reassignment():
+    source = '''
+chars = list(input())
+tmp = chars[0]
+tmp = "XY"
+chars[1] = tmp
+print("".join(chars))
+'''
+    with pytest.raises(CompileError):
+        _compile(source)
 
 
 def test_cached_length_refreshes_when_char_list_is_read_again():
