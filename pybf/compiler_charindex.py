@@ -133,6 +133,10 @@ class PythonToBFStream(_BasePythonToBFStream):
         string_capacity: int = 255,
         list_capacity: int = 64,
     ) -> None:
+        # compiler_charconv rewrites selected expressions only for type/layout
+        # inference. Preserve the user's original AST separately so the Quad
+        # allocator does not lose source-level reads when computing lifetimes.
+        self._liveness_tree_override = tree
         super().__init__(
             tree,
             string_capacity=string_capacity,
