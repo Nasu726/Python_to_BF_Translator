@@ -3,6 +3,7 @@ from compiler_layout import compile_source
 
 
 BF_COMMANDS = set("><+-.,[]")
+ATCODER_SOURCE_LIMIT = 512 * 1024
 
 
 def _compile(source: str) -> str:
@@ -34,3 +35,17 @@ print("".join(chars))
     code = _compile(source)
     result = run_bf(code, "abcdef\n", memory_size=120_000, step_limit=1_000_000_000)
     assert result.output == "abQdef\n"
+
+
+def test_one_runtime_char_store_stays_below_atcoder_source_limit():
+    source = '''
+chars = list(input())
+i = int(input())
+chars[i] = "X"
+print("".join(chars))
+'''
+    code = compile_source(source, string_capacity=255, list_capacity=4)
+    assert set(code) <= BF_COMMANDS
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"single runtime char store emitted {len(code):,} bytes"
+    )
