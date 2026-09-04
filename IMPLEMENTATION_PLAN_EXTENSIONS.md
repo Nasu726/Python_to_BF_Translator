@@ -118,6 +118,131 @@ reordered traversal is available. Until then, conversion-specific fixtures
 should isolate `str(int64)`, `int(str)`, and round trips without inventing a
 problem-specific lowering.
 
+## Next implementation phase — scalable byte sequence
+
+The next architecture step is not "make `StringRef` larger". Capacity
+scalability and random-index runtime performance are separate engineering
+problems, and both must pass before maximum-constraint ABC199 C support can be
+claimed.
+
+### Stage S1 — runtime-sized flat byte-sequence primitive
+
+Build a standalone Brainfuck runtime primitive whose generated source size does
+not depend on the runtime line length.
+
+Initial scope:
+
+- storage begins strictly after `LayoutPlan.runtime_base()`;
+- one runtime-sized flat byte sequence is supported by the first specialization;
+- input appends bytes until physical line end without a compile-time 255-byte
+  ceiling;
+- runtime length is tracked explicitly;
+- sequential iteration and output are source-compact and preserve the sequence;
+- index load/store and negative-index normalization are correct even if the
+  first implementation uses linear head movement;
+- no Python runtime or nonstandard BF instruction is introduced.
+
+Planned implementation units:
+
+```text
+pybf/bfdynbytes.py             # runtime byte-sequence record/layout primitives
+pybf/compiler_dynchars.py      # safe source-shape specialization/router
+ tests/test_bfdynbytes.py       # primitive correctness + source-independence
+ tests/test_dynamic_charlist.py # ordinary-Python integration
+```
+
+Exact filenames may change if an existing runtime-sequence module is a cleaner
+home, but the primitive/compiler/test separation should remain.
+
+S1 acceptance gates:
+
+- lengths 0, 1, 32, 255, 256, 1024 and a multi-thousand-byte line;
+- generated BF source size independent of those runtime lengths;
+- exact input/output preservation;
+- positive/negative index load and replacement;
+- out-of-range access follows the project's temporary empty-load/no-op-store
+  contract until runtime exceptions exist;
+- standard BF eight-command output only;
+- no overlap with compile-time temporary high-water storage.
+
+### Stage S2 — restricted dynamic character-list frontend
+
+Integrate S1 with ordinary Python only when escape/lifetime analysis proves the
+specialized backing is safe.
+
+Target shape begins with:
+
+```python
+s = list(input())
+# len / iteration / runtime index load/store / one-char swap
+print("".join(s))
+```
+
+Rules:
+
+- retain the existing fixed `StringRef` path as a fallback for unsupported
+  programs;
+- initially allow only one escaping runtime-sized character sequence per safe
+  region/program, rather than pretending a general heap already exists;
+- reject aliasing, rebinding or multiple dynamic objects when object ownership
+  is not yet representable;
+- keep `list(input())` / empty join representation-preserving;
+- reuse the PR #8 byte-element, liveness and semantic-boundary checks.
+
+The official ABC199 C source used by current sample tests becomes the first
+integration fixture, but the lowering must be phrased in terms of the general
+restricted character-list operations, not task-specific query semantics.
+
+### Stage S3 — indexing complexity and Tritium scaling
+
+A runtime-sized sequence that is merely correct is not automatically practical.
+Standard Brainfuck pays for tape-head movement, so random accesses to distant
+positions need explicit measurement.
+
+Measure separately:
+
+1. sequential read / iterate / print cost as sequence length grows;
+2. one indexed load/store at increasing distances;
+3. repeated swaps under local, alternating-end and random index distributions;
+4. ABC199 C sample, medium-scale synthetic cases, then official maximum-scale
+   dimensions only if earlier curves are credible.
+
+Prefer cursor-relative movement so consecutive nearby indices cost their delta
+rather than repeatedly returning to origin. Record both raw BF steps and real
+Tritium wall-clock time.
+
+A planned benchmark entry point is:
+
+```text
+tools/bench_tritium_abc199.py
+```
+
+Maximum-constraint support is accepted only if:
+
+- correctness is independently checked;
+- generated source remains within the submission limit;
+- the same ordinary Python source is compiled, with no hand-written BF or
+  task-specific answer routine;
+- Tritium execution is practically within the intended contest environment.
+
+If linear-distance random access is too slow, stop the maximum-scale claim at
+that gate. The next research task is then a stronger indexed representation or a
+semantics-preserving general batched/cursor optimization. Do not hide the
+problem with an ABC199-specific compiler shortcut.
+
+### Stage S4 — generalize only after the primitive is measured
+
+Once dynamic bytes are correct and their cost model is understood:
+
+1. support more than one runtime-sized byte object through the object/handle
+   model from `IMPLEMENTATION_PLAN.md`;
+2. reuse the proven allocation/traversal machinery for scalable `list[int]`;
+3. add alias/reference semantics instead of copying values accidentally;
+4. only then move to sort, nested containers and queue/deque workloads.
+
+This order prevents the full heap model from being built around an unmeasured
+random-access primitive.
+
 ## Priority C — real ABC compatibility corpus
 
 Continue selecting actual ABC tasks before extending the backend so feature
@@ -159,13 +284,17 @@ approximated with integer arithmetic.
 
 ## Immediate implementation order
 
-1. Finish zero-copy `list(input())` + `"".join(character_list)` syntax, mutable
-   character indexing, swaps, and ABC199 C sample compatibility.
-2. Finish `str(int64)` and `int(str)` with boundary/differential tests.
-3. Replace fixed-capacity string/character backing with a scalable byte sequence
-   and revisit ABC199 C at maximum constraints.
-4. Proceed to scalable indexed/mutable integer lists.
-5. Proceed to stable sort; then promote ABC192 C / ABC221 C into the end-to-end
+1. Land PR #7 (single-use int input-list streaming foundation) after final
+   review; its current head already passes the normal four-shard CI.
+2. Land PR #8 (restricted character-list views + explicit `int`/`str`
+   conversions) after the stacked base is handled; keep its fixed-capacity scope
+   explicit.
+3. Implement Stage S1 runtime-sized flat byte sequence.
+4. Integrate Stage S2 restricted dynamic character-list lowering.
+5. Run Stage S3 scaling/Tritium benchmarks and decide the ABC199 C maximum-scale
+   claim from measurements, not from capacity alone.
+6. Generalize through Stage S4 into scalable indexed/mutable integer lists.
+7. Proceed to stable sort; then promote ABC192 C / ABC221 C into the end-to-end
    corpus.
-6. Proceed to queue/deque semantics.
-7. Revisit float64 only after those higher-priority paths are stable.
+8. Proceed to queue/deque semantics.
+9. Revisit float64 only after those higher-priority paths are stable.
