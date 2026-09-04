@@ -37,6 +37,24 @@ print("".join(chars))
     assert result.output == "abQdef\n"
 
 
+def test_cached_length_refreshes_when_char_list_is_read_again():
+    source = '''
+chars = list(input())
+chars[4] = "X"
+chars = list(input())
+chars[4] = "Q"
+print("".join(chars))
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "abcdef\nxy\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "xy\n"
+
+
 def test_one_runtime_char_store_stays_below_atcoder_source_limit():
     source = '''
 chars = list(input())
