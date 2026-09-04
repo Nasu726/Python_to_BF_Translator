@@ -33,6 +33,18 @@ _DECIMAL_STRIDE = 7
 class PythonToBFStream(_BasePythonToBFStream):
     """Decimal conversion compiler with compact int->string construction."""
 
+    def _eval_string(self, node: ast.AST):
+        # A restricted character-list deliberately reuses StringRef storage, but
+        # that physical representation must not leak scalar-string semantics.
+        # Dedicated list operations (subscript, len, iteration and empty join)
+        # are lowered before reaching this generic string-evaluation boundary.
+        if isinstance(node, ast.Name) and node.id in self.char_list_names:
+            raise self._error(
+                node,
+                "restricted character-list values cannot be consumed as scalar strings; use ''.join(list)",
+            )
+        return super()._eval_string(node)
+
     def _append_ascii_if_room(
         self,
         dst,
