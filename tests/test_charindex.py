@@ -26,6 +26,18 @@ print(chars[10])
     assert result.output == "abc\n\n"
 
 
+def test_constant_index_beyond_physical_capacity_does_not_wrap():
+    source = '''
+chars = list(input())
+chars[256] = "Q"
+print("".join(chars))
+print(chars[256])
+'''
+    code = _compile(source)
+    result = run_bf(code, "abc\n", memory_size=120_000, step_limit=1_000_000_000)
+    assert result.output == "abc\n\n"
+
+
 def test_positive_constant_index_inside_runtime_length_still_works():
     source = '''
 chars = list(input())
