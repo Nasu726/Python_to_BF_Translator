@@ -271,6 +271,16 @@ that gate. The next research task is then a stronger indexed representation or a
 semantics-preserving general batched/cursor optimization. Do not hide the
 problem with an ABC199-specific compiler shortcut.
 
+As a design-discovery exercise, maintain a separate problem-specialized BF
+code-golf baseline for hard acceptance tasks before committing to a general
+representation. This is especially relevant to ABC199 C: a tiny specialized
+solution may reveal logical-offset, delayed-permutation, cursor, or tape-layout
+structures that are obscured by a direct lowering. The baseline is an oracle
+and performance upper bound only. Never route production compilation by problem
+name or exact source shape; extract useful observations into reusable,
+semantics-preserving primitives and validate them on unrelated programs before
+promotion.
+
 ### Stage S4 — generalize only after the primitive is measured
 
 Once dynamic bytes are correct and their cost model is understood:

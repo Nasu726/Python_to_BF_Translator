@@ -227,6 +227,15 @@ Known rejected experiments from PR #6:
 
 The last experiment also exposed an ABI bug: LEFT[15] is the live count extent. Scratch-lane optimizations must respect count/parser fields that share the same runtime record.
 
+### [PERMANENT] Use problem-specialized BF as a laboratory, not a compiler shortcut
+
+For difficult real ABC workloads, a separately maintained code-golfed or
+problem-specialized BF implementation can reveal useful tape-native structure
+and establish an empirical upper bound. Compare it with public compiler output,
+then extract only reusable semantics-preserving ideas (for example cursor-aware
+indexing, logical offsets, or delayed permutations). Never dispatch production
+lowering by problem identity, exact source text, or expected output.
+
 ### [PERMANENT] Raw BF step counts and optimized-interpreter wall time are different metrics
 
 The Python reference interpreter is intentionally literal and excellent for deterministic complexity/regression checks. Tritium performs substantial static optimization and JIT/optimized execution. Billions of literal BF operations can therefore correspond to sub-second execution for this structured program. Keep both metrics: do not replace correctness-oriented raw-step gates with noisy wall-clock CI, and do not use raw steps alone to reject a practically fast Tritium program.

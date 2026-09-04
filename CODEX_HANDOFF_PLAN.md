@@ -213,30 +213,43 @@ Status at handoff:
 - draft
 - runtime primitive only; public Python routing intentionally unchanged
 
-### Last known verified milestone: S1a
+### Last known GitHub-verified baseline
 
-S1a runtime-length implementation was verified by workflow run #476:
+The pre-S1c branch head `277e01034a825cbba65717b70c048ea17f7ca9a3`
+was verified by workflow run #478:
 
 - arithmetic: green
 - runtime: green
 - frontend: green
 - contest: green
 
-S1a added runtime length carried with the moving sequence head rather than updating distant base metadata per character.
+That baseline includes S1a and the first S1b implementation. The S1b-specific
+boundary matrix was added and verified locally in the next implementation
+commit described below.
 
-### Current branch head / active unfinished work
+### Current implementation commit / active work
 
-Current PR #9 head at handoff:
+Latest implementation commit in this work session:
 
 ```text
-81372a68fb851cce5f11adb55e650a6764f2ca53
+d136924c6e8fffca85abd6110ca7aa5d24c142ae
 ```
 
-This head contains the first **S1b eight-byte chunking implementation**, but S1b-specific boundary tests / CI verification have **not yet been completed**.
+It completes the missing S1b verification matrix and adds S1c non-negative
+runtime index load/store. Local verification after the implementation:
 
-Therefore:
+- focused runtime-byte-sequence tests: **54 passed**;
+- complete repository suite before the final three swap cases were added:
+  **348 passed**;
+- the three final repeated-operation/swap cases also pass;
+- S1b read source: **4,298 bytes**;
+- S1b read + replay source: **4,819 bytes**;
+- dynamic-index load fixture: **21,057 bytes**;
+- dynamic-index store fixture: **21,447 bytes**;
+- two-load/two-store swap fixture: **74,083 bytes**.
 
-> Treat S1b as implemented-but-unverified. Do not build S1c on top of it until the boundary tests below pass.
+The new commit still needs GitHub four-shard CI. Do not call S1c remotely
+verified until that run is green.
 
 Current intended persistent record layout:
 
@@ -264,9 +277,10 @@ The S1b implementation uses one runtime loop per chunk and a bounded 0..7 lane s
 
 Do **not** start frontend integration yet.
 
-Resume at **S1b verification**.
+Resume at **S1d negative-index normalization**, after confirming the current
+PR head's four-shard CI.
 
-## S1b test matrix to add immediately
+## Completed S1b verification matrix
 
 For a payload of length `n`, inspect both roundtrip and materialized chunk metadata.
 
@@ -316,9 +330,9 @@ For every case verify:
 
 Also add a test that the reader stops on LF and does not consume the following logical input line unexpectedly.
 
-After test changes, run the normal four-shard CI.
-
-If S1b fails, fix S1b only. Do not proceed to S1c until S1b is green.
+These cases now live in `tests/test_bfstreamseq.py`. Preserve them when changing
+the record walker. The normal four-shard CI remains required after every new
+head.
 
 ---
 
@@ -341,7 +355,7 @@ Verified boundaries include at least 0/1/7/8/9/255/256.
 
 ---
 
-## S1b — eight-byte chunking — ACTIVE
+## S1b — eight-byte chunking — DONE / LOCALLY VERIFIED
 
 Goal:
 
@@ -360,22 +374,23 @@ Design constraints:
 - one bounded lane selector is acceptable;
 - avoid emitting an entire decimal/string reader eight times.
 
-Do not proceed until S1b tests listed above are green.
+The full boundary/metadata matrix above is green. The current source remains
+under the original 5,000-byte gate.
 
 ---
 
-## S1c — non-negative runtime index load/store
+## S1c — non-negative runtime index load/store — DONE / LOCALLY VERIFIED
 
-Start only after S1b green.
-
-Target decomposition:
+Logical decomposition:
 
 ```text
 record_index = index >> 3
 lane         = index & 7
 ```
 
-The runtime implementation must not emit source proportional to sequence capacity or runtime length.
+The implementation realizes the same decomposition as a bounded eight-lane
+countdown per materialized chunk. It never truncates the packed-u32 index to one
+byte, and emitted source is independent of sequence capacity/runtime length.
 
 Required primitive operations:
 
@@ -393,9 +408,12 @@ store -> no-op
 
 until runtime exception propagation is implemented.
 
-Initial traversal may be linear in record distance, but measure it explicitly.
+Load uses one forward location pass plus a backward result carrier. Store uses a
+location/tag pass and a second forward value-carrier pass. Both currently return
+to the fixed base after each operation and are linear in record distance; S1e
+must measure and improve repeated access.
 
-Required tests:
+Verified cases include:
 
 ```text
 indices 0, 1, 7, 8, 9
@@ -407,7 +425,9 @@ load must preserve sequence
 store must alter exactly one byte
 ```
 
-Do not implement Python negative indexing in S1c; keep that isolated for S1d.
+The tests also cover index `0xffffffff`, preservation of the packed index and
+runtime length, cleaned scratch metadata, standard BF only, and repeated
+two-load/two-store swaps. Python negative indexing remains isolated for S1d.
 
 ---
 
@@ -532,6 +552,30 @@ Possible next research directions if random access is too slow:
 - stronger indexed storage representation.
 
 Avoid assuming a classic RAM-style tree automatically helps: Brainfuck tape movement to reach tree metadata can dominate.
+
+## Problem-specialized BF laboratory (discovery only)
+
+For each difficult ABC tier, it is useful to write or code-golf a separate
+problem-specialized Brainfuck solution before finalizing the general compiler
+architecture. Treat that program as an experimental upper bound/oracle, not as
+the public lowering.
+
+The purpose is to expose BF-native structure that ordinary RAM-model design may
+hide. For ABC199 C, likely examples include logical half offsets, delayed
+permutations, cursor placement, and avoiding physical whole-string movement.
+Measure source size, tape travel and Tritium time, then extract only reusable
+ideas such as generic index remapping, deferred permutation, or cursor-aware
+access.
+
+Rules:
+
+1. keep specialized BF/harnesses clearly separated from public compiler code;
+2. never dispatch on a problem name, exact source text, or expected answer;
+3. compare the specialized baseline with ordinary-Python compiler output;
+4. promote an idea only after it is phrased as a semantics-preserving reusable
+   transformation/runtime primitive and covered by non-problem-specific tests;
+5. record failed golf structures too when they reveal a tape-movement lower
+   bound or an architectural dead end.
 
 ---
 
@@ -750,12 +794,12 @@ Do not trust only an older green run if the current head has newer commits.
 
 ## Step 3 — determine current milestone
 
-At document creation time:
+At the latest local handoff:
 
 ```text
 S1a = DONE + four-shard green
-S1b = IMPLEMENTED, NOT YET VERIFIED
-S1c = NOT STARTED
+S1b = DONE + local boundary/full-suite verification
+S1c = DONE + local primitive/full-suite verification; head CI pending
 S1d = NOT STARTED
 S1e = NOT STARTED
 S2  = NOT STARTED
@@ -763,7 +807,7 @@ S3  = NOT STARTED
 S4  = NOT STARTED
 ```
 
-The immediate next action is S1b boundary-test completion.
+The immediate next action is to confirm current-head CI, then implement S1d.
 
 ## Step 4 — update this file after each milestone
 
