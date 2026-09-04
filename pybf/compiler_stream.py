@@ -1,10 +1,12 @@
 """Final streaming compiler router with narrow scalable whole-program lowering.
 
 The established generic implementation lives in ``compiler_stream_generic``.
-``compiler_stream_intfusion`` adds dead-list producer/consumer fusion and
+``compiler_stream_intfusion`` adds dead-list producer/consumer fusion,
 ``compiler_charconv`` adds zero-copy character-list views plus explicit
-int/string conversions.  This module keeps the separately proven whole-program
-specializations in front of those generic layers.
+int/string conversions, and ``compiler_decimalconv`` makes dynamic decimal
+string parsing source-compact by emitting one runtime digit-update loop.  This
+module keeps the separately proven whole-program specializations in front of
+those generic layers.
 """
 
 from __future__ import annotations
@@ -12,8 +14,8 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
-from compiler_charconv import CompileError
-from compiler_charconv import PythonToBFStream as _GenericPythonToBFStream
+from compiler_decimalconv import CompileError
+from compiler_decimalconv import PythonToBFStream as _GenericPythonToBFStream
 from compiler_partition import lower_partition_program_if_supported
 
 
