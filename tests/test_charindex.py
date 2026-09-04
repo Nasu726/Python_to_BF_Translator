@@ -121,6 +121,23 @@ print("".join(chars))
     assert result.output == "xy\n"
 
 
+def test_length_cache_identity_survives_payload_storage_reuse():
+    source = '''
+first = list(input())
+print(first[1])
+second = list(input())
+print(second[-1])
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "abc\nwxyz\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "b\nz\n"
+
+
 def test_join_assignment_snapshots_mutable_character_view():
     source = '''
 chars = list(input())
