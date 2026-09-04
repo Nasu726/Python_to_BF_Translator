@@ -32,6 +32,91 @@ from compiler_charconv import CompileError, _is_list_input
 from compiler_charconv import PythonToBFStream as _BasePythonToBFStream
 
 
+def _must_char_value_names(tree: ast.AST, char_lists: set[str]) -> set[str]:
+    """Return names whose every write is provably a one-character string.
+
+    The earlier compatibility layer used an existential rule: once a name had
+    ever received ``chars[i]`` it remained classified as one-character forever.
+    That is unsound after a later assignment such as ``tmp = "XY"``.  Character
+    stores would then silently use only ``tmp[0]``.
+
+    This conservative must-analysis records every simple assignment / for-loop
+    write that the current compiler understands and compares that count with all
+    ``Store`` occurrences for the name.  A name qualifies only when every write
+    is accounted for and every producer is itself known to be one character.
+    """
+    stores: dict[str, int] = {}
+    writes: dict[str, list[tuple[str, ast.AST]]] = {}
+    accounted: dict[str, int] = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            stores[node.id] = stores.get(node.id, 0) + 1
+
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            name = node.targets[0].id
+            writes.setdefault(name, []).append(("assign", node.value))
+            accounted[name] = accounted.get(name, 0) + 1
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            name = node.target.id
+            writes.setdefault(name, []).append(("assign", node.value))
+            accounted[name] = accounted.get(name, 0) + 1
+        elif isinstance(node, ast.For) and isinstance(node.target, ast.Name):
+            name = node.target.id
+            writes.setdefault(name, []).append(("for", node.iter))
+            accounted[name] = accounted.get(name, 0) + 1
+
+    candidates = {
+        name
+        for name, producers in writes.items()
+        if name not in char_lists
+        and producers
+        and accounted.get(name, 0) == stores.get(name, 0)
+    }
+
+    result: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name in candidates - result:
+            one_char = True
+            for kind, producer in writes[name]:
+                if kind == "for":
+                    ok = (
+                        isinstance(producer, ast.Name)
+                        and producer.id in char_lists
+                    )
+                else:
+                    ok = (
+                        isinstance(producer, ast.Constant)
+                        and isinstance(producer.value, str)
+                        and len(producer.value) == 1
+                    ) or (
+                        isinstance(producer, ast.Subscript)
+                        and isinstance(producer.value, ast.Name)
+                        and producer.value.id in char_lists
+                    ) or (
+                        isinstance(producer, ast.Name)
+                        and producer.id in result
+                    )
+                if not ok:
+                    one_char = False
+                    break
+            if one_char:
+                result.add(name)
+                changed = True
+
+    return result
+
+
 class PythonToBFStream(_BasePythonToBFStream):
     """Character-view compiler with safe rotation-based indexing."""
 
@@ -47,6 +132,12 @@ class PythonToBFStream(_BasePythonToBFStream):
             string_capacity=string_capacity,
             list_capacity=list_capacity,
         )
+
+        # Tighten the compatibility layer's provisional character-name
+        # inference before statement lowering starts.  Type/layout inference has
+        # already happened, but this set only controls whether a later mutable
+        # character-list store is semantically permitted.
+        self.char_value_names = _must_char_value_names(tree, self.char_list_names)
 
         # These words are allocated before statement lowering begins. Every
         # compile_stmt mark therefore starts above them, so statement-local temp
