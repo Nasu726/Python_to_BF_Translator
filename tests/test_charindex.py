@@ -158,6 +158,40 @@ print(other)
     assert result.output == "a\nXYZ\n"
 
 
+def test_string_source_liveness_survives_str_inference_rewrite():
+    source = '''
+source = input()
+copy = str(source)
+copy = input()
+print(str(source))
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "alpha\nbeta\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "alpha\n"
+
+
+def test_int_source_liveness_survives_str_inference_rewrite():
+    source = '''
+n = int(input())
+text = str(n)
+other = int(input())
+print(str(n))
+'''
+    code = _compile(source)
+    result = run_bf(
+        code,
+        "12345\n67890\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "12345\n"
+
+
 def test_join_assignment_snapshots_mutable_character_view():
     source = '''
 chars = list(input())
