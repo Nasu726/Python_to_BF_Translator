@@ -4,9 +4,10 @@ This is the scalable raw-byte storage vertical slice used before public Python
 container routing. Runtime record count is not a compiler parameter: one fixed
 Brainfuck record loop grows and revisits tape storage at runtime.
 
-Records are now eight-byte chunks::
+Records are now eight-byte chunks with a dormant cursor carrier::
 
     [marker][back][count][length-carrier:4][payload:8]
+    [cursor-value]
 
 ``marker == 1`` means a materialized chunk, ``back`` is zero on record zero and
 one on later records/sentinels, and ``count`` is the number of valid payload
@@ -37,7 +38,7 @@ from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Ref
 
 
-RECORD_STRIDE = 15
+RECORD_STRIDE = 16
 MARKER = 0
 BACK = 1
 COUNT = 2
@@ -45,6 +46,8 @@ LENGTH = 3
 LENGTH_BYTES = 4
 PAYLOAD0 = 7
 PAYLOAD_BYTES = 8
+CURSOR_VALUE = 15
+CURSOR_POSITION = LENGTH + LENGTH_BYTES - 1
 
 # Rolling construction scratch occupies the payload of the next,
 # still-unmaterialized record. All eight cells are scrubbed before that record
@@ -594,6 +597,212 @@ def _finish_store_code() -> str:
     return r.code()
 
 
+@lru_cache(maxsize=2)
+def _cursor_seek_code(direction: int) -> str:
+    """Consume a local packed record delta while retaining a mobile cursor.
+
+    The code starts and finishes at ``CURSOR_POSITION`` in whichever runtime
+    record is current. Each loop iteration moves the value carrier and the
+    remaining delta by exactly one record. The literal BF loop is therefore
+    source-size independent of both the sequence length and represented delta.
+
+    ``direction`` is +1 or -1. The caller must have range-normalized the
+    relative record coordinate; walking beyond either sequence boundary is not
+    part of this deliberately low-level cursor ABI.
+    """
+    if direction not in (-1, 1):
+        raise ValueError("cursor direction must be -1 or 1")
+
+    r = _RelativeBuilder(CURSOR_POSITION)
+    neighbor = direction * RECORD_STRIDE
+
+    # A valid byte index occupies at most 29 record-index bits after division
+    # by eight. Bit 31 of the high counter byte is therefore free and doubles
+    # as the mobile loop flag, avoiding another per-record control cell.
+    # The following record is materialized or the zero sentinel and has clean
+    # LENGTH scratch, so it can host the initial zero-test in either direction.
+    probe = RECORD_STRIDE + LENGTH
+    _is_zero_u32(r, LENGTH, probe, probe + 1, probe + 2)
+    r.set_const(probe + 3, 1)
+    r.move(probe)
+    r.emit("[")
+    r.add(probe, -1)
+    r.clear(probe + 3)
+    r.move(probe)
+    r.emit("]")
+    r.move(probe + 3)
+    r.emit("[")
+    r.add(probe + 3, -1)
+    r.add(CURSOR_POSITION, 128)
+    r.move(probe + 3)
+    r.emit("]")
+
+    r.move(CURSOR_POSITION)
+    r.emit("[")
+    r.add(CURSOR_POSITION, -128)
+
+    # The destination LENGTH cells are known-zero cursor scratch. Borrow them
+    # for a packed decrement, then use them as the next mobile counter.
+    neighbor_length = neighbor + LENGTH
+    _decrement_u32(
+        r,
+        LENGTH,
+        neighbor_length,
+        neighbor_length + 1,
+        neighbor_length + 2,
+        neighbor_length + 3,
+    )
+    for byte_index in range(LENGTH_BYTES):
+        r.transfer(LENGTH + byte_index, neighbor_length + byte_index)
+
+    # A value loaded earlier in the session follows the physical cursor.
+    r.transfer(CURSOR_VALUE, neighbor + CURSOR_VALUE)
+
+    # Re-arm at the destination iff another record step remains. The source
+    # record's LENGTH cells are zero after the transfer and form local scratch.
+    _is_zero_u32(r, neighbor_length, LENGTH, LENGTH + 1, LENGTH + 2)
+    r.set_const(LENGTH + 3, 1)
+    r.move(LENGTH)
+    r.emit("[")
+    r.add(LENGTH, -1)
+    r.clear(LENGTH + 3)
+    r.move(LENGTH)
+    r.emit("]")
+    r.move(LENGTH + 3)
+    r.emit("[")
+    r.add(LENGTH + 3, -1)
+    r.add(neighbor + CURSOR_POSITION, 128)
+    r.move(LENGTH + 3)
+    r.emit("]")
+    r.move(neighbor + CURSOR_POSITION)
+    r.emit("]")
+
+    # The loop body is translation-invariant: on each back-edge the physical
+    # pointer is the control field of the new current record. Reset only the
+    # builder's compile-time coordinate for code emitted after the loop.
+    r.pos = CURSOR_POSITION
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _cursor_read_u32_code() -> str:
+    r = _RelativeBuilder(CURSOR_POSITION)
+    for byte_index in range(LENGTH_BYTES):
+        r.clear(LENGTH + byte_index)
+        r.move(LENGTH + byte_index)
+        r.emit(",")
+    r.move(CURSOR_POSITION)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _cursor_load_lane_code() -> str:
+    """Read a lane byte and load that payload into the mobile value."""
+    r = _RelativeBuilder(CURSOR_POSITION)
+    r.clear(LENGTH)
+    r.move(LENGTH)
+    r.emit(",")
+    r.clear(CURSOR_VALUE)
+
+    for lane_index in range(PAYLOAD_BYTES):
+        _set_equal_const(
+            r,
+            CURSOR_POSITION,
+            LENGTH,
+            lane_index,
+            LENGTH + 1,
+            LENGTH + 2,
+        )
+        r.move(CURSOR_POSITION)
+        r.emit("[")
+        r.add(CURSOR_POSITION, -1)
+        r.copy_preserved(PAYLOAD0 + lane_index, CURSOR_VALUE, LENGTH + 1)
+        r.move(CURSOR_POSITION)
+        r.emit("]")
+
+    for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
+        r.clear(cell)
+    r.move(CURSOR_POSITION)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _cursor_store_lane_code() -> str:
+    """Read a lane byte and store the preserved mobile value into that lane."""
+    r = _RelativeBuilder(CURSOR_POSITION)
+    r.clear(LENGTH)
+    r.move(LENGTH)
+    r.emit(",")
+
+    for lane_index in range(PAYLOAD_BYTES):
+        _set_equal_const(
+            r,
+            CURSOR_POSITION,
+            LENGTH,
+            lane_index,
+            LENGTH + 1,
+            LENGTH + 2,
+        )
+        r.move(CURSOR_POSITION)
+        r.emit("[")
+        r.add(CURSOR_POSITION, -1)
+        r.copy_preserved(CURSOR_VALUE, PAYLOAD0 + lane_index, LENGTH + 1)
+        r.move(CURSOR_POSITION)
+        r.emit("]")
+
+    for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
+        r.clear(cell)
+    r.move(CURSOR_POSITION)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _cursor_exchange_lane_code() -> str:
+    """Swap the mobile value with an input-selected payload lane."""
+    r = _RelativeBuilder(CURSOR_POSITION)
+    r.clear(LENGTH)
+    r.move(LENGTH)
+    r.emit(",")
+
+    for lane_index in range(PAYLOAD_BYTES):
+        _set_equal_const(
+            r,
+            CURSOR_POSITION,
+            LENGTH,
+            lane_index,
+            LENGTH + 1,
+            LENGTH + 2,
+        )
+        r.move(CURSOR_POSITION)
+        r.emit("[")
+        r.add(CURSOR_POSITION, -1)
+        r.clear(LENGTH + 1)
+        r.transfer(PAYLOAD0 + lane_index, LENGTH + 1)
+        r.transfer(CURSOR_VALUE, PAYLOAD0 + lane_index)
+        r.transfer(LENGTH + 1, CURSOR_VALUE)
+        r.move(CURSOR_POSITION)
+        r.emit("]")
+
+    for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
+        r.clear(cell)
+    r.move(CURSOR_POSITION)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _cursor_return_to_base_code() -> str:
+    """Carry the mobile value left and finish at the fixed base marker."""
+    r = _RelativeBuilder(CURSOR_POSITION)
+    r.move(BACK)
+    r.emit("[")
+    r.transfer(CURSOR_VALUE, -RECORD_STRIDE + CURSOR_VALUE)
+    r.move(-RECORD_STRIDE + BACK)
+    r.emit("]")
+    r.pos = BACK
+    r.move(MARKER)
+    return r.code()
+
+
 def _store_ch_in_selected_lane(r: _RelativeBuilder) -> None:
     """Move CH into payload[LANE], where LANE is statically bounded to 0..7."""
     for lane_index in range(PAYLOAD_BYTES):
@@ -1032,6 +1241,19 @@ class RuntimeByteSequence:
         bf.emit(_finish_store_code())
         bf.ptr = self.base
 
+    def open_cursor(self, bf: BFEmitter) -> "RuntimeByteCursor":
+        """Open a scoped physical-record cursor at the sequence base.
+
+        The returned cursor emits only translation-invariant, record-relative
+        code until ``finish`` returns to the fixed base. Callers must not emit
+        ordinary fixed-address ``BFEmitter`` operations while the cursor is
+        open. Relative record deltas must already be range-normalized; this
+        internal ABI is intended for sequential or safely batched lowering,
+        while ``load_byte`` / ``store_byte`` remain the range-safe public
+        random-access primitives.
+        """
+        return RuntimeByteCursor(self, bf)
+
     def load_byte_signed(self, bf: BFEmitter, dst: int, index: PackedI64Ref) -> None:
         """Load using Python-style signed negative-index normalization."""
         self._check_layout()
@@ -1049,6 +1271,143 @@ class RuntimeByteSequence:
         bf.move(self.base)
 
 
+class RuntimeByteCursor:
+    """Scoped mobile frame for cursor-relative byte-sequence operations.
+
+    The physical BF pointer may be at a runtime-dependent record while this
+    object is active. Its methods are consequently the only supported emitter
+    operations inside the scope. ``seek_from_input`` consumes two packed-u32
+    record deltas (forward, then backward); canonical callers encode at most
+    one as nonzero. A valid delta is at most ``0x1fffffff`` because a u32 byte
+    index addresses eight-byte records. Lane operations consume a following
+    raw lane byte in ``0..7``.
+
+    ``begin_input_loop`` / ``end_input_loop`` implement a mobile loop whose
+    one-byte continuation flag is read both before the first iteration and
+    after every iteration. The single cursor carrier doubles as this loop flag
+    between iterations and as the loaded byte inside an iteration. This keeps
+    the record stride small while retaining the physical cursor between
+    queries.
+    """
+
+    def __init__(self, sequence: RuntimeByteSequence, bf: BFEmitter) -> None:
+        sequence._check_layout()
+        self.sequence = sequence
+        self.bf = bf
+        self._active = True
+        self._input_loop_open = False
+
+        bf.clear(sequence.base + CURSOR_VALUE)
+        for byte_index in range(LENGTH_BYTES):
+            bf.clear(sequence.base + LENGTH + byte_index)
+        bf.move(sequence.base + CURSOR_POSITION)
+
+    def _require_active(self) -> None:
+        if not self._active:
+            raise RuntimeError("runtime byte cursor is already finished")
+
+    def _emit(self, code: str) -> None:
+        self._require_active()
+        self.bf.emit(code)
+        # This is a logical coordinate only. At runtime the pointer is the same
+        # field in an unknown record until finish() walks back to the base.
+        self.bf.ptr = self.sequence.base + CURSOR_POSITION
+
+    def begin_input_loop(self) -> None:
+        """Read the first 0/1 continuation flag and begin a mobile loop."""
+        self._require_active()
+        if self._input_loop_open:
+            raise RuntimeError("runtime byte cursor input loop is already open")
+        r = _RelativeBuilder(CURSOR_POSITION)
+        r.clear(CURSOR_VALUE)
+        r.move(CURSOR_VALUE)
+        r.emit(",[")
+        r.clear(CURSOR_VALUE)
+        r.move(CURSOR_POSITION)
+        self._emit(r.code())
+        self._input_loop_open = True
+
+    def end_input_loop(self) -> None:
+        """Read the next continuation flag and close the mobile loop."""
+        self._require_active()
+        if not self._input_loop_open:
+            raise RuntimeError("runtime byte cursor input loop is not open")
+        r = _RelativeBuilder(CURSOR_POSITION)
+        # A query body may leave a loaded/exchanged byte in the carrier. It is
+        # dead at the iteration boundary where the next continuation flag is
+        # read, so clear it before reusing the same cell as the mobile loop bit.
+        r.clear(CURSOR_VALUE)
+        r.move(CURSOR_VALUE)
+        r.emit(",]")
+        r.move(CURSOR_POSITION)
+        self._emit(r.code())
+        self._input_loop_open = False
+
+    def seek_forward_from_input(self) -> None:
+        """Read and consume a packed-u32 forward record delta."""
+        self._emit(_cursor_read_u32_code())
+        self._emit(_cursor_seek_code(1))
+
+    def seek_backward_from_input(self) -> None:
+        """Read and consume a packed-u32 backward record delta."""
+        self._emit(_cursor_read_u32_code())
+        self._emit(_cursor_seek_code(-1))
+
+    def seek_from_input(self) -> None:
+        """Read forward/backward deltas; at most one is canonically nonzero."""
+        self.seek_forward_from_input()
+        self.seek_backward_from_input()
+
+    def load_lane_from_input(self) -> None:
+        """Read a lane byte and load it into the mobile value."""
+        self._emit(_cursor_load_lane_code())
+
+    def store_lane_from_input(self) -> None:
+        """Read a lane byte and store the preserved mobile value."""
+        self._emit(_cursor_store_lane_code())
+
+    def exchange_lane_from_input(self) -> None:
+        """Exchange the mobile value with an input-selected payload lane."""
+        self._emit(_cursor_exchange_lane_code())
+
+    def output_value(self) -> None:
+        """Write the mobile value byte without consuming it."""
+        r = _RelativeBuilder(CURSOR_POSITION)
+        r.move(CURSOR_VALUE)
+        r.emit(".")
+        r.move(CURSOR_POSITION)
+        self._emit(r.code())
+
+    def clear_value(self) -> None:
+        r = _RelativeBuilder(CURSOR_POSITION)
+        r.clear(CURSOR_VALUE)
+        r.move(CURSOR_POSITION)
+        self._emit(r.code())
+
+    def finish(self, *, dst: int | None = None) -> None:
+        """Return to the fixed base, optionally copying out the mobile value."""
+        self._require_active()
+        if self._input_loop_open:
+            raise RuntimeError("finish() called with an open cursor input loop")
+
+        self._emit(_cursor_return_to_base_code())
+        self.bf.ptr = self.sequence.base
+
+        field = self.sequence.base + CURSOR_VALUE
+        if dst is not None:
+            if dst == field:
+                raise ValueError("cursor destination must be outside its frame")
+            _copy_cell_preserved(
+                self.bf,
+                field,
+                dst,
+                self.sequence._fixed_access_tmp,
+            )
+        self.bf.clear(field)
+        self.bf.move(self.sequence.base)
+        self._active = False
+
+
 __all__ = [
     "RECORD_STRIDE",
     "MARKER",
@@ -1058,5 +1417,8 @@ __all__ = [
     "LENGTH_BYTES",
     "PAYLOAD0",
     "PAYLOAD_BYTES",
+    "CURSOR_VALUE",
+    "CURSOR_POSITION",
     "RuntimeByteSequence",
+    "RuntimeByteCursor",
 ]

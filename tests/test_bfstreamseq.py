@@ -7,6 +7,7 @@ from bfpacked64 import PackedI64Ref
 from bfstreamseq import (
     BACK,
     COUNT,
+    CURSOR_VALUE,
     LENGTH,
     LENGTH_BYTES,
     MARKER,
@@ -159,6 +160,128 @@ def _dynamic_signed_normalization_program():
     return bf.code(), seq, index, normalized
 
 
+def _runtime_swap_loop_program():
+    bf = BFEmitter()
+    query_count = 0
+    left_index = PackedU32Ref(1)
+    right_index = PackedU32Ref(5)
+    left_value = 9
+    right_value = 10
+    seq = RuntimeByteSequence(base=96)
+
+    seq.read_lf_terminated_bytes(bf)
+    bf.move(query_count)
+    bf.emit(",")
+    bf.begin_while(query_count)
+    for index in (left_index, right_index):
+        for byte_index in range(4):
+            bf.move(index.byte(byte_index))
+            bf.emit(",")
+    seq.load_byte(bf, left_value, left_index)
+    seq.load_byte(bf, right_value, right_index)
+    seq.store_byte(bf, left_index, right_value)
+    seq.store_byte(bf, right_index, left_value)
+    bf.add_const(query_count, -1)
+    bf.end_while(query_count)
+    seq.write_all_bytes(bf)
+    return bf.code(), seq
+
+
+def _cursor_load_loop_program():
+    bf = BFEmitter()
+    seq = RuntimeByteSequence(base=96)
+    seq.read_lf_terminated_bytes(bf)
+    cursor = seq.open_cursor(bf)
+    cursor.begin_input_loop()
+    cursor.seek_from_input()
+    cursor.load_lane_from_input()
+    cursor.output_value()
+    cursor.end_input_loop()
+    cursor.finish()
+    seq.write_all_bytes(bf)
+    return bf.code(), seq
+
+
+def _cursor_swap_loop_program():
+    bf = BFEmitter()
+    seq = RuntimeByteSequence(base=96)
+    seq.read_lf_terminated_bytes(bf)
+    cursor = seq.open_cursor(bf)
+    cursor.begin_input_loop()
+    cursor.seek_from_input()
+    cursor.load_lane_from_input()
+    cursor.seek_from_input()
+    cursor.exchange_lane_from_input()
+    cursor.seek_from_input()
+    cursor.exchange_lane_from_input()
+    cursor.end_input_loop()
+    cursor.finish()
+    seq.write_all_bytes(bf)
+    return bf.code(), seq
+
+
+def _cursor_copy_program():
+    bf = BFEmitter()
+    dst = 0
+    seq = RuntimeByteSequence(base=96)
+    seq.read_lf_terminated_bytes(bf)
+    cursor = seq.open_cursor(bf)
+    cursor.seek_forward_from_input()
+    cursor.load_lane_from_input()
+    cursor.seek_backward_from_input()
+    cursor.store_lane_from_input()
+    cursor.finish(dst=dst)
+    bf.move(dst)
+    bf.emit(".")
+    seq.write_all_bytes(bf)
+    return bf.code(), seq, dst
+
+
+def _cursor_transition(current_record, target_record):
+    if target_record >= current_record:
+        return _raw_u32(target_record - current_record) + _raw_u32(0)
+    return _raw_u32(0) + _raw_u32(current_record - target_record)
+
+
+def _encode_cursor_loads(indices):
+    if not indices:
+        return "\0"
+
+    encoded = ["\1"]
+    current_record = 0
+    for offset, index in enumerate(indices):
+        target_record, lane = divmod(index, PAYLOAD_BYTES)
+        encoded.append(_cursor_transition(current_record, target_record))
+        encoded.append(chr(lane))
+        encoded.append("\1" if offset + 1 < len(indices) else "\0")
+        current_record = target_record
+    return "".join(encoded)
+
+
+def _encode_cursor_swaps(queries):
+    if not queries:
+        return "\0"
+
+    encoded = ["\1"]
+    current_record = 0
+    for offset, (left, right) in enumerate(queries):
+        left_record, left_lane = divmod(left, PAYLOAD_BYTES)
+        right_record, right_lane = divmod(right, PAYLOAD_BYTES)
+        encoded.extend(
+            (
+                _cursor_transition(current_record, left_record),
+                chr(left_lane),
+                _cursor_transition(left_record, right_record),
+                chr(right_lane),
+                _cursor_transition(right_record, left_record),
+                chr(left_lane),
+                "\1" if offset + 1 < len(queries) else "\0",
+            )
+        )
+        current_record = left_record
+    return "".join(encoded)
+
+
 def _assert_runtime_scratch_is_clean(result, seq, length):
     record_count = len(_expected_counts(length))
     for record in range(record_count + 1):
@@ -166,11 +289,13 @@ def _assert_runtime_scratch_is_clean(result, seq, length):
         assert result.memory[record_base + LENGTH : record_base + LENGTH + LENGTH_BYTES] == [
             0
         ] * LENGTH_BYTES
+        assert result.memory[record_base + CURSOR_VALUE] == 0
 
 
 def _assert_normalization_scratch_is_clean(result, seq):
+    start = seq.left_sentinel + PAYLOAD0
     assert result.memory[
-        seq.left_sentinel + PAYLOAD0 : seq.left_sentinel + RECORD_STRIDE
+        start : start + PAYLOAD_BYTES
     ] == [0] * PAYLOAD_BYTES
 
 
@@ -193,6 +318,25 @@ def test_runtime_sequence_uses_one_source_program_for_longer_runtime_input():
     # parameter in code generation, so the emitted program stays compact.
     assert len(code) == source_size
     assert source_size < 5_000
+
+
+@pytest.mark.parametrize("length", (1024, 4097))
+def test_runtime_sequence_roundtrips_kilobyte_scale_lines(length):
+    code = _roundtrip_program()
+    payload = _payload(length)
+    seq = RuntimeByteSequence(base=64)
+    memory_size = seq.base + ((length + 7) // 8 + 3) * RECORD_STRIDE
+
+    result = run_bf(
+        code,
+        payload + "\n",
+        memory_size=memory_size,
+        step_limit=200_000_000,
+    )
+
+    assert result.output == payload
+    assert result.pointer == seq.base
+    assert len(code) < 5_000
 
 
 def test_runtime_length_is_carried_back_to_fixed_sentinel_metadata():
@@ -539,3 +683,152 @@ def test_signed_index_normalization_handles_packed_borrow_boundaries(
     assert _u32_at(result.memory, index_ref.base) == (index & 0xFFFFFFFF)
     assert _u32_at(result.memory, index_ref.base + 4) == ((index >> 32) & 0xFFFFFFFF)
     assert result.pointer == seq.base
+
+
+def test_runtime_index_operations_are_reentrant_inside_a_query_loop():
+    code, seq = _runtime_swap_loop_program()
+    payload = _payload(17)
+    queries = ((0, 16), (7, 8), (1, 2), (16, 16))
+    expected = list(payload)
+    encoded_queries = []
+    for left, right in queries:
+        expected[left], expected[right] = expected[right], expected[left]
+        encoded_queries.append(_raw_u32(left) + _raw_u32(right))
+
+    result = run_bf(
+        code,
+        payload + "\n" + chr(len(queries)) + "".join(encoded_queries),
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    assert result.output == "".join(expected)
+    assert result.memory[0] == 0
+    assert _u32_at(result.memory, seq.length_ref.base) == len(payload)
+    assert result.pointer == seq.base
+    assert set(code) <= BF_COMMANDS
+    assert len(code) < 128 * 1024
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_cursor_load_loop_retains_runtime_record_and_moves_both_directions():
+    code, seq = _cursor_load_loop_program()
+    payload = _payload(40)
+    indices = (0, 7, 8, 31, 16, 17, 1, 39)
+    selected = "".join(payload[index] for index in indices)
+
+    result = run_bf(
+        code,
+        payload + "\n" + _encode_cursor_loads(indices),
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    assert result.output == selected + payload
+    assert _u32_at(result.memory, seq.length_ref.base) == len(payload)
+    assert result.pointer == seq.base
+    assert set(code) <= BF_COMMANDS
+    assert len(code) < 32 * 1024
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_cursor_record_delta_crosses_packed_255_256_borrow_boundary():
+    code, seq = _cursor_load_loop_program()
+    payload = _payload(2057)
+    indices = (2040, 2048, 0)
+    selected = "".join(payload[index] for index in indices)
+    memory_size = seq.base + ((len(payload) + 7) // 8 + 3) * RECORD_STRIDE
+
+    result = run_bf(
+        code,
+        payload + "\n" + _encode_cursor_loads(indices),
+        memory_size=memory_size,
+        step_limit=200_000_000,
+    )
+
+    assert result.output == selected + payload
+    assert result.pointer == seq.base
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_cursor_swap_loop_handles_same_cross_chunk_and_reversed_paths():
+    code, seq = _cursor_swap_loop_program()
+    payload = _payload(40)
+    queries = ((0, 39), (7, 8), (24, 17), (31, 31), (1, 33))
+    expected = list(payload)
+    for left, right in queries:
+        expected[left], expected[right] = expected[right], expected[left]
+
+    result = run_bf(
+        code,
+        payload + "\n" + _encode_cursor_swaps(queries),
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    assert result.output == "".join(expected)
+    assert _u32_at(result.memory, seq.length_ref.base) == len(payload)
+    assert result.pointer == seq.base
+    assert set(code) <= BF_COMMANDS
+    assert len(code) < 64 * 1024
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_cursor_finish_carries_value_to_static_cell_and_store_preserves_it():
+    code, seq, dst = _cursor_copy_program()
+    payload = _payload(40)
+    expected = list(payload)
+    expected[1] = payload[39]
+    cursor_input = _raw_u32(4) + chr(7) + _raw_u32(4) + chr(1)
+
+    result = run_bf(
+        code,
+        payload + "\n" + cursor_input,
+        memory_size=30_000,
+        step_limit=100_000_000,
+    )
+
+    assert result.output == payload[39] + "".join(expected)
+    assert result.memory[dst] == ord(payload[39])
+    assert result.pointer == seq.base
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_empty_cursor_query_loop_is_a_noop_and_restores_static_pointer():
+    code, seq = _cursor_swap_loop_program()
+    payload = _payload(17)
+    result = run_bf(
+        code,
+        payload + "\n\0",
+        memory_size=30_000,
+        step_limit=20_000_000,
+    )
+
+    assert result.output == payload
+    assert result.pointer == seq.base
+    _assert_runtime_scratch_is_clean(result, seq, len(payload))
+
+
+def test_cursor_tail_local_swaps_avoid_repeated_root_roundtrips():
+    rooted_code, _ = _runtime_swap_loop_program()
+    cursor_code, seq = _cursor_swap_loop_program()
+    payload = _payload(64)
+    queries = tuple((55 + offset, 56 + offset) for offset in range(8))
+    expected = list(payload)
+    for left, right in queries:
+        expected[left], expected[right] = expected[right], expected[left]
+
+    rooted_input = payload + "\n" + chr(len(queries)) + "".join(
+        _raw_u32(left) + _raw_u32(right) for left, right in queries
+    )
+    cursor_input = payload + "\n" + _encode_cursor_swaps(queries)
+    rooted = run_bf(rooted_code, rooted_input, step_limit=100_000_000)
+    cursor = run_bf(cursor_code, cursor_input, step_limit=100_000_000)
+
+    assert rooted.output == cursor.output == "".join(expected)
+    # This is an architecture regression gate, not an AtCoder wall-clock
+    # prediction. Retaining the record cursor must materially beat six rooted
+    # walks per swap even after including the shared input/replay baseline.
+    assert cursor.steps * 5 < rooted.steps
+    assert cursor.pointer == seq.base
+    _assert_runtime_scratch_is_clean(cursor, seq, len(payload))
