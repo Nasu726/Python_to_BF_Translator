@@ -75,6 +75,17 @@ print("".join(chars))
         _compile(source)
 
 
+@pytest.mark.parametrize("value", ["\x00", "🙂"])
+def test_character_list_rejects_values_outside_nonzero_byte_abi(value):
+    source = f'''
+chars = list(input())
+chars[0] = {value!r}
+print("".join(chars))
+'''
+    with pytest.raises(CompileError):
+        _compile(source)
+
+
 def test_cached_length_refreshes_when_char_list_is_read_again():
     source = '''
 chars = list(input())
