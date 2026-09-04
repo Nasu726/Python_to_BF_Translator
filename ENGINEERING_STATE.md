@@ -144,6 +144,15 @@ The emitted source remains independent of runtime N.
 
 ## General runtime object/list foundation
 
+### [MILESTONE: PR #9 dynamic byte sequence]
+
+`bfstreamseq.RuntimeByteSequence` now stores eight payload bytes per 15-cell
+runtime record, carries a packed-u32 length back once after input, and supports
+source-size-independent packed-u32 load/store. Signed packed-int64 wrappers
+normalize Python-style negative indices once against runtime length and reject
+values outside u32/range without low-byte wrapping. S1e cursor/telemetry remains
+before public scalable character-list routing.
+
 ### [MILESTONE: general scalable Python lists]
 
 PR #6 also contains reusable but still experimental pieces:

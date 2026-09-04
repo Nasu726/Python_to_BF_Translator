@@ -200,6 +200,14 @@ S1 acceptance gates:
 - raw-step telemetry for sequential and indexed operations is recorded before
   frontend integration.
 
+Current Stage S1 status on PR #9:
+
+- runtime length carrier: complete;
+- eight-byte chunking and partial-final-chunk replay: complete;
+- non-negative packed-u32 load/store: complete;
+- signed-int64 negative normalization and range guarding: complete locally;
+- cursor-aware access and distribution telemetry: next active milestone.
+
 The heap-backed `bfdynlist`/`bfheap` machinery remains useful for later true
 object identity and multiple dynamic objects, but its current linked/handle
 lookup is not the default backing for this flat character sequence. The flat

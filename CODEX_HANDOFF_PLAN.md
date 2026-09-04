@@ -215,41 +215,42 @@ Status at handoff:
 
 ### Last known GitHub-verified baseline
 
-The pre-S1c branch head `277e01034a825cbba65717b70c048ea17f7ca9a3`
-was verified by workflow run #478:
+The S1b/S1c branch head `5bdfe17377c0620c1b7ed99125b3f7fcc5cdddfc`
+was verified by workflow run #479:
 
 - arithmetic: green
 - runtime: green
 - frontend: green
 - contest: green
 
-That baseline includes S1a and the first S1b implementation. The S1b-specific
-boundary matrix was added and verified locally in the next implementation
-commit described below.
+That baseline includes the S1b boundary matrix and S1c non-negative runtime
+index load/store.
 
 ### Current implementation commit / active work
 
 Latest implementation commit in this work session:
 
 ```text
-d136924c6e8fffca85abd6110ca7aa5d24c142ae
+cf85c7a6d033caf0ab805cc9cd6ed9ec21f6aab3
 ```
 
-It completes the missing S1b verification matrix and adds S1c non-negative
-runtime index load/store. Local verification after the implementation:
+It adds S1d signed/negative runtime index normalization on top of the remotely
+verified S1b/S1c baseline. Verification in the current work session:
 
-- focused runtime-byte-sequence tests: **54 passed**;
-- complete repository suite before the final three swap cases were added:
-  **348 passed**;
-- the three final repeated-operation/swap cases also pass;
+- focused runtime-byte-sequence tests after S1d: **102 passed**;
+- complete repository suite through the main S1d boundary matrix:
+  **384 passed**;
+- the final 15 packed-borrow normalization cases also pass;
 - S1b read source: **4,298 bytes**;
 - S1b read + replay source: **4,819 bytes**;
 - dynamic-index load fixture: **21,057 bytes**;
 - dynamic-index store fixture: **21,447 bytes**;
-- two-load/two-store swap fixture: **74,083 bytes**.
+- two-load/two-store swap fixture: **74,083 bytes**;
+- signed-index load fixture: **30,405 bytes**;
+- signed-index store fixture: **30,785 bytes**.
 
-The new commit still needs GitHub four-shard CI. Do not call S1c remotely
-verified until that run is green.
+The S1d implementation commit still needs GitHub four-shard CI. Do not call S1d
+remotely verified until that run is green.
 
 Current intended persistent record layout:
 
@@ -277,8 +278,8 @@ The S1b implementation uses one runtime loop per chunk and a bounded 0..7 lane s
 
 Do **not** start frontend integration yet.
 
-Resume at **S1d negative-index normalization**, after confirming the current
-PR head's four-shard CI.
+Resume at **S1e cursor/telemetry**, after confirming the current PR head's
+four-shard CI.
 
 ## Completed S1b verification matrix
 
@@ -355,7 +356,7 @@ Verified boundaries include at least 0/1/7/8/9/255/256.
 
 ---
 
-## S1b — eight-byte chunking — DONE / LOCALLY VERIFIED
+## S1b — eight-byte chunking — DONE / VERIFIED
 
 Goal:
 
@@ -379,7 +380,7 @@ under the original 5,000-byte gate.
 
 ---
 
-## S1c — non-negative runtime index load/store — DONE / LOCALLY VERIFIED
+## S1c — non-negative runtime index load/store — DONE / VERIFIED
 
 Logical decomposition:
 
@@ -431,7 +432,7 @@ two-load/two-store swaps. Python negative indexing remains isolated for S1d.
 
 ---
 
-## S1d — negative index + range normalization
+## S1d — negative index + range normalization — DONE / LOCALLY VERIFIED
 
 Use runtime length to normalize:
 
@@ -449,6 +450,14 @@ Then verify:
 ```
 
 Never reduce a potentially large index to an 8-bit selector before range checking. The project previously had an index-256-to-slot-0 bug; do not reintroduce it.
+
+The implemented API accepts a preserved packed signed-int64 index. Negative
+values in range are normalized against the fixed packed-u32 runtime length;
+values outside the representable/range boundary map to `0xffffffff`, which is
+guaranteed out of range even for the maximum u32 length. Tests cover `-len`,
+`-1`, `-(len+1)`, 255/256 and 65535/65536 borrow boundaries, ±2^32, and both
+signed-int64 endpoints. Normalization work is bounded by byte width/value, not
+the represented signed magnitude.
 
 ---
 
@@ -798,16 +807,17 @@ At the latest local handoff:
 
 ```text
 S1a = DONE + four-shard green
-S1b = DONE + local boundary/full-suite verification
-S1c = DONE + local primitive/full-suite verification; head CI pending
-S1d = NOT STARTED
+S1b = DONE + four-shard green (run #479)
+S1c = DONE + four-shard green (run #479)
+S1d = DONE + local focused/full-suite verification; head CI pending
 S1e = NOT STARTED
 S2  = NOT STARTED
 S3  = NOT STARTED
 S4  = NOT STARTED
 ```
 
-The immediate next action is to confirm current-head CI, then implement S1d.
+The immediate next action is to confirm current-head CI, then implement S1e
+telemetry and choose the cursor state from measured access distributions.
 
 ## Step 4 — update this file after each milestone
 
