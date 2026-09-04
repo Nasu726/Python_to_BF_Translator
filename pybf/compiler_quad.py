@@ -111,7 +111,14 @@ class PythonToBFQuad(PythonToBFCompact):
             )
             for name in all_names
         }
-        blocks, static_top = allocate_live_blocks(tree, sizes)
+
+        # Some higher frontend layers rewrite expressions only to teach the type
+        # inference pass about representation aliases. Those rewrites must not
+        # shorten real source-level lifetimes. When such a layer provides the
+        # original AST, use it solely for interval/pinning analysis while keeping
+        # the rewritten tree above for type and size inference.
+        liveness_tree = getattr(self, "_liveness_tree_override", tree)
+        blocks, static_top = allocate_live_blocks(liveness_tree, sizes)
 
         self.variables: dict[str, Quad64Ref] = {
             name: Quad64Ref(blocks[name].base)
