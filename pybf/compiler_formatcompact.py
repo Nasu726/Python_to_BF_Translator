@@ -45,6 +45,19 @@ class PythonToBFStream(_BasePythonToBFStream):
             )
         return super()._eval_string(node)
 
+    def compile_expr(self, node: ast.AST):
+        # Do not let the generic scalar frontend interpret a character-list name
+        # as the integer length of its StringRef backing. That would make
+        # unsupported expressions such as ``chars + other`` or ``-chars``
+        # silently compute on lengths. Supported list operations have dedicated
+        # lowering before this direct-name boundary.
+        if isinstance(node, ast.Name) and node.id in self.char_list_names:
+            raise self._error(
+                node,
+                "restricted character-list values require an explicit supported operation",
+            )
+        return super().compile_expr(node)
+
     def _append_ascii_if_room(
         self,
         dst,
