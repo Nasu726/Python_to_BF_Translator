@@ -103,6 +103,7 @@ jobs:
           PYTHONPATH: pybf
         run: |
           python - <<'PY'
+          from textwrap import dedent
           from compiler_layout import compile_source
 
           cases = {
@@ -133,7 +134,7 @@ jobs:
 
           limit = 512 * 1024
           for name, source in cases.items():
-              code = compile_source(source)
+              code = compile_source(dedent(source))
               size = len(code.encode("ascii"))
               print(
                   f"{name}_source_bytes={size} "
