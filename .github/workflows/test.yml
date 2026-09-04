@@ -67,6 +67,7 @@ jobs:
           - suite: frontend
             files: >-
               tests/test_charlist_conversions.py
+              tests/test_decimalconv.py
               tests/test_streaming_int_list.py
               tests/test_controlflow.py
               tests/test_input_lines.py
