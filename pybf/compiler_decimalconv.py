@@ -1,30 +1,26 @@
 """Source-compact runtime decimal-string parsing for the final compiler.
 
-``compiler_charconv`` establishes the type/view semantics.  This layer replaces
-its correctness-first statically unrolled ``int(str)`` parser with one runtime
-character loop.  The expensive 64-bit ``value = value*10 + digit`` body is
-therefore emitted once regardless of string capacity.
+``compiler_charconv`` establishes the type/view semantics and
+``compiler_charindex`` makes character-list indexing logically range-safe. This
+layer replaces the correctness-first statically unrolled ``int(str)`` parser
+with one runtime character loop. The expensive 64-bit
+``value = value*10 + digit`` body is therefore emitted once regardless of
+string capacity.
 
 For valid Python decimal strings under the project's int64 ABI, the parser
 accepts ASCII digits, an optional leading sign, and ASCII whitespace around the
-number.  Runtime ValueError propagation for invalid text remains a later error-
+number. Runtime ValueError propagation for invalid text remains a later error-
 state feature; unsupported invalid spellings are not claimed to match CPython.
 """
 
 from __future__ import annotations
 
-from bfstrings import StringRef
-from compiler_charconv import CompileError
-from compiler_charconv import PythonToBFStream as _BasePythonToBFStream
+from compiler_charindex import CompileError
+from compiler_charindex import PythonToBFStream as _BasePythonToBFStream
 
 
 class PythonToBFStream(_BasePythonToBFStream):
     """Character/conversion compiler with runtime-loop decimal parsing."""
-
-    def _new_char_buffer(self) -> StringRef:
-        ref = StringRef(self.temps.top, 1)
-        self.temps.top += ref.capacity + 1
-        return ref
 
     def _set_ascii_digit_flag(self, result: int, ch: int, tmp: int) -> None:
         """result = 1 iff ch is ASCII '0'..'9', preserving ch."""
@@ -98,7 +94,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.add_const(control, -1)
         self.backend.copy_cell(char_ref.char(0), ch, self.backend.s0)
 
-        # Signs are meaningful only before the first sign/digit.  Whitespace
+        # Signs are meaningful only before the first sign/digit. Whitespace
         # leaves ``started`` unchanged, so ordinary leading whitespace works.
         self.backend._eq_byte_const(is_minus, ch, ord("-"))
         self._apply_sign_if_first(
@@ -113,7 +109,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             negative_sign=None,
         )
 
-        # Only an actual ASCII digit reaches the numeric update.  This avoids
+        # Only an actual ASCII digit reaches the numeric update. This avoids
         # the old ``ch -= '0'; while ch`` behavior exploding on whitespace or
         # unsupported invalid characters.
         self._set_ascii_digit_flag(is_digit, ch, class_tmp)
