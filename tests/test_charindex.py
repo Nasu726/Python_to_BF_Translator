@@ -86,6 +86,26 @@ print("".join(chars))
         _compile(source)
 
 
+@pytest.mark.parametrize("replacement", ["input()", "\"abc\""])
+def test_character_list_rejects_scalar_string_rebinding(replacement):
+    source = f'''
+chars = list(input())
+chars = {replacement}
+print(chars[0])
+'''
+    with pytest.raises(CompileError):
+        _compile(source)
+
+
+def test_character_list_does_not_inherit_scalar_string_comparison_semantics():
+    source = '''
+chars = list(input())
+print(chars == "abc")
+'''
+    with pytest.raises(CompileError):
+        _compile(source)
+
+
 def test_cached_length_refreshes_when_char_list_is_read_again():
     source = '''
 chars = list(input())
