@@ -1,33 +1,30 @@
 """Runtime-sized sequential tape records with source-size-independent growth.
 
-This is the first scalable-storage vertical slice. It deliberately starts with
-raw bytes rather than Python ``list[int]`` semantics so the hard Brainfuck
-property can be tested in isolation:
+This is the scalable raw-byte storage vertical slice used before public Python
+container routing. Runtime record count is not a compiler parameter: one fixed
+Brainfuck record loop grows and revisits tape storage at runtime.
 
-* runtime record count is not a compiler parameter;
-* one BF loop body advances across fixed-stride records;
-* storage grows only in tape cells/runtime work, not emitted source size;
-* a later pass can traverse the stored records again.
-
-The record layout now reserves the metadata needed by the next chunked-storage
-stage while S1a still stores one input byte per materialized record::
+Records are now eight-byte chunks::
 
     [marker][back][count][length-carrier:4][payload:8]
 
-``marker == 1`` means a materialized record. ``back`` is zero on record zero and
-one on later armed records. ``count`` is currently one for a data record and
-zero for the sentinel; S1b will use it for partial eight-byte chunks.
+``marker == 1`` means a materialized chunk, ``back`` is zero on record zero and
+one on later records/sentinels, and ``count`` is the number of valid payload
+bytes (1..8). The first zero marker is the end sentinel.
 
-Runtime length is deliberately not updated at a distant fixed header on every
-input byte. A four-byte little-endian length carrier moves forward with the
-runtime walker, is incremented next to the current record, then is carried back
-once after LF is reached. The final length lives in the permanent left-sentinel
-record, whose marker remains zero and is therefore still a valid traversal
-anchor.
+The four-byte little-endian runtime length is never updated through a distant
+fixed address for every character. A carrier moves forward beside the runtime
+walker, is incremented locally for each accepted byte, and is carried back once
+after LF terminates the line. The final length lives in the permanent
+left-sentinel record, whose marker remains zero.
 
-Scratch lives ahead of the current record and is cleared before the walker
-advances. The current input helper treats LF (``\n``) as the line terminator. It
-is an internal scalability primitive, not yet the public ``input()`` lowering.
+One runtime loop fills up to eight payload lanes per chunk. The only statically
+expanded selector has eight cases for the lane inside the current chunk; source
+size therefore remains independent of runtime line length while persistent tape
+distance drops from one record per character to one record per eight characters.
+
+The current helper treats LF (``\n``) as line terminator. It is an internal
+scalability primitive, not yet the public ``input()`` lowering.
 """
 
 from __future__ import annotations
@@ -47,15 +44,20 @@ LENGTH_BYTES = 4
 PAYLOAD0 = 7
 PAYLOAD_BYTES = 8
 
-# Rolling construction scratch uses unused lanes in the next, still-unmaterialized
-# payload. These cells must finish zero before that record becomes current.
-TMP = RECORD_STRIDE + PAYLOAD0 + 1
-RESTORE = RECORD_STRIDE + PAYLOAD0 + 2
-IS_LF = RECORD_STRIDE + PAYLOAD0 + 3
-DATA_GATE = RECORD_STRIDE + PAYLOAD0 + 4
+# Rolling construction scratch occupies the payload of the next,
+# still-unmaterialized record. All eight cells are scrubbed before that record
+# can become current.
+CH = RECORD_STRIDE + PAYLOAD0
+TMP = CH + 1
+RESTORE = CH + 2
+ACTIVE = CH + 3
+REMAINING = CH + 4
+LANE = CH + 5
+FLAG = CH + 6
+GATE = CH + 7
 
-# Once the current length carrier has moved forward, its four cells are dead and
-# can serve as local increment scratch without increasing persistent stride.
+# After the current length carrier moves forward, its four cells are zero and
+# can serve as bounded local scratch for lane selection / packed increment.
 INC_CARRY = LENGTH
 INC_GATE = LENGTH + 1
 INC_TMP = LENGTH + 2
@@ -124,16 +126,18 @@ class _RelativeBuilder:
         return "".join(self.parts)
 
 
-def _set_zero_flag(
+def _set_equal_const(
     r: _RelativeBuilder,
     result: int,
     src: int,
+    value: int,
     tmp: int,
     restore: int,
 ) -> None:
-    """``result = (src == 0)`` while preserving ``src``."""
+    """``result = (src == value)`` while preserving ``src``."""
     r.set_const(result, 1)
     r.copy_preserved(src, tmp, restore)
+    r.add(tmp, -value)
     r.move(tmp)
     r.emit("[")
     r.clear(tmp)
@@ -142,13 +146,18 @@ def _set_zero_flag(
     r.emit("]")
 
 
-def _increment_u32(r: _RelativeBuilder, base: int) -> None:
-    """Increment a little-endian four-byte integer modulo 2**32.
+def _set_zero_flag(
+    r: _RelativeBuilder,
+    result: int,
+    src: int,
+    tmp: int,
+    restore: int,
+) -> None:
+    _set_equal_const(r, result, src, 0, tmp, restore)
 
-    The current record's old carrier cells are zero before this helper runs, so
-    they are reused as carry/gate/copy scratch. Runtime work is fixed at four
-    byte lanes and does not depend on sequence length.
-    """
+
+def _increment_u32(r: _RelativeBuilder, base: int) -> None:
+    """Increment a little-endian four-byte integer modulo 2**32."""
     r.set_const(INC_CARRY, 1)
     for byte_index in range(LENGTH_BYTES):
         r.clear(INC_GATE)
@@ -161,15 +170,32 @@ def _increment_u32(r: _RelativeBuilder, base: int) -> None:
         _set_zero_flag(r, INC_CARRY, cell, INC_TMP, INC_RESTORE)
         r.move(INC_GATE)
         r.emit("]")
-    # Overflow beyond 32 bits is outside the intended contest-size range, but
-    # keep the carrier scratch canonical even when wraparound occurs.
     for cell in (INC_CARRY, INC_GATE, INC_TMP, INC_RESTORE):
         r.clear(cell)
 
 
+def _store_ch_in_selected_lane(r: _RelativeBuilder) -> None:
+    """Move CH into payload[LANE], where LANE is statically bounded to 0..7."""
+    for lane_index in range(PAYLOAD_BYTES):
+        _set_equal_const(
+            r,
+            INC_CARRY,
+            LANE,
+            lane_index,
+            INC_TMP,
+            INC_RESTORE,
+        )
+        r.move(INC_CARRY)
+        r.emit("[")
+        r.add(INC_CARRY, -1)
+        r.transfer(CH, PAYLOAD0 + lane_index)
+        r.move(INC_CARRY)
+        r.emit("]")
+
+
 @dataclass(frozen=True)
 class RuntimeByteSequence:
-    """A one-shot runtime-grown contiguous sequence beginning at ``base``.
+    """A one-shot runtime-grown contiguous byte sequence beginning at ``base``.
 
     ``base - RECORD_STRIDE`` is a permanent zero-marker left sentinel. Its four
     LENGTH cells hold the final runtime length after construction. Callers place
@@ -194,68 +220,108 @@ class RuntimeByteSequence:
     def _read_line_body() -> str:
         r = _RelativeBuilder()
 
-        # Move the prefix length into the next record before current payload
-        # construction. The current carrier becomes zero and is then scratch.
+        # Carry the prefix length one record ahead. Current LENGTH becomes local
+        # scratch; next LENGTH stays close to every per-byte increment.
         for byte_index in range(LENGTH_BYTES):
             r.transfer(
                 LENGTH + byte_index,
                 RECORD_STRIDE + LENGTH + byte_index,
             )
 
-        # S1a materializes one data byte per record. S1b will fill all eight
-        # payload lanes while preserving the same carrier/header contract.
-        r.move(PAYLOAD0)
+        r.clear(COUNT)
+        r.set_const(ACTIVE, 1)
+        r.set_const(REMAINING, PAYLOAD_BYTES)
+        r.clear(LANE)
+
+        # One emitted loop fills up to eight bytes. ACTIVE is re-armed only when
+        # data was read and at least one lane remains; LF consumes no payload.
+        r.move(ACTIVE)
+        r.emit("[")
+        r.add(ACTIVE, -1)
+        r.move(CH)
         r.emit(",")
 
-        # IS_LF = (payload == 10), preserving payload.
-        r.copy_preserved(PAYLOAD0, TMP, RESTORE)
-        r.add(TMP, -10)
-        r.set_const(IS_LF, 1)
-        r.move(TMP)
+        _set_equal_const(r, FLAG, CH, ord("\n"), TMP, RESTORE)
+        r.set_const(GATE, 1)
+        r.move(FLAG)
         r.emit("[")
-        r.clear(TMP)
-        r.clear(IS_LF)
-        r.move(TMP)
+        r.add(FLAG, -1)
+        r.clear(GATE)
+        r.clear(CH)
+        r.move(FLAG)
         r.emit("]")
 
-        # DATA_GATE = not IS_LF. LF turns the current pre-armed marker into the
-        # zero end sentinel; data records their count and arm the next record.
-        r.set_const(DATA_GATE, 1)
-        r.move(IS_LF)
+        r.move(GATE)
         r.emit("[")
-        r.add(IS_LF, -1)
-        r.clear(DATA_GATE)
-        r.clear(MARKER)
-        r.clear(COUNT)
-        r.clear(PAYLOAD0)
-        r.move(IS_LF)
-        r.emit("]")
-
-        r.move(DATA_GATE)
-        r.emit("[")
-        r.add(DATA_GATE, -1)
-        r.set_const(COUNT, 1)
+        r.add(GATE, -1)
+        _store_ch_in_selected_lane(r)
+        r.add(COUNT, 1)
         _increment_u32(r, RECORD_STRIDE + LENGTH)
-        r.set_const(RECORD_STRIDE + BACK, 1)
-        r.set_const(RECORD_STRIDE + MARKER, 1)
-        r.move(DATA_GATE)
+        r.add(LANE, 1)
+        r.add(REMAINING, -1)
+
+        # ACTIVE = (REMAINING != 0).
+        _set_zero_flag(r, FLAG, REMAINING, TMP, RESTORE)
+        r.set_const(ACTIVE, 1)
+        r.move(FLAG)
+        r.emit("[")
+        r.add(FLAG, -1)
+        r.clear(ACTIVE)
+        r.move(FLAG)
+        r.emit("]")
+        r.move(GATE)
+        r.emit("]")
+        r.move(ACTIVE)
         r.emit("]")
 
-        # Current carrier/scratch must not survive as false persistent metadata.
+        # count == 0 occurs on an empty line or on the sentinel iteration after
+        # an exactly full chunk. Turn that pre-armed current marker into zero.
+        _set_zero_flag(r, FLAG, COUNT, TMP, RESTORE)
+        r.move(FLAG)
+        r.emit("[")
+        r.add(FLAG, -1)
+        r.clear(MARKER)
+        r.move(FLAG)
+        r.emit("]")
+
+        # Any materialized current chunk gives the next record a back-link,
+        # including a zero sentinel after a partial final chunk.
+        _set_zero_flag(r, FLAG, COUNT, TMP, RESTORE)
+        r.set_const(GATE, 1)
+        r.move(FLAG)
+        r.emit("[")
+        r.add(FLAG, -1)
+        r.clear(GATE)
+        r.move(FLAG)
+        r.emit("]")
+        r.move(GATE)
+        r.emit("[")
+        r.add(GATE, -1)
+        r.set_const(RECORD_STRIDE + BACK, 1)
+        r.move(GATE)
+        r.emit("]")
+
+        # REMAINING == 0 means eight data bytes filled this chunk without LF;
+        # only then is the next record armed for another runtime iteration.
+        _set_zero_flag(r, FLAG, REMAINING, TMP, RESTORE)
+        r.move(FLAG)
+        r.emit("[")
+        r.add(FLAG, -1)
+        r.set_const(RECORD_STRIDE + MARKER, 1)
+        r.move(FLAG)
+        r.emit("]")
+
         for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
             r.clear(cell)
-
-        # Future-record cells used as rolling classification scratch must be
-        # clean before that record becomes current.
-        for cell in (TMP, RESTORE, IS_LF, DATA_GATE):
+        for cell in range(CH, GATE + 1):
             r.clear(cell)
 
         r.move(RECORD_STRIDE + MARKER)
         return r.code()
 
     @staticmethod
-    def _move_final_length_to_end_sentinel_code() -> str:
-        """Entry: record one step right of the actual zero end sentinel."""
+    def _move_final_length_one_record_left_code() -> str:
+        """Move the final carrier one record left and follow it to that marker."""
         r = _RelativeBuilder()
         for byte_index in range(LENGTH_BYTES):
             r.transfer(
@@ -267,12 +333,7 @@ class RuntimeByteSequence:
 
     @staticmethod
     def _return_length_to_left_sentinel_code() -> str:
-        """Carry final length left once per record and stop on left marker zero.
-
-        Entry is the actual zero end sentinel. The first transfer handles the
-        empty sequence as well: record-zero sentinel length moves directly into
-        the permanent left-sentinel metadata.
-        """
+        """Carry final length left through materialized records to fixed metadata."""
         r = _RelativeBuilder()
         for byte_index in range(LENGTH_BYTES):
             r.transfer(
@@ -281,8 +342,6 @@ class RuntimeByteSequence:
             )
         r.move(-RECORD_STRIDE + MARKER)
         r.emit("[")
-
-        # Runtime loop iterations are relative to the newly reached record.
         r.pos = MARKER
         for byte_index in range(LENGTH_BYTES):
             r.transfer(
@@ -295,18 +354,38 @@ class RuntimeByteSequence:
 
     @staticmethod
     def _reverse_to_left_sentinel_code() -> str:
-        # Entry is a zero end sentinel. Step once to the preceding record; then
-        # markers walk left until the permanent zero-marker sentinel is reached.
         step = "<" * RECORD_STRIDE
         return step + "[" + step + "]"
 
+    @staticmethod
+    def _write_record_body() -> str:
+        """Output COUNT payload bytes and advance to the next record marker."""
+        r = _RelativeBuilder()
+        remaining = LENGTH
+        lane_gate = LENGTH + 1
+        helper = LENGTH + 2
+
+        r.copy_preserved(COUNT, remaining, helper)
+        for lane_index in range(PAYLOAD_BYTES):
+            r.copy_preserved(remaining, lane_gate, helper)
+            r.move(lane_gate)
+            r.emit("[")
+            r.clear(lane_gate)
+            r.move(PAYLOAD0 + lane_index)
+            r.emit(".")
+            r.add(remaining, -1)
+            r.move(lane_gate)
+            r.emit("]")
+
+        for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
+            r.clear(cell)
+        r.move(RECORD_STRIDE + MARKER)
+        return r.code()
+
     def read_lf_terminated_bytes(self, bf: BFEmitter) -> None:
-        """Materialize one LF-terminated input line into runtime records."""
+        """Materialize one LF-terminated input line into runtime-sized chunks."""
         self._check_layout()
 
-        # A sequence object is currently one-shot. The permanent metadata is
-        # nevertheless explicitly initialized so the contract does not depend on
-        # callers remembering which sentinel payload cells are meaningful.
         for byte_index in range(LENGTH_BYTES):
             bf.clear(self.length_ref.base + byte_index)
 
@@ -317,27 +396,23 @@ class RuntimeByteSequence:
         bf.move(self.base + MARKER)
         bf.emit("[" + self._read_line_body() + "]")
 
-        # The one-byte S1a walker exits one record right of the zero sentinel.
-        # First bring the final moving length into that sentinel, then carry it
-        # left along the same record chain exactly once.
-        bf.emit(self._move_final_length_to_end_sentinel_code())
+        # For a partial final chunk the loop exits on its following zero sentinel;
+        # for an exact multiple of eight it exits one record to the right of the
+        # pre-armed sentinel iteration. An unconditional one-record carrier move
+        # is valid in both cases, after which marker-guided propagation reaches
+        # the permanent left-sentinel metadata.
+        bf.emit(self._move_final_length_one_record_left_code())
         bf.emit(self._return_length_to_left_sentinel_code())
         bf.emit(">" * RECORD_STRIDE)
         bf.ptr = self.base
 
     def write_all_bytes(self, bf: BFEmitter) -> None:
-        """Replay every stored byte to stdout with one forward BF walker."""
+        """Replay every stored byte to stdout with one forward chunk walker."""
         self._check_layout()
 
         bf.move(self.base + MARKER)
-        bf.emit("[")
-        bf.emit(">" * PAYLOAD0)
-        bf.emit(".")
-        bf.emit(">" * (RECORD_STRIDE - PAYLOAD0))
-        bf.emit("]")
+        bf.emit("[" + self._write_record_body() + "]")
 
-        # Entry is the zero end sentinel. Return to the static base anchor so
-        # subsequent compiler/runtime code can again use absolute addresses.
         bf.emit(self._reverse_to_left_sentinel_code())
         bf.emit(">" * RECORD_STRIDE)
         bf.ptr = self.base
