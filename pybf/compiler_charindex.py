@@ -207,10 +207,9 @@ class PythonToBFStream(_BasePythonToBFStream):
         assert isinstance(node.value, ast.Name)
         ref = self.strings[node.value.id]
 
-        constant = self._constant_int(node.slice)
-        if constant is not None and constant >= ref.capacity:
-            raise self._error(node, "constant character-list index exceeds capacity")
-
+        # Constants intentionally share the same logical range-check path as
+        # runtime indices. In particular, 256 must become the invalid sentinel
+        # rather than wrapping to physical slot 0 when narrowed to one byte.
         index_byte = self._char_list_runtime_index_byte(node.slice, ref)
         left_turns, right_turns, valid = self._rotation_controls(index_byte)
         result = self._new_char_buffer()
@@ -228,10 +227,6 @@ class PythonToBFStream(_BasePythonToBFStream):
     def _store_char_list_subscript(self, node: ast.Subscript, value) -> None:
         assert isinstance(node.value, ast.Name)
         ref = self.strings[node.value.id]
-
-        constant = self._constant_int(node.slice)
-        if constant is not None and constant >= ref.capacity:
-            raise self._error(node, "constant character-list index exceeds capacity")
 
         index_byte = self._char_list_runtime_index_byte(node.slice, ref)
         left_turns, right_turns, valid = self._rotation_controls(index_byte)
