@@ -152,20 +152,11 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.char_list_lengths = {
             name: self._new_word(0) for name in sorted(self.char_list_names)
         }
-        self._char_list_name_by_base = {
-            self.strings[name].base: name for name in self.char_list_names
-        }
 
     def _new_char_buffer(self) -> StringRef:
         ref = StringRef(self.temps.top, 1)
         self.temps.top += ref.cells
         return ref
-
-    def _cached_char_list_length(self, ref):
-        name = self._char_list_name_by_base.get(ref.base)
-        if name is None:
-            return None
-        return self.char_list_lengths[name]
 
     def _char_value(self, node: ast.AST):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -189,8 +180,21 @@ class PythonToBFStream(_BasePythonToBFStream):
             return self._copy_new(self.char_list_lengths[node.args[0].id])
         return super().compile_expr(node)
 
-    def _char_list_runtime_index_byte(self, node: ast.AST, ref) -> int:
-        length = self._cached_char_list_length(ref)
+    def _char_list_runtime_index_byte(
+        self,
+        node: ast.AST,
+        ref,
+        *,
+        char_list_name: str | None = None,
+    ) -> int:
+        # Payload storage may be reused by the liveness allocator for two
+        # character-list variables whose lifetimes do not overlap. Never infer
+        # metadata ownership from ref.base; the source AST name is authoritative.
+        length = (
+            self.char_list_lengths.get(char_list_name)
+            if char_list_name is not None
+            else None
+        )
         if length is None:
             return super()._char_list_runtime_index_byte(node, ref)
 
@@ -311,12 +315,17 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _load_char_list_subscript(self, node: ast.Subscript):
         assert isinstance(node.value, ast.Name)
-        ref = self.strings[node.value.id]
+        name = node.value.id
+        ref = self.strings[name]
 
         # Constants intentionally share the same logical range-check path as
         # runtime indices. In particular, 256 must become the invalid sentinel
         # rather than wrapping to physical slot 0 when narrowed to one byte.
-        index_byte = self._char_list_runtime_index_byte(node.slice, ref)
+        index_byte = self._char_list_runtime_index_byte(
+            node.slice,
+            ref,
+            char_list_name=name,
+        )
         left_turns, right_turns, valid = self._rotation_controls(index_byte)
         result = self._new_char_buffer()
         self.backend.clear_string(result)
@@ -332,9 +341,14 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _store_char_list_subscript(self, node: ast.Subscript, value) -> None:
         assert isinstance(node.value, ast.Name)
-        ref = self.strings[node.value.id]
+        name = node.value.id
+        ref = self.strings[name]
 
-        index_byte = self._char_list_runtime_index_byte(node.slice, ref)
+        index_byte = self._char_list_runtime_index_byte(
+            node.slice,
+            ref,
+            char_list_name=name,
+        )
         left_turns, right_turns, valid = self._rotation_controls(index_byte)
 
         self.bf.begin_while(valid)
