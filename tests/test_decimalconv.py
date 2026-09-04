@@ -8,6 +8,7 @@ from compiler_layout import compile_source
 
 
 BF_COMMANDS = set("><+-.,[]")
+ATCODER_SOURCE_LIMIT = 512 * 1024
 
 
 def _direct_compile(compiler_type, source: str, *, string_capacity: int = 255) -> str:
@@ -33,6 +34,23 @@ print(n)
     assert result.output == "-7\n"
 
 
+def test_rotation_decimal_parser_restores_named_source_exactly():
+    source = '''
+s = input()
+a = int(s)
+b = int(s)
+print(s, a, b)
+'''
+    code = compile_source(source, string_capacity=32, list_capacity=4)
+    result = run_bf(
+        code,
+        "  -123  \n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "  -123   -123 -123\n"
+
+
 def test_runtime_decimal_parser_emits_less_source_at_public_capacity():
     source = '''
 s = input()
@@ -42,6 +60,25 @@ print(n)
     old_code = _direct_compile(StaticDecimalCompiler, source, string_capacity=255)
     new_code = _direct_compile(RuntimeDecimalCompiler, source, string_capacity=255)
     assert len(new_code) < len(old_code), (
-        f"runtime-loop decimal parser regressed public-capacity source size: "
+        f"preserving-rotation decimal parser regressed public-capacity source size: "
         f"new={len(new_code):,} old={len(old_code):,}"
     )
+
+
+def test_int_input_keeps_existing_compact_direct_reader():
+    source = '''
+n = int(input())
+print(n)
+'''
+    code = compile_source(source, string_capacity=255, list_capacity=4)
+    assert set(code) <= BF_COMMANDS
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"int(input()) fast path regressed to {len(code):,} bytes"
+    )
+    result = run_bf(
+        code,
+        "-9223372036854775808\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "-9223372036854775808\n"
