@@ -19,8 +19,8 @@ one-character replacement.
 The currently supported character-list view permits element replacement but no
 append/delete/insert. Its logical length is therefore immutable between
 ``list(input())`` assignments. We cache that length once in a persistent Quad64
-word and reuse it for every later index check instead of rescanning up to 255
-string cells on every access.
+word and reuse it for every later index check and ``len(character_list)`` call
+instead of rescanning up to 255 string cells on every access.
 """
 
 from __future__ import annotations
@@ -70,6 +70,19 @@ class PythonToBFStream(_BasePythonToBFStream):
             return None
         return self.char_list_lengths[name]
 
+    def compile_expr(self, node: ast.AST):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "len"
+            and len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in self.char_list_names
+        ):
+            return self._copy_new(self.char_list_lengths[node.args[0].id])
+        return super().compile_expr(node)
+
     def _char_list_runtime_index_byte(self, node: ast.AST, ref) -> int:
         length = self._cached_char_list_length(ref)
         if length is None:
@@ -115,7 +128,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         saved = ref.terminator
         self.bf.clear(saved)
 
-        # Move old slot 0 into the adjacent-after-payload saved cell.  The long
+        # Move old slot 0 into the adjacent-after-payload saved cell. The long
         # pointer distance is emitted once in this reusable runtime body.
         first = ref.char(0)
         self.bf.begin_while(first)
