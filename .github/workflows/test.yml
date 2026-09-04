@@ -97,6 +97,49 @@ jobs:
         run: python -m pytest --collect-only -q tests
       - name: Run ${{ matrix.suite }} tests
         run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
+      - name: Report public string/conversion source metrics
+        if: matrix.suite == 'frontend'
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python - <<'PY'
+          from compiler_layout import compile_source
+
+          cases = {
+              "char_runtime_store": '''
+          chars = list(input())
+          i = int(input())
+          chars[i] = "X"
+          print("".join(chars))
+          ''',
+              "direct_join_input": '''
+          print("".join(list(input())))
+          ''',
+              "string_to_int": '''
+          s = input()
+          n = int(s)
+          print(n)
+          ''',
+              "int_to_string": '''
+          n = int(input())
+          s = str(n)
+          print(s)
+          ''',
+              "direct_int_input": '''
+          n = int(input())
+          print(n)
+          ''',
+          }
+
+          limit = 512 * 1024
+          for name, source in cases.items():
+              code = compile_source(source)
+              size = len(code.encode("ascii"))
+              print(
+                  f"{name}_source_bytes={size} "
+                  f"headroom_to_512k={limit - size}"
+              )
+          PY
       - name: Report scalable partition metrics
         if: matrix.suite == 'runtime'
         env:
