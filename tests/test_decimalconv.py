@@ -65,6 +65,46 @@ print(n)
     )
 
 
+def test_named_string_to_int_stays_below_atcoder_source_limit():
+    source = '''
+s = input()
+n = int(s)
+print(n)
+'''
+    code = compile_source(source, string_capacity=255, list_capacity=4)
+    assert set(code) <= BF_COMMANDS
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"input-string -> int emitted {len(code):,} bytes"
+    )
+    result = run_bf(
+        code,
+        "  -9223372036854775808  \n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "-9223372036854775808\n"
+
+
+def test_int_to_named_string_stays_below_atcoder_source_limit():
+    source = '''
+n = int(input())
+s = str(n)
+print(s)
+'''
+    code = compile_source(source, string_capacity=255, list_capacity=4)
+    assert set(code) <= BF_COMMANDS
+    assert len(code.encode("ascii")) <= ATCODER_SOURCE_LIMIT, (
+        f"int -> string output emitted {len(code):,} bytes"
+    )
+    result = run_bf(
+        code,
+        "9223372036854775807\n",
+        memory_size=120_000,
+        step_limit=1_000_000_000,
+    )
+    assert result.output == "9223372036854775807\n"
+
+
 def test_int_input_keeps_existing_compact_direct_reader():
     source = '''
 n = int(input())
