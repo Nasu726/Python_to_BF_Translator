@@ -162,6 +162,15 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.temps.top += ref.cells
         return ref
 
+    def _expr_is_string(self, node: ast.AST) -> bool:
+        # A character-list name happens to use StringRef storage, but it is not
+        # a Python scalar string. Approved representation-preserving operations
+        # (subscript, len, iteration, empty join) have dedicated lowering paths.
+        # Everything else must not silently inherit scalar-string semantics.
+        if isinstance(node, ast.Name) and node.id in self.char_list_names:
+            return False
+        return super()._expr_is_string(node)
+
     def _char_value(self, node: ast.AST):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if not _is_nonzero_byte_char_constant(node):
@@ -369,15 +378,22 @@ class PythonToBFStream(_BasePythonToBFStream):
             and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
             and node.targets[0].id in self.char_list_names
-            and _is_list_input(node.value)
         ):
             name = node.targets[0].id
-            ref = self.strings[name]
-            self.backend.read_line(ref, self.workspace_base)
-            self.backend.string_length(
-                self.char_list_lengths[name], ref, self.temps.cell()
+            if _is_list_input(node.value):
+                ref = self.strings[name]
+                self.backend.read_line(ref, self.workspace_base)
+                self.backend.string_length(
+                    self.char_list_lengths[name], ref, self.temps.cell()
+                )
+                return
+            if isinstance(node.value, ast.Name) and node.value.id == name:
+                # Self-assignment preserves the same mutable list object/value.
+                return
+            raise self._error(
+                node,
+                "restricted character-list variables can only be rebound from list(input())",
             )
-            return
 
         return super()._compile_stmt_inner(node)
 
