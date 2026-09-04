@@ -13,6 +13,8 @@ prefix order. No runtime destination selector is needed.
 
 For the common ``s = str(n)`` statement, formatting is performed directly into
 ``s`` rather than formatting a 255-byte temporary and then snapshot-copying it.
+The integer value itself is snapshotted first because the liveness allocator is
+allowed to reuse ``n`` storage for ``s`` once the assignment consumes ``n``.
 """
 
 from __future__ import annotations
@@ -46,7 +48,6 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.clear(room)
         self.backend.copy_cell(remaining, room, self.backend.s0)
         self.bf.begin_while(room)
-        # Treat any nonzero remaining count as a one-shot gate.
         self.bf.clear(room)
         self._rotate_payload_left_once(dst)
         tail = dst.char(dst.capacity - 1)
@@ -59,9 +60,12 @@ class PythonToBFStream(_BasePythonToBFStream):
         self.bf.end_while(room)
 
     def _format_int_string_into(self, dst, src) -> None:
-        """Write signed ``src`` into existing ``dst`` in canonical string form."""
-        self.backend.clear_string(dst)
+        """Write signed ``src`` into existing ``dst`` in canonical string form.
 
+        ``dst`` may overlap ``src`` at runtime because compile-time liveness
+        allocation can reuse a dead scalar block for the string target. Copy the
+        complete integer and sign before clearing destination storage.
+        """
         magnitude = self._new_word()
         self.backend.copy64(magnitude, src)
 
@@ -71,11 +75,14 @@ class PythonToBFStream(_BasePythonToBFStream):
         room = self.temps.cell()
         for cell in (remaining, sign, ascii_cell, room):
             self.bf.clear(cell)
+        self.backend.copy_cell(magnitude.bit(63), sign, self.backend.s0)
+
+        # Only now is it safe to initialize destination storage.
+        self.backend.clear_string(dst)
         self.bf.set_const(remaining, dst.capacity)
 
         # Emit '-' first when needed. Negation is modulo 2**64, so INT64_MIN
         # becomes the unsigned magnitude 2**63 as required by decimal output.
-        self.backend.copy_cell(src.bit(63), sign, self.backend.s0)
         self.bf.begin_while(sign)
         self.bf.add_const(sign, -1)
         self.bf.set_const(ascii_cell, ord("-"))
@@ -96,10 +103,6 @@ class PythonToBFStream(_BasePythonToBFStream):
         for cell in (started, control, tmp, helper):
             self.bf.clear(cell)
 
-        # Twenty compile-time digit lanes are small and deterministic. The
-        # expensive operation that used to explode source size was selecting a
-        # destination slot; each selected digit now uses one local rotation
-        # append instead.
         for digit_index in range(_DECIMAL_DIGITS - 1, -1, -1):
             digit = decimal_base + digit_index * _DECIMAL_STRIDE + 1
             if digit_index == 0:
@@ -115,7 +118,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.bf.begin_while(control)
             self.bf.add_const(control, -1)
             self.bf.set_const(ascii_cell, ord("0"))
-            # Decimal digits are dead after formatting, so consume directly.
             self.bf.begin_while(digit)
             self.bf.add_const(digit, -1)
             self.bf.add_const(ascii_cell, 1)
@@ -123,9 +125,6 @@ class PythonToBFStream(_BasePythonToBFStream):
             self._append_ascii_if_room(dst, remaining, ascii_cell, room)
             self.bf.end_while(control)
 
-        # k output bytes performed k left rotations and occupy the last k
-        # payload slots in order. Completing capacity-k rotations restores the
-        # canonical prefix representation with a zero suffix.
         self.bf.begin_while(remaining)
         self.bf.add_const(remaining, -1)
         self._rotate_payload_left_once(dst)
@@ -139,9 +138,6 @@ class PythonToBFStream(_BasePythonToBFStream):
         return dst
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
-        # ``s = str(integer_expression)`` needs no intermediate Python string:
-        # the expression value is evaluated first and then formatted directly
-        # into s. String-valued ``str(s)`` keeps the normal snapshot path.
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
@@ -155,7 +151,9 @@ class PythonToBFStream(_BasePythonToBFStream):
             and not node.value.keywords
         ):
             arg = node.value.args[0]
-            if not self._expr_is_string(arg):
+            # Keep constant int -> string compile-time folding in the older
+            # layer; direct runtime formatting is only needed for dynamic values.
+            if not self._expr_is_string(arg) and self._constant_int(arg) is None:
                 value = self.compile_expr(arg)
                 self._format_int_string_into(self.strings[node.targets[0].id], value)
                 return
