@@ -30,6 +30,7 @@ scalability primitive, not yet the public ``input()`` lowering.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from bfcore import BFEmitter
 from bfpacked import PackedU32Ref
@@ -174,6 +175,315 @@ def _increment_u32(r: _RelativeBuilder, base: int) -> None:
         r.clear(cell)
 
 
+def _is_zero_u32(
+    r: _RelativeBuilder,
+    base: int,
+    result: int,
+    tmp: int,
+    helper: int,
+) -> None:
+    """``result = (packed_u32(base) == 0)`` while preserving the value."""
+    r.set_const(result, 1)
+    for byte_index in range(LENGTH_BYTES):
+        r.copy_preserved(base + byte_index, tmp, helper)
+        r.move(tmp)
+        r.emit("[")
+        r.clear(tmp)
+        r.clear(result)
+        r.move(tmp)
+        r.emit("]")
+
+
+def _decrement_u32(
+    r: _RelativeBuilder,
+    base: int,
+    borrow: int,
+    gate: int,
+    tmp: int,
+    helper: int,
+) -> None:
+    """Decrement a nonzero packed u32 using caller-selected zero scratch."""
+    r.set_const(borrow, 1)
+    for byte_index in range(LENGTH_BYTES):
+        r.clear(gate)
+        r.transfer(borrow, gate)
+        r.move(gate)
+        r.emit("[")
+        r.add(gate, -1)
+        cell = base + byte_index
+        _set_zero_flag(r, borrow, cell, tmp, helper)
+        r.add(cell, -1)
+        r.move(gate)
+        r.emit("]")
+    for cell in (borrow, gate, tmp, helper):
+        r.clear(cell)
+
+
+def _copy_cell_preserved(bf: BFEmitter, src: int, dst: int, tmp: int) -> None:
+    """Copy one fixed-address byte while preserving ``src`` and zeroing tmp."""
+    bf.clear(dst)
+    bf.clear(tmp)
+    bf.begin_while(src)
+    bf.add_const(src, -1)
+    bf.add_const(dst, 1)
+    bf.add_const(tmp, 1)
+    bf.end_while(src)
+    bf.begin_while(tmp)
+    bf.add_const(tmp, -1)
+    bf.add_const(src, 1)
+    bf.end_while(tmp)
+
+
+@lru_cache(maxsize=2)
+def _locate_index_body(*, load: bool) -> str:
+    """Find a non-negative byte index with one runtime record walker.
+
+    Entry is a materialized record marker. ``LENGTH`` carries the remaining
+    byte index. On a hit, the following record's marker/back-link are cleared
+    temporarily so the outer walker exits there. A load leaves the selected
+    byte in the target record's first length cell; a store-location pass leaves
+    ``lane + 1`` there for the later value-carrying pass.
+    """
+    r = _RelativeBuilder()
+    next_remaining = RECORD_STRIDE + LENGTH
+    next_valid_gate = next_remaining + 1
+    next_work = next_remaining + 2
+    next_helper = next_remaining + 3
+    next_back = RECORD_STRIDE + BACK
+    next_marker = RECORD_STRIDE + MARKER
+
+    # BACK==2 marks record zero only while the locator starts. Restore its
+    # persistent BACK==0 before any possible return walk; all later records use
+    # the normal BACK==1 invariant.
+    _set_equal_const(
+        r,
+        next_remaining,
+        BACK,
+        2,
+        next_valid_gate,
+        next_work,
+    )
+    r.move(next_remaining)
+    r.emit("[")
+    r.add(next_remaining, -1)
+    r.clear(BACK)
+    r.move(next_remaining)
+    r.emit("]")
+
+    r.copy_preserved(COUNT, next_remaining, next_helper)
+
+    # COUNT is at most eight, so statically expanding only the lane selector
+    # keeps source size independent of both capacity and runtime input length.
+    for lane_index in range(PAYLOAD_BYTES):
+        # Execute this lane once iff it is part of the current (possibly
+        # partial) chunk. Clearing the copied numeric gate makes it one-shot.
+        r.copy_preserved(next_remaining, next_valid_gate, next_helper)
+        r.move(next_valid_gate)
+        r.emit("[")
+        r.clear(next_valid_gate)
+        r.add(next_remaining, -1)
+
+        # MARKER remains one until an earlier lane finds the target. This extra
+        # gate prevents any later lane from observing the repurposed counter.
+        r.copy_preserved(MARKER, next_work, next_helper)
+        r.move(next_work)
+        r.emit("[")
+        r.clear(next_work)
+
+        _is_zero_u32(
+            r,
+            LENGTH,
+            next_work,
+            next_valid_gate,
+            next_helper,
+        )
+
+        # next_valid_gate = not next_work. next_back is a known one after every
+        # materialized record, so it may be borrowed as the copy helper and
+        # immediately restored.
+        r.set_const(next_valid_gate, 1)
+        r.copy_preserved(next_work, next_helper, next_back)
+        r.set_const(next_back, 1)
+        r.move(next_helper)
+        r.emit("[")
+        r.clear(next_helper)
+        r.clear(next_valid_gate)
+        r.move(next_helper)
+        r.emit("]")
+
+        # A nonzero remaining index consumes exactly one valid byte. The four
+        # scratch cells are all local and next_back is restored afterwards.
+        r.move(next_valid_gate)
+        r.emit("[")
+        r.clear(next_valid_gate)
+        r.clear(next_back)
+        _decrement_u32(
+            r,
+            LENGTH,
+            next_valid_gate,
+            next_helper,
+            next_work,
+            next_back,
+        )
+        r.set_const(next_back, 1)
+        r.move(next_valid_gate)
+        r.emit("]")
+
+        # Zero means this lane is the requested byte. The current marker is a
+        # temporary "still searching" flag; it is restored before the body
+        # exits. Clearing the following marker/back stops the outer walker.
+        r.move(next_work)
+        r.emit("[")
+        r.clear(next_work)
+        if load:
+            r.copy_preserved(PAYLOAD0 + lane_index, LENGTH, next_valid_gate)
+        else:
+            r.set_const(LENGTH, lane_index + 1)
+        r.clear(MARKER)
+        r.clear(next_remaining)
+        r.clear(next_back)
+        r.clear(next_marker)
+        r.move(next_work)
+        r.emit("]")
+
+        r.move(next_work)
+        r.emit("]")
+        r.move(next_valid_gate)
+        r.emit("]")
+
+    # No lane matched: clean the borrowed next-record cells and carry the
+    # remaining index forward. On a hit MARKER is zero, so the result/lane tag
+    # remains in this record instead.
+    r.move(MARKER)
+    r.emit("[")
+    r.add(MARKER, -1)
+    for cell in range(next_remaining, next_helper + 1):
+        r.clear(cell)
+    for byte_index in range(LENGTH_BYTES):
+        r.transfer(LENGTH + byte_index, next_remaining + byte_index)
+    r.move(MARKER)
+    r.emit("]")
+    r.set_const(MARKER, 1)
+
+    r.move(next_marker)
+    return r.code()
+
+
+@lru_cache(maxsize=2)
+def _finish_location_code(*, carry_loaded_byte: bool) -> str:
+    """Restore scan metadata and return from the runtime record to base."""
+    r = _RelativeBuilder()
+
+    # A hit uniquely clears BACK on the record where the outer scan stopped.
+    # Empty input instead retains the temporary BACK==2 marker and a natural
+    # nonempty end sentinel has BACK==1.
+    r.clear(LENGTH + 3)
+    _set_zero_flag(r, LENGTH, BACK, LENGTH + 1, LENGTH + 2)
+    r.move(LENGTH)
+    r.emit("[")
+    r.add(LENGTH, -1)
+    r.set_const(BACK, 1)
+    if carry_loaded_byte:
+        r.transfer(-RECORD_STRIDE + LENGTH, LENGTH + 3)
+    r.move(LENGTH)
+    r.emit("]")
+
+    # A temporarily cleared next marker is restored iff this is another data
+    # record. COUNT==0 identifies the real end sentinel.
+    _set_zero_flag(r, LENGTH, COUNT, LENGTH + 1, LENGTH + 2)
+    r.set_const(MARKER, 1)
+    r.move(LENGTH)
+    r.emit("[")
+    r.add(LENGTH, -1)
+    r.clear(MARKER)
+    r.move(LENGTH)
+    r.emit("]")
+
+    # Empty input never entered the locator body, so normalize its temporary
+    # base BACK marker before the common reverse walk.
+    _set_equal_const(r, LENGTH, BACK, 2, LENGTH + 1, LENGTH + 2)
+    r.move(LENGTH)
+    r.emit("[")
+    r.add(LENGTH, -1)
+    r.clear(BACK)
+    r.move(LENGTH)
+    r.emit("]")
+
+    # Every processed record left its LENGTH scratch zero. Carrying via the
+    # fourth lane therefore returns a loaded byte without touching persistent
+    # payload or the fixed length stored in the separate left sentinel.
+    r.move(BACK)
+    r.emit("[")
+    if carry_loaded_byte:
+        r.transfer(LENGTH + 3, -RECORD_STRIDE + LENGTH + 3)
+    r.move(-RECORD_STRIDE + BACK)
+    r.emit("]")
+    r.emit("<")
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _store_located_body() -> str:
+    """Carry a source byte forward and replace the tagged payload lane."""
+    r = _RelativeBuilder()
+    next_marker = RECORD_STRIDE + MARKER
+
+    for lane_index in range(PAYLOAD_BYTES):
+        _set_equal_const(
+            r,
+            LENGTH + 2,
+            LENGTH,
+            lane_index + 1,
+            LENGTH + 3,
+            MARKER,
+        )
+        r.set_const(MARKER, 1)
+        r.move(LENGTH + 2)
+        r.emit("[")
+        r.clear(LENGTH + 2)
+        r.clear(PAYLOAD0 + lane_index)
+        r.transfer(LENGTH + 1, PAYLOAD0 + lane_index)
+        r.move(LENGTH + 2)
+        r.emit("]")
+
+    # A nonzero lane tag is unique. Consume it and stop at the following
+    # record. A missing/out-of-range location carries the source to the natural
+    # end sentinel without modifying any payload.
+    r.copy_preserved(LENGTH, LENGTH + 2, LENGTH + 3)
+    r.move(LENGTH + 2)
+    r.emit("[")
+    r.clear(LENGTH + 2)
+    r.clear(LENGTH)
+    r.clear(next_marker)
+    r.move(LENGTH + 2)
+    r.emit("]")
+
+    r.transfer(LENGTH + 1, RECORD_STRIDE + LENGTH + 1)
+    r.move(next_marker)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _finish_store_code() -> str:
+    """Restore the second store pass and return to the fixed sequence base."""
+    r = _RelativeBuilder()
+    _set_zero_flag(r, LENGTH + 2, COUNT, LENGTH, LENGTH + 3)
+    r.set_const(MARKER, 1)
+    r.move(LENGTH + 2)
+    r.emit("[")
+    r.add(LENGTH + 2, -1)
+    r.clear(MARKER)
+    r.move(LENGTH + 2)
+    r.emit("]")
+    for cell in range(LENGTH, LENGTH + LENGTH_BYTES):
+        r.clear(cell)
+
+    r.move(BACK)
+    r.emit("[" + "<" * RECORD_STRIDE + "]")
+    r.emit("<")
+    return r.code()
+
+
 def _store_ch_in_selected_lane(r: _RelativeBuilder) -> None:
     """Move CH into payload[LANE], where LANE is statically bounded to 0..7."""
     for lane_index in range(PAYLOAD_BYTES):
@@ -215,6 +525,33 @@ class RuntimeByteSequence:
     def _check_layout(self) -> None:
         if self.left_sentinel < 0:
             raise ValueError("runtime sequence requires one record of left guard space")
+
+    @property
+    def _fixed_access_tmp(self) -> int:
+        # The left sentinel payload is not sequence data. Keep one fixed cell
+        # for preserving copies made before/after a runtime-relative walk.
+        return self.left_sentinel + PAYLOAD0
+
+    def _copy_index_to_base(self, bf: BFEmitter, index: PackedU32Ref) -> None:
+        for byte_index in range(LENGTH_BYTES):
+            _copy_cell_preserved(
+                bf,
+                index.byte(byte_index),
+                self.base + LENGTH + byte_index,
+                self._fixed_access_tmp,
+            )
+
+    def _locate_index(self, bf: BFEmitter, index: PackedU32Ref, *, load: bool) -> None:
+        self._copy_index_to_base(bf, index)
+
+        # BACK==2 distinguishes an empty base sentinel from the temporary
+        # BACK==0 stop marker used for a successful lookup. The first data-body
+        # iteration restores the normal base BACK==0 invariant.
+        bf.set_const(self.base + BACK, 2)
+        bf.move(self.base + MARKER)
+        bf.emit("[" + _locate_index_body(load=load) + "]")
+        bf.emit(_finish_location_code(carry_loaded_byte=load))
+        bf.ptr = self.base
 
     @staticmethod
     def _read_line_body() -> str:
@@ -415,6 +752,47 @@ class RuntimeByteSequence:
 
         bf.emit(self._reverse_to_left_sentinel_code())
         bf.emit(">" * RECORD_STRIDE)
+        bf.ptr = self.base
+
+    def load_byte(self, bf: BFEmitter, dst: int, index: PackedU32Ref) -> None:
+        """Load a non-negative runtime index, preserving the sequence/index.
+
+        ``dst`` receives zero when ``index >= len(sequence)``. The index and
+        destination must be fixed cells outside this runtime sequence's record
+        area. Runtime work is linear in the traversed chunk distance while
+        emitted source size is independent of sequence length and index value.
+        """
+        self._check_layout()
+        self._locate_index(bf, index, load=True)
+
+        bf.clear(dst)
+        result = self.base + LENGTH + 3
+        bf.begin_while(result)
+        bf.add_const(result, -1)
+        bf.add_const(dst, 1)
+        bf.end_while(result)
+        bf.move(self.base)
+
+    def store_byte(self, bf: BFEmitter, index: PackedU32Ref, src: int) -> None:
+        """Replace a non-negative runtime index while preserving ``src``.
+
+        Out-of-range stores are no-ops. The first pass locates and tags one
+        payload lane; the second carries ``src`` forward without combining a
+        fifth carrier byte with the packed-u32 index. Both passes are runtime
+        walkers whose emitted source is independent of sequence length.
+        """
+        self._check_layout()
+        self._locate_index(bf, index, load=False)
+
+        _copy_cell_preserved(
+            bf,
+            src,
+            self.base + LENGTH + 1,
+            self._fixed_access_tmp,
+        )
+        bf.move(self.base + MARKER)
+        bf.emit("[" + _store_located_body() + "]")
+        bf.emit(_finish_store_code())
         bf.ptr = self.base
 
 
