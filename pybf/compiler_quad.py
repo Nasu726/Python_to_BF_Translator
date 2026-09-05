@@ -74,6 +74,7 @@ class PythonToBFQuad(PythonToBFCompact):
             tree, base_strings | loop_chars, string_list_names
         )
         compact_chars = _compact_char_names(tree, string_names)
+        compact_chars.update(getattr(self, "_forced_compact_char_names", set()))
         int_list_names = _infer_int_list_names(tree, string_list_names)
 
         overlaps = (
@@ -91,12 +92,17 @@ class PythonToBFQuad(PythonToBFCompact):
         self.list_names = int_list_names
         self.string_list_names = string_list_names
         self.compact_char_names = compact_chars
+        runtime_char_lists = getattr(self, "_runtime_sized_char_list_names", set())
 
         int_list_cells = IntListRef(0, list_capacity).cells
         string_list_cells = StringListRef(0, list_capacity, string_capacity).cells
 
         def scalar_string_cells(name: str) -> int:
-            capacity = 1 if name in compact_chars else string_capacity
+            capacity = (
+                1
+                if name in compact_chars or name in runtime_char_lists
+                else string_capacity
+            )
             return capacity + 1
 
         sizes = {
@@ -130,7 +136,11 @@ class PythonToBFQuad(PythonToBFCompact):
         self.strings: dict[str, StringRef] = {
             name: StringRef(
                 blocks[name].base,
-                1 if name in compact_chars else string_capacity,
+                (
+                    1
+                    if name in compact_chars or name in runtime_char_lists
+                    else string_capacity
+                ),
             )
             for name in string_names
         }
