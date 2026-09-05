@@ -138,18 +138,14 @@ already provides `RuntimeByteSequence`, a proven first scalable-storage slice:
 - the existing tests already cover empty/nonempty round trips and a runtime
   length beyond the historical tiny examples.
 
-S1 therefore extends this existing primitive instead of replacing it.
-
-The current record is nine cells:
+S1 therefore extends this existing primitive instead of replacing it. The
+completed representation stores up to eight characters per 16-cell record:
 
 ```text
-[marker][payload byte][7 reserved payload bytes]
+[marker][back][count][length-carrier:4][payload:8][cursor-value]
 ```
 
-The first implementation materializes only one byte per record even though the
-record already reserves eight payload lanes. The preferred next representation
-is therefore **up to eight characters per materialized record**. A logical
-runtime index can be decomposed as:
+A logical runtime index decomposes as:
 
 ```text
 record = index >> 3
@@ -157,9 +153,11 @@ lane   = index & 7
 ```
 
 This preserves the capacity-independent runtime walker while reducing
-persistent tape distance by roughly a factor of eight. It is still a linear
-record walk in the worst case; S3 decides whether that is fast enough in
-practice.
+persistent tape distance by roughly a factor of eight. Rooted access is still a
+linear record walk in the worst case. The scoped relative cursor keeps the
+physical head at the selected record between operations; S2 must provide its
+runtime coordinate stream, and S3 decides whether end-to-end performance is
+sufficient.
 
 S1 implementation order:
 
@@ -200,6 +198,22 @@ S1 acceptance gates:
 - raw-step telemetry for sequential and indexed operations is recorded before
   frontend integration.
 
+Current Stage S1 status on PR #9:
+
+- runtime length carrier: complete;
+- eight-byte chunking and partial-final-chunk replay: complete;
+- non-negative packed-u32 load/store: complete;
+- signed-int64 negative normalization and range guarding: complete;
+- scoped cursor-aware access and distribution telemetry: complete;
+- implementation commit `5db4ae750e927a85b3f714f55dce95279cbf6c55`:
+  four-shard CI green in run #481.
+
+At sequence length 256, the cursor swap fixture improved raw steps per query by
+6.50x for head-adjacent accesses, 262.6x in the middle, 581.5x near the tail,
+29.4x for alternating ends, and 70.6x for deterministic pseudo-random indexes.
+This is primitive telemetry: the fixture receives prevalidated relative record
+deltas and lanes. It does not yet prove maximum-scale ABC199 C.
+
 The heap-backed `bfdynlist`/`bfheap` machinery remains useful for later true
 object identity and multiple dynamic objects, but its current linked/handle
 lookup is not the default backing for this flat character sequence. The flat
@@ -233,6 +247,34 @@ Rules:
 The official ABC199 C source used by current sample tests becomes the first
 integration fixture, but the lowering must be phrased in terms of the general
 restricted character-list operations, not task-specific query semantics.
+
+Current S2a status on PR #9:
+
+- implementation commit `fa36fd83a20d92f48c8601d787d939a211f3231c`;
+- one direct `name = list(input())` construction is selected only when uses are
+  restricted to signed subscripts, `len`, generic character iteration, and a
+  direct printed empty join;
+- unsupported ownership/use shapes retain the fixed `StringRef` route;
+- a converging two-pass layout places the runtime sequence's left sentinel at
+  the exact compile-time temporary high-water boundary;
+- runtime tests cover length 1,024 and signed indexing across 255/256 on a
+  300-byte value;
+- full local suite: **429 passed**; four-shard CI pending.
+
+Source telemetry at public capacity 255:
+
+| ordinary Python fixture | generated BF |
+|---|---:|
+| dynamic read + direct join | 5,966 B |
+| dynamic read + `len` + join | 155,700 B |
+| load/store/`len`/join vertical slice | 361,931 B |
+| generic character iteration | 411,334 B |
+| ABC199 C | 1,909,540 B |
+
+The first S2 slice is genuinely capacity-scalable and within the source limit.
+ABC199 C is not: the ordinary program remains over 512 KiB, so S2 is still in
+progress. Next reduce reusable packed-query/scalar and multi-access costs, then
+connect frontend-produced relative coordinates to the S1e mobile cursor.
 
 ### Stage S3 — indexing complexity and Tritium scaling
 
@@ -270,6 +312,16 @@ If linear-distance random access is too slow, stop the maximum-scale claim at
 that gate. The next research task is then a stronger indexed representation or a
 semantics-preserving general batched/cursor optimization. Do not hide the
 problem with an ABC199-specific compiler shortcut.
+
+As a design-discovery exercise, maintain a separate problem-specialized BF
+code-golf baseline for hard acceptance tasks before committing to a general
+representation. This is especially relevant to ABC199 C: a tiny specialized
+solution may reveal logical-offset, delayed-permutation, cursor, or tape-layout
+structures that are obscured by a direct lowering. The baseline is an oracle
+and performance upper bound only. Never route production compilation by problem
+name or exact source shape; extract useful observations into reusable,
+semantics-preserving primitives and validate them on unrelated programs before
+promotion.
 
 ### Stage S4 — generalize only after the primitive is measured
 
