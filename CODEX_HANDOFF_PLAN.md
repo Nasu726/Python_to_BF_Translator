@@ -211,63 +211,102 @@ Status at handoff:
 
 - open
 - draft
-- runtime primitive only; public Python routing intentionally unchanged
+- S1 runtime primitive complete;
+- restricted S2 public Python routing is active for one statically safe dynamic
+  character list.
 
 ### Last known GitHub-verified baseline
 
-The S1b/S1c branch head `5bdfe17377c0620c1b7ed99125b3f7fcc5cdddfc`
-was verified by workflow run #479:
+The last remotely verified implementation head is
+`5db4ae750e927a85b3f714f55dce95279cbf6c55`. Workflow run #481 is green in all
+four normal shards:
 
-- arithmetic: green
-- runtime: green
-- frontend: green
-- contest: green
+- arithmetic: green;
+- runtime: green;
+- frontend: green;
+- contest: green.
 
-That baseline includes the S1b boundary matrix and S1c non-negative runtime
-index load/store.
+The earlier S1d documentation head
+`d165c200df91865da772b5419813555623155a90` was likewise verified by run #480.
+The S1b/S1c baseline `5bdfe17377c0620c1b7ed99125b3f7fcc5cdddfc`
+was verified by run #479.
 
 ### Current implementation commit / active work
 
-Latest implementation commit in this work session:
+The current branch head is
+`fa36fd83a20d92f48c8601d787d939a211f3231c`. It adds the first restricted S2
+frontend route. CI for this new head is pending; local full-suite verification
+is green.
+
+The preceding commit `5db4ae750e927a85b3f714f55dce95279cbf6c55`
+completes the S1e primitive and telemetry slice. It adds a scoped cursor API
+that can keep the physical BF head at the runtime-selected record during a
+relative-access session. Ordinary fixed-address emitter operations are
+deliberately unavailable while that scope is open; finishing the scope walks
+back to the static base.
+
+S1 verification:
+
+- focused runtime-byte-sequence tests: **111 passed**;
+- complete repository suite: **408 passed**;
+- exact line round trips include lengths **1,024** and **4,097**;
+- length 4,097 round trip: **81,585,175 raw steps**;
+- read source: **4,465 bytes**;
+- read + replay source: **4,990 bytes** (the existing `<5,000` gate remains);
+- rooted dynamic-index load/store: **21,790 / 22,104 bytes**;
+- rooted two-load/two-store swap: **76,350 bytes**;
+- signed-index load/store: **31,152 / 31,466 bytes**;
+- cursor load loop: **11,545 bytes**;
+- cursor swap loop: **24,062 bytes**.
+
+The emitted source uses only the standard eight Brainfuck commands and remains
+independent of runtime sequence length and query count. The cursor ABI currently
+accepts prevalidated relative record deltas plus a lane; runtime Python-index to
+cursor-coordinate conversion remains S2 work.
+
+S2 local verification at `fa36fd83a20d92f48c8601d787d939a211f3231c`:
+
+- full repository suite: **429 passed in 405.02s**;
+- new restricted-dynamic suite: **21 passed**;
+- runtime lengths: **0, 1, 8, 9, 256, 300, 1,024**;
+- signed indexes: **255, 256, -1, -300, -301** on a 300-byte line;
+- `len`, direct empty join, load/store, and generic character iteration work
+  beyond the configured fixed capacity;
+- iteration preserves `break`, `continue`, and loop `else` behavior;
+- all generated output remains standard eight-command Brainfuck.
+
+Current public-capacity source telemetry:
 
 ```text
-cf85c7a6d033caf0ab805cc9cd6ed9ec21f6aab3
+dynamic read + direct join                 5,966 B
+dynamic read + len + direct join         155,700 B
+load/store/len/join vertical slice       361,931 B
+generic character iteration              411,334 B
+ABC199 C ordinary source                1,909,540 B
 ```
 
-It adds S1d signed/negative runtime index normalization on top of the remotely
-verified S1b/S1c baseline. Verification in the current work session:
+The first four fixtures stay within AtCoder's 512 KiB submission limit. ABC199
+C is correct on its existing official-sample tests but is still **1,385,252
+bytes over the limit**, before maximum-scale runtime is considered. Do not call
+S2 complete or hide this with a larger source gate.
 
-- focused runtime-byte-sequence tests after S1d: **102 passed**;
-- complete repository suite through the main S1d boundary matrix:
-  **384 passed**;
-- the final 15 packed-borrow normalization cases also pass;
-- S1b read source: **4,298 bytes**;
-- S1b read + replay source: **4,819 bytes**;
-- dynamic-index load fixture: **21,057 bytes**;
-- dynamic-index store fixture: **21,447 bytes**;
-- two-load/two-store swap fixture: **74,083 bytes**;
-- signed-index load fixture: **30,405 bytes**;
-- signed-index store fixture: **30,785 bytes**.
-
-The S1d implementation commit still needs GitHub four-shard CI. Do not call S1d
-remotely verified until that run is green.
-
-Current intended persistent record layout:
+Current persistent record layout:
 
 ```text
-[marker][back][count][length-carrier:4][payload:8]
+[marker][back][count][length-carrier:4][payload:8][cursor-value]
 ```
 
 Constants at current head:
 
 ```text
-RECORD_STRIDE = 15
+RECORD_STRIDE = 16
 MARKER        = 0
 BACK          = 1
 COUNT         = 2
 LENGTH        = 3       # 4 little-endian bytes
 PAYLOAD0      = 7
 PAYLOAD_BYTES = 8
+CURSOR_VALUE  = 15
 ```
 
 The S1b implementation uses one runtime loop per chunk and a bounded 0..7 lane selector rather than emitting eight complete input readers.
@@ -276,10 +315,12 @@ The S1b implementation uses one runtime loop per chunk and a bounded 0..7 lane s
 
 # 4. Immediate resume point — do this first
 
-Do **not** start frontend integration yet.
-
-Resume at **S1e cursor/telemetry**, after confirming the current PR head's
-four-shard CI.
+S1 is complete and remotely verified. S2a now routes a statically safe single
+escaping character list to runtime storage. Resume by confirming the S2a head's
+four-shard CI, then reduce the general scalar/query and repeated-access source
+cost exposed by ABC199 C. Preserve the fixed `StringRef` fallback for rejected
+ownership shapes. Do not claim S2 or maximum-scale ABC199 C support while the
+ordinary source remains above 512 KiB.
 
 ## Completed S1b verification matrix
 
@@ -409,10 +450,10 @@ store -> no-op
 
 until runtime exception propagation is implemented.
 
-Load uses one forward location pass plus a backward result carrier. Store uses a
-location/tag pass and a second forward value-carrier pass. Both currently return
-to the fixed base after each operation and are linear in record distance; S1e
-must measure and improve repeated access.
+The rooted load uses one forward location pass plus a backward result carrier.
+The rooted store uses a location/tag pass and a second forward value-carrier
+pass. These compatibility operations return to the fixed base after each call.
+S1e adds a separate scoped relative cursor for repeated accesses.
 
 Verified cases include:
 
@@ -432,7 +473,7 @@ two-load/two-store swaps. Python negative indexing remains isolated for S1d.
 
 ---
 
-## S1d — negative index + range normalization — DONE / LOCALLY VERIFIED
+## S1d — negative index + range normalization — DONE / VERIFIED
 
 Use runtime length to normalize:
 
@@ -461,11 +502,13 @@ the represented signed magnitude.
 
 ---
 
-## S1e — cursor + telemetry
+## S1e — cursor + telemetry — DONE / VERIFIED
 
-Before public Python routing, determine whether the representation is practically indexable.
-
-Add a cursor abstraction that can retain a current record position where semantically safe.
+The scoped `RuntimeByteCursor` retains the physical BF head at the current
+runtime record while consuming relative moves. It supports forward/backward
+seek, lane load/store/exchange, a mobile input loop, output/clear, and a final
+return to the static base. A single carrier cell can hold the loaded byte and
+drive the query loop, making a generic two-index swap source-compact.
 
 Measure raw BF steps separately for:
 
@@ -476,17 +519,31 @@ Measure raw BF steps separately for:
 5. uniformly pseudo-random accesses;
 6. repeated swaps.
 
-The purpose is to distinguish:
+The profiler `tools/profile_runtime_byte_sequence.py` distinguishes:
 
 - capacity scalability;
 - source-size scalability;
 - pointer-distance/runtime scalability.
 
-Do not claim maximum-scale ABC199 C support until S1e/S3 measurements support it.
+At length 256 with eight swaps, measured incremental raw steps per query were:
+
+| distribution | rooted | cursor | speedup |
+|---|---:|---:|---:|
+| head-adjacent | 95,215.1 | 14,655.5 | 6.50x |
+| middle-adjacent | 6,373,397.6 | 24,271.9 | 262.6x |
+| tail-adjacent | 22,607,740.5 | 38,880.4 | 581.5x |
+| alternating ends | 11,605,051.8 | 394,652.5 | 29.4x |
+| deterministic pseudo-random | 8,300,418.8 | 117,558.6 | 70.6x |
+
+The benchmark fixture intentionally pre-encodes absolute byte indexes as
+`(forward record delta, backward record delta, lane)`. This proves the storage
+and cursor session but not yet frontend/runtime coordinate conversion. Do not
+claim maximum-scale ABC199 C support until S2/S3 end-to-end measurements support
+it.
 
 ---
 
-# 6. S2 — restricted dynamic character-list frontend
+# 6. S2 — restricted dynamic character-list frontend — IN PROGRESS
 
 Only start after S1 primitive tests and telemetry are credible.
 
@@ -518,6 +575,41 @@ Initially support only one runtime-sized escaping character sequence per safe pr
 Keep the fixed `StringRef` implementation as fallback for programs not selected for scalable backing.
 
 Do not implement an ABC199-specific query algorithm. The optimization must operate on generic character-list semantics.
+
+## S2a implemented slice
+
+`compiler_dynamic_charlist.py` selects exactly one direct
+`name = list(input())` construction when every use is one of:
+
+- signed runtime subscript load or simple-assignment store;
+- `len(name)`;
+- `for char in name` with a distinct simple target;
+- direct `print("".join(name), ...)`.
+
+Aliasing, rebinding, multiple constructions, materialized join results, and
+other object uses remain on the fixed compatibility route. The public layout
+compiler performs a probe pass, then converges the runtime base so the complete
+16-cell left sentinel begins exactly at the temporary high-water boundary.
+
+Quad64 indexes are snapshotted with one runtime lane walker and destructively
+packed in adjacent temporary cells. This reduced the ordinary ABC199 C source
+from **4,399,170 B** for the first naive S2 connection to **1,909,540 B**. The
+remaining excess is spread across general tuple integer input/control-flow and
+multiple separately lowered list accesses; it is not evidence for a task-name
+special case.
+
+## S2b next gate
+
+Reduce generic source cost far enough that the ordinary ABC199 C program is
+below 512 KiB, without weakening any existing gate. Candidate reusable work:
+
+1. keep packed query integers packed longer instead of expanding and repacking
+   every scalar around `map(int, input().split())`;
+2. fuse the general three-statement character swap idiom or add a two-index
+   sequence primitive with ordinary alias/evaluation semantics;
+3. feed normalized runtime coordinates into the proven mobile cursor session;
+4. measure each change against unrelated dynamic-character programs as well as
+   ABC199 C.
 
 ---
 
@@ -809,15 +901,16 @@ At the latest local handoff:
 S1a = DONE + four-shard green
 S1b = DONE + four-shard green (run #479)
 S1c = DONE + four-shard green (run #479)
-S1d = DONE + local focused/full-suite verification; head CI pending
-S1e = NOT STARTED
-S2  = NOT STARTED
+S1d = DONE + four-shard green (run #480)
+S1e = DONE + four-shard green (run #481)
+S2a = IMPLEMENTED + local 429-test green; head CI pending
+S2b = NOT STARTED (ABC199 C source reduction / cursor coordinates)
 S3  = NOT STARTED
 S4  = NOT STARTED
 ```
 
-The immediate next action is to confirm current-head CI, then implement S1e
-telemetry and choose the cursor state from measured access distributions.
+The immediate next action is to verify the S2a branch head in normal CI, then
+start the generic source-reduction work listed under S2b.
 
 ## Step 4 — update this file after each milestone
 

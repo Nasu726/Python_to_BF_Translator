@@ -146,12 +146,52 @@ The emitted source remains independent of runtime N.
 
 ### [MILESTONE: PR #9 dynamic byte sequence]
 
-`bfstreamseq.RuntimeByteSequence` now stores eight payload bytes per 15-cell
-runtime record, carries a packed-u32 length back once after input, and supports
+`bfstreamseq.RuntimeByteSequence` stores eight payload bytes per 16-cell runtime
+record, carries a packed-u32 length back once after input, and supports
 source-size-independent packed-u32 load/store. Signed packed-int64 wrappers
 normalize Python-style negative indices once against runtime length and reject
-values outside u32/range without low-byte wrapping. S1e cursor/telemetry remains
-before public scalable character-list routing.
+values outside u32/range without low-byte wrapping.
+
+S1e adds a scoped `RuntimeByteCursor`. Within the scope, the physical BF head
+stays at the runtime-selected record and consumes prevalidated relative record
+deltas plus a bounded lane. The cursor supports load/store/exchange, mobile
+query loops, and a final walk back to the static base. Commit
+`5db4ae750e927a85b3f714f55dce95279cbf6c55` passed all four CI shards in run
+#481; the full local suite was 408 tests.
+
+At length 256, cursor swaps reduced incremental raw steps/query versus rooted
+swaps by 6.50x (head-adjacent), 262.6x (middle-adjacent), 581.5x
+(tail-adjacent), 29.4x (alternating ends), and 70.6x (deterministic
+pseudo-random). These figures isolate the storage/session primitive because the
+fixture pre-encodes relative coordinates. Public frontend routing and runtime
+coordinate conversion remain separate concerns; the first rooted public route
+is recorded below, while cursor-coordinate production remains future work.
+
+### [MILESTONE: PR #9 restricted dynamic character-list frontend]
+
+Commit `fa36fd83a20d92f48c8601d787d939a211f3231c` connects one statically owned
+`list(input())` character list to `RuntimeByteSequence`. The selector accepts
+signed subscript load/store, `len`, generic character iteration, and directly
+printed empty join. Aliasing, rebinding, multiple constructions, and
+materialized joins retain the fixed compatibility route.
+
+The public compiler now uses a probe plus converging layout pass. The dynamic
+sequence's 16-cell left sentinel starts at the measured temporary high-water
+boundary, so neither later expression temporaries nor shared workspaces can
+overlap runtime-grown records. Runtime-derived one-character variables use
+capacity-one static storage when every producer proves that representation.
+
+Quad64 indexes are copied once through the runtime lane walker, packed in
+adjacent disposable cells, and then passed to the signed S1 API. The local suite
+is **429 passed**. Tests cover runtime length 1,024, 300-byte indexes
+255/256/-1/-300/-301, direct join, `len`, and iteration beyond the configured
+fixed capacity.
+
+The load/store/length/join slice emits **361,931 B** and generic iteration emits
+**411,334 B**, both below 512 KiB. Ordinary ABC199 C emits **1,909,540 B** and
+therefore remains rejected for source size even though official samples are
+correct. Do not broaden acceptance until generic scalar/query and repeated
+access source costs are reduced.
 
 ### [MILESTONE: general scalable Python lists]
 
@@ -252,6 +292,27 @@ The Python reference interpreter is intentionally literal and excellent for dete
 ### [PERMANENT] Do not build list iteration from repeated indexed heap lookup
 
 On the current one-element-per-block heap, a 70-element two-pass generic list iteration exceeded 1,000,000,000 raw steps even though direct length/index/alias tests were correct. Sequential operations need a carried physical/chunk cursor. Repeated `get(index)` from head plus ordinal handle lookup from heap origin is an architectural anti-pattern for scalable BF containers.
+
+### [PERMANENT] A cursor must retain the physical BF head
+
+Keeping only a logical cursor value in fixed cells does not reduce tape travel
+if every access still returns the BF head to the static origin. A useful cursor
+is a scoped mobile execution frame: while open, its code and scratch coordinates
+are relative to the current runtime record, and fixed-address emitter operations
+are forbidden. Close the frame explicitly by walking back to a known sentinel.
+Measure nearby, alternating-end, and pseudo-random access distributions because
+each stresses a different movement pattern.
+
+### [PERMANENT] Localize statically unrolled representation conversion
+
+The generic Boolean-int64 to packed-int64 converter touches 64 bit cells. If
+those bits and shared scratch are far apart, the generated source repeats that
+distance 64 times even when runtime complexity looks bounded. For dynamic
+indexes, first snapshot a Quad64 value with its single emitted lane walker,
+then destructively pack the disposable snapshot into adjacent cells. This cut
+the first ordinary ABC199 C dynamic-route source from 4,399,170 B to 1,909,540
+B without changing task semantics. Apply the same locality rule to future
+packed query and object conversions.
 
 ### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 
