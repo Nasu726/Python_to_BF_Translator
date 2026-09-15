@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 
+from bfpacked import PackedU32Ref
 from bfpacked64 import PackedI64Ref
 from bfstreamseq import RuntimeByteSequence
 from compiler_charconv import _empty_join_arg, _is_list_input
@@ -30,6 +31,17 @@ class DynamicCharListSelection:
     """One statically owned runtime-sized character-list name."""
 
     name: str
+
+
+@dataclass(frozen=True)
+class _DynamicCharSwap:
+    """Three source statements that form a semantics-preserving byte swap."""
+
+    temp_name: str
+    left_index: ast.AST
+    right_index: ast.AST
+    second: ast.stmt
+    third: ast.stmt
 
 
 def _dynamic_subscript_char_names(tree: ast.AST, char_list_name: str) -> set[str]:
@@ -94,6 +106,132 @@ def _is_direct_print_join(
         and call.func.id == "print"
         and join in call.args
     )
+
+
+def _pure_reusable_index(node: ast.AST) -> bool:
+    """Whether repeated evaluation can safely be collapsed to one evaluation.
+
+    The swap fusion deliberately accepts only a small arithmetic subset with no
+    calls, subscriptions, attributes or other observable evaluation effects.
+    This covers ordinary contest indexes such as ``a``, ``i`` and ``i + n``
+    without changing the behavior of exotic subscript expressions.
+    """
+    if isinstance(node, ast.Name):
+        return True
+    if isinstance(node, ast.Constant):
+        return type(node.value) is int
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _pure_reusable_index(node.operand)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub)):
+        return _pure_reusable_index(node.left) and _pure_reusable_index(node.right)
+    return False
+
+
+def _same_reusable_index(left: ast.AST, right: ast.AST) -> bool:
+    return (
+        _pure_reusable_index(left)
+        and _pure_reusable_index(right)
+        and ast.dump(left, include_attributes=False)
+        == ast.dump(right, include_attributes=False)
+    )
+
+
+def _index_names(node: ast.AST) -> set[str]:
+    return {
+        item.id
+        for item in ast.walk(node)
+        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)
+    }
+
+
+def _subscript_of(node: ast.AST, char_list_name: str) -> ast.Subscript | None:
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == char_list_name
+    ):
+        return node
+    return None
+
+
+def _find_dynamic_swap_triples(
+    tree: ast.Module,
+    char_list_name: str,
+) -> tuple[dict[ast.stmt, _DynamicCharSwap], set[ast.stmt]]:
+    """Find canonical ``tmp=s[i]; s[i]=s[j]; s[j]=tmp`` statement triples."""
+    first: dict[ast.stmt, _DynamicCharSwap] = {}
+    skipped: set[ast.stmt] = set()
+
+    for owner in ast.walk(tree):
+        for _field, value in ast.iter_fields(owner):
+            if not isinstance(value, list) or not value:
+                continue
+            if not all(isinstance(item, ast.stmt) for item in value):
+                continue
+
+            body: list[ast.stmt] = value
+            index = 0
+            while index + 2 < len(body):
+                one, two, three = body[index : index + 3]
+                if not (
+                    isinstance(one, ast.Assign)
+                    and len(one.targets) == 1
+                    and isinstance(one.targets[0], ast.Name)
+                    and isinstance(two, ast.Assign)
+                    and len(two.targets) == 1
+                    and isinstance(three, ast.Assign)
+                    and len(three.targets) == 1
+                ):
+                    index += 1
+                    continue
+
+                temp_name = one.targets[0].id
+                first_load = _subscript_of(one.value, char_list_name)
+                second_store = _subscript_of(two.targets[0], char_list_name)
+                second_load = _subscript_of(two.value, char_list_name)
+                third_store = _subscript_of(three.targets[0], char_list_name)
+                if not all(
+                    item is not None
+                    for item in (first_load, second_store, second_load, third_store)
+                ):
+                    index += 1
+                    continue
+                assert first_load is not None
+                assert second_store is not None
+                assert second_load is not None
+                assert third_store is not None
+
+                if not (
+                    isinstance(three.value, ast.Name)
+                    and three.value.id == temp_name
+                    and _same_reusable_index(first_load.slice, second_store.slice)
+                    and _same_reusable_index(second_load.slice, third_store.slice)
+                ):
+                    index += 1
+                    continue
+
+                # ``tmp`` itself must not participate in either index. Its first
+                # assignment would otherwise mutate an input to the later index
+                # evaluations that this fusion intentionally reuses.
+                if temp_name in (
+                    _index_names(first_load.slice) | _index_names(second_load.slice)
+                ):
+                    index += 1
+                    continue
+
+                swap = _DynamicCharSwap(
+                    temp_name=temp_name,
+                    left_index=first_load.slice,
+                    right_index=second_load.slice,
+                    second=two,
+                    third=three,
+                )
+                first[one] = swap
+                skipped.add(two)
+                skipped.add(three)
+                index += 3
+
+    return first, skipped
 
 
 def select_dynamic_char_list(
@@ -204,6 +342,13 @@ class PythonToBFStream(_BasePythonToBFStream):
         self._runtime_sized_char_list_names = (
             {selection.name} if selection is not None else set()
         )
+        if selection is not None:
+            swap_first, swap_skips = _find_dynamic_swap_triples(tree, selection.name)
+        else:
+            swap_first, swap_skips = {}, set()
+        self._dynamic_swap_first = swap_first
+        self._dynamic_swap_skips = swap_skips
+
         self._forced_compact_char_names = set()
         if selection is not None:
             proven_chars = _must_char_value_names(tree, {selection.name})
@@ -233,6 +378,11 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _new_packed_i64(self) -> PackedI64Ref:
         result = PackedI64Ref(self.temps.top)
+        self.temps.top += result.cells
+        return result
+
+    def _new_packed_u32(self) -> PackedU32Ref:
+        result = PackedU32Ref(self.temps.top)
         self.temps.top += result.cells
         return result
 
@@ -266,6 +416,23 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _pack_index(self, node: ast.AST) -> PackedI64Ref:
         return self._pack_word(self.compile_expr(node))
+
+    def _normalize_dynamic_index(self, node: ast.AST) -> PackedU32Ref:
+        """Evaluate one signed index once and copy its normalized u32 result out."""
+        sequence = self.dynamic_char_sequence
+        assert sequence is not None
+        signed = self._pack_index(node)
+        internal = sequence._normalize_signed_index(self.bf, signed)
+        result = self._new_packed_u32()
+        for byte_index in range(4):
+            self.backend.copy_cell(
+                internal.byte(byte_index),
+                result.byte(byte_index),
+                self.backend.s0,
+            )
+        sequence._clear_normalization_workspace(self.bf)
+        self.bf.move(sequence.base)
+        return result
 
     def _dynamic_length(self):
         sequence = self.dynamic_char_sequence
@@ -332,6 +499,33 @@ class PythonToBFStream(_BasePythonToBFStream):
         sequence.load_byte_signed(self.bf, target.char(0), packed)
         self.bf.clear(target.terminator)
 
+    def _compile_dynamic_swap(self, swap: _DynamicCharSwap) -> None:
+        """Lower a canonical three-statement swap with two normalized indexes."""
+        sequence = self.dynamic_char_sequence
+        assert sequence is not None
+        temp = self.strings.get(swap.temp_name)
+        if temp is None:
+            raise RuntimeError("dynamic character swap temporary was not inferred as string")
+
+        # Preserve the source program's useful post-swap value of ``tmp``: it
+        # remains the original left byte just as after the three Python
+        # assignments. Evaluate/load the left index before the right index, and
+        # only collapse repeated evaluations because the matcher proved both
+        # index expressions side-effect-free.
+        left = self._normalize_dynamic_index(swap.left_index)
+        self.backend.clear_string(temp)
+        sequence.load_byte(self.bf, temp.char(0), left)
+        self.bf.clear(temp.terminator)
+
+        right = self._normalize_dynamic_index(swap.right_index)
+        right_value = self.temps.cell()
+        self.bf.clear(right_value)
+        sequence.load_byte(self.bf, right_value, right)
+
+        sequence.store_byte(self.bf, left, right_value)
+        sequence.store_byte(self.bf, right, temp.char(0))
+        self.bf.clear(right_value)
+
     def _compile_for_string_control(self, node: ast.For) -> None:
         if not (
             isinstance(node.iter, ast.Name)
@@ -390,10 +584,17 @@ class PythonToBFStream(_BasePythonToBFStream):
         return super()._print_string_ref_compact(ref)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        swap = self._dynamic_swap_first.get(node)
+        if swap is not None:
+            self._compile_dynamic_swap(swap)
+            return
+        if node in self._dynamic_swap_skips:
+            return
+
         # Directly copy one byte between two runtime indexes of the same dynamic
-        # character list.  The generic string path first materializes a
+        # character list. The generic string path first materializes a
         # one-character StringRef and then performs a second string-level store,
-        # which is correct but source-expensive.  This fused path preserves
+        # which is correct but source-expensive. This fused path preserves
         # Python assignment evaluation order: evaluate/load the RHS completely
         # before evaluating the target subscript index.
         if (
