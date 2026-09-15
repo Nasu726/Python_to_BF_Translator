@@ -6,10 +6,12 @@ The established generic implementation lives in ``compiler_stream_generic``.
 int/string conversions; ``compiler_charindex`` / ``compiler_chario`` /
 ``compiler_stringcompact`` remove fixed-slot source explosions from character
 and scalar-string operations; ``compiler_decimalconv`` makes ``int(str)``
-source-compact; ``compiler_formatcompact`` does the same for ``str(int)``; and
+source-compact; ``compiler_formatcompact`` does the same for ``str(int)``;
 ``compiler_dynamic_charlist`` connects one statically safe character list to
-runtime-sized byte storage. This module keeps the separately proven
-whole-program specializations in front of those generic layers.
+runtime-sized byte storage; and ``compiler_quadlocal`` localizes distant scalar
+operations in shared workspace to avoid literal tape-distance source growth.
+This module keeps the separately proven whole-program specializations in front
+of those generic layers.
 """
 
 from __future__ import annotations
@@ -17,9 +19,9 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
-from compiler_dynamic_charlist import CompileError
-from compiler_dynamic_charlist import PythonToBFStream as _GenericPythonToBFStream
 from compiler_partition import lower_partition_program_if_supported
+from compiler_quadlocal import CompileError
+from compiler_quadlocal import PythonToBFStream as _GenericPythonToBFStream
 
 
 class PythonToBFStream(_GenericPythonToBFStream):
