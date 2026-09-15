@@ -9,11 +9,12 @@ around while S2 reduces general dynamic-character-list/query overhead.
 from __future__ import annotations
 
 import ast
+from textwrap import dedent
 
 from bfopt import optimize_bf
 from bfstreamseq import RECORD_STRIDE
 from compiler_dynamic_charlist import select_dynamic_char_list
-from compiler_layout import PythonToBFLayout
+from compiler_layout import PythonToBFLayout, compile_source
 
 
 ABC199_SOURCE = '''
@@ -47,6 +48,37 @@ if flipped:
         s[i + n] = tmp
 print("".join(s))
 '''
+
+
+MICRO_CASES = {
+    "base": '''
+        s = list(input())
+        print("".join(s))
+    ''',
+    "one_load": '''
+        s = list(input())
+        i = int(input())
+        tmp = s[i]
+        print(tmp)
+        print("".join(s))
+    ''',
+    "subscript_copy": '''
+        s = list(input())
+        i = int(input())
+        j = int(input())
+        s[i] = s[j]
+        print("".join(s))
+    ''',
+    "three_statement_swap": '''
+        s = list(input())
+        i = int(input())
+        j = int(input())
+        tmp = s[i]
+        s[i] = s[j]
+        s[j] = tmp
+        print("".join(s))
+    ''',
+}
 
 
 def lower_profile(source: str):
@@ -94,6 +126,19 @@ def _show(title: str, rows: list[tuple[int, str, int]], *, limit: int | None = N
         print(f"  L{line:02d} {kind:<12} {size:>10,d} B")
 
 
+def _show_micro_cases() -> None:
+    print("dynamic-char micro cases:")
+    previous = None
+    for name, source in MICRO_CASES.items():
+        code = compile_source(dedent(source))
+        size = len(code.encode("ascii"))
+        delta = ""
+        if previous is not None:
+            delta = f" delta_from_previous={size - previous:+,}"
+        print(f"  {name:<22} {size:>10,d} B{delta}")
+        previous = size
+
+
 def main() -> None:
     raw, final, compiler = lower_profile(ABC199_SOURCE)
     limit = 512 * 1024
@@ -104,6 +149,7 @@ def main() -> None:
     print(f"temp_peak={compiler.layout_plan.temp_peak}")
     _show("top-level attribution:", compiler.statement_sizes)
     _show("largest nested attribution:", compiler.detail_sizes, limit=30)
+    _show_micro_cases()
 
 
 if __name__ == "__main__":
