@@ -52,6 +52,18 @@ print("".join(chars))
 '''
 
 
+SWAP_SOURCE = '''
+chars = list(input())
+i = int(input())
+j = int(input())
+tmp = chars[i]
+chars[i] = chars[j]
+chars[j] = tmp
+print(tmp)
+print("".join(chars))
+'''
+
+
 def test_selector_accepts_one_owned_runtime_character_list():
     selection = select_dynamic_char_list(ast.parse(INDEX_SOURCE))
     assert selection is not None
@@ -187,6 +199,28 @@ print("".join(chars))
     # the source index (1), and the second numeric line is the destination (3).
     result = _run(code, "ABCDE\n1\n3\n")
     assert result.output == "ABCBE\n"
+
+
+def test_runtime_character_list_fused_swap_beyond_fixed_capacity():
+    code = _compile(SWAP_SOURCE)
+    text = "".join(chr(ord("A") + i % 26) for i in range(300))
+    expected = list(text)
+    old_left = expected[10]
+    expected[10], expected[290] = expected[290], expected[10]
+
+    result = _run(code, f"{text}\n10\n290\n")
+    assert result.output == f"{old_left}\n{''.join(expected)}\n"
+
+
+def test_runtime_character_list_fused_swap_negative_indexes():
+    code = _compile(SWAP_SOURCE)
+    text = "".join(chr(ord("A") + i % 26) for i in range(300))
+    expected = list(text)
+    old_left = expected[-1]
+    expected[-1], expected[-300] = expected[-300], expected[-1]
+
+    result = _run(code, f"{text}\n-1\n-300\n")
+    assert result.output == f"{old_left}\n{''.join(expected)}\n"
 
 
 def test_runtime_character_list_vertical_slice_stays_under_submission_limit():
