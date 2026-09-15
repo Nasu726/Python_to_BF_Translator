@@ -8,8 +8,11 @@ int/string conversions; ``compiler_charindex`` / ``compiler_chario`` /
 and scalar-string operations; ``compiler_decimalconv`` makes ``int(str)``
 source-compact; ``compiler_formatcompact`` does the same for ``str(int)``;
 ``compiler_dynamic_charlist`` connects one statically safe character list to
-runtime-sized byte storage; and ``compiler_quadlocal`` localizes distant scalar
-operations in shared workspace to avoid literal tape-distance source growth.
+runtime-sized byte storage; ``compiler_quadlocal`` localizes distant scalar
+operations in shared workspace; and ``compiler_packedlocals`` keeps proven
+nonescaping loop-local integer inputs packed instead of repeatedly expanding
+and repacking 99-cell Quad words.
+
 This module keeps the separately proven whole-program specializations in front
 of those generic layers.
 """
@@ -19,9 +22,9 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
+from compiler_packedlocals import CompileError
+from compiler_packedlocals import PythonToBFStream as _GenericPythonToBFStream
 from compiler_partition import lower_partition_program_if_supported
-from compiler_quadlocal import CompileError
-from compiler_quadlocal import PythonToBFStream as _GenericPythonToBFStream
 
 
 class PythonToBFStream(_GenericPythonToBFStream):
