@@ -1,0 +1,21 @@
+name: packed-scalar-experiment
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  packed-ops:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'runtime-byte-sequence-1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pytest
+      - name: Test packed int64 primitives
+        env:
+          PYTHONPATH: pybf
+        run: python -m pytest -q --durations=10 tests/test_bfpackedops.py

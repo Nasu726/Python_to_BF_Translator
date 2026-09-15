@@ -1,0 +1,20 @@
+name: profile-abc199-source
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  profile:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'runtime-byte-sequence-1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Profile ordinary ABC199 C source attribution
+        env:
+          PYTHONPATH: pybf
+        run: python tools/profile_abc199_source.py
