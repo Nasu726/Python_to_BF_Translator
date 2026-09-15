@@ -52,9 +52,6 @@ class PackedI64Ops:
         bf.clear(result)
         bf.end_while(tmp)
 
-    def _set_flag(self, dst: int, src: int) -> None:
-        self._copy_cell(src, dst, self._s(15))
-
     def clear(self, ref: PackedI64Ref) -> None:
         for index in range(I64_BYTES):
             self.bf.clear(ref.byte(index))
@@ -81,8 +78,6 @@ class PackedI64Ops:
         for byte_index in range(I64_BYTES):
             byte = dst.byte(byte_index)
             bf.clear(next_carry)
-
-            # Apply the incoming one-bit carry.
             self._copy_cell(carry, gate, helper)
             bf.clear(carry)
             bf.begin_while(gate)
@@ -95,8 +90,6 @@ class PackedI64Ops:
             bf.end_while(zero)
             bf.end_while(gate)
 
-            # Add the preserved rhs byte one unit at a time. One byte addition
-            # can wrap at most once, so next_carry remains a Boolean flag.
             self._copy_cell(rhs.byte(byte_index), count, helper)
             bf.begin_while(count)
             bf.add_const(count, -1)
@@ -112,7 +105,6 @@ class PackedI64Ops:
             bf.add_const(next_carry, -1)
             bf.add_const(carry, 1)
             bf.end_while(next_carry)
-
         self._clear_scratch()
 
     def sub_inplace(self, dst: PackedI64Ref, rhs: PackedI64Ref) -> None:
@@ -125,7 +117,6 @@ class PackedI64Ops:
         for byte_index in range(I64_BYTES):
             byte = dst.byte(byte_index)
             bf.clear(next_borrow)
-
             self._copy_cell(borrow, gate, helper)
             bf.clear(borrow)
             bf.begin_while(gate)
@@ -153,7 +144,6 @@ class PackedI64Ops:
             bf.add_const(next_borrow, -1)
             bf.add_const(borrow, 1)
             bf.end_while(next_borrow)
-
         self._clear_scratch()
 
     def equal(self, result: int, a: PackedI64Ref, b: PackedI64Ref) -> None:
@@ -162,7 +152,6 @@ class PackedI64Ops:
         work, count = self._s(0), self._s(1)
         zero, tmp, helper, gate = self._s(2), self._s(3), self._s(4), self._s(5)
         bf.set_const(result, 1)
-
         for byte_index in range(I64_BYTES):
             self._copy_cell(a.byte(byte_index), work, helper)
             self._copy_cell(b.byte(byte_index), count, helper)
@@ -180,21 +169,17 @@ class PackedI64Ops:
             bf.add_const(gate, -1)
             bf.clear(result)
             bf.end_while(gate)
-
         self._clear_scratch()
 
     def _unsigned_lt(self, result: int, a: PackedI64Ref, b: PackedI64Ref) -> None:
-        """Unsigned comparison via byte-wise subtraction borrow, preserving args."""
         bf = self.bf
         work, count = self._s(0), self._s(1)
         borrow, next_borrow = self._s(2), self._s(3)
         zero, tmp, helper, gate = self._s(4), self._s(5), self._s(6), self._s(7)
         bf.clear(borrow)
-
         for byte_index in range(I64_BYTES):
             self._copy_cell(a.byte(byte_index), work, helper)
             bf.clear(next_borrow)
-
             self._copy_cell(borrow, gate, helper)
             bf.clear(borrow)
             bf.begin_while(gate)
@@ -217,7 +202,6 @@ class PackedI64Ops:
             bf.set_const(next_borrow, 1)
             bf.end_while(zero)
             bf.end_while(count)
-
             bf.begin_while(next_borrow)
             bf.add_const(next_borrow, -1)
             bf.add_const(borrow, 1)
@@ -234,8 +218,8 @@ class PackedI64Ops:
         """Extract bit 7 of one preserved byte into ``dst``."""
         bf = self.bf
         value, quotient, parity, gate = self._s(8), self._s(9), self._s(10), self._s(11)
-        self._copy_cell(src, value, self._s(12))
-
+        helper = self._s(7)
+        self._copy_cell(src, value, helper)
         for _ in range(7):
             bf.clear(quotient)
             bf.clear(parity)
@@ -256,25 +240,22 @@ class PackedI64Ops:
             bf.add_const(quotient, -1)
             bf.add_const(value, 1)
             bf.end_while(quotient)
-
         bf.clear(dst)
         bf.begin_while(value)
         bf.add_const(value, -1)
         bf.add_const(dst, 1)
         bf.end_while(value)
-        for cell in (quotient, parity, gate, self._s(12)):
+        for cell in (quotient, parity, gate, helper):
             bf.clear(cell)
 
     def signed_lt(self, result: int, a: PackedI64Ref, b: PackedI64Ref) -> None:
         """Set ``result`` to one iff signed two's-complement ``a < b``."""
         bf = self.bf
         sign_a, sign_b, diff, gate = self._s(12), self._s(13), self._s(14), self._s(15)
-
         self._unsigned_lt(result, a, b)
         self._extract_sign(sign_a, a.byte(7))
         self._extract_sign(sign_b, b.byte(7))
 
-        # diff = sign_a XOR sign_b.
         self._copy_cell(sign_a, diff, gate)
         self._copy_cell(sign_b, gate, self._s(11))
         bf.begin_while(gate)
@@ -290,8 +271,6 @@ class PackedI64Ops:
         bf.end_while(self._s(11))
         bf.end_while(gate)
 
-        # Different signs override unsigned order: only a-negative/b-positive
-        # is signed-less-than.
         bf.begin_while(diff)
         bf.add_const(diff, -1)
         bf.clear(result)
