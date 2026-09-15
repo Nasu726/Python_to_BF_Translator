@@ -390,6 +390,33 @@ class PythonToBFStream(_BasePythonToBFStream):
         return super()._print_string_ref_compact(ref)
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
+        # Directly copy one byte between two runtime indexes of the same dynamic
+        # character list.  The generic string path first materializes a
+        # one-character StringRef and then performs a second string-level store,
+        # which is correct but source-expensive.  This fused path preserves
+        # Python assignment evaluation order: evaluate/load the RHS completely
+        # before evaluating the target subscript index.
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and self._is_dynamic_char_list_name(node.targets[0].value.id)
+            and isinstance(node.value, ast.Subscript)
+            and isinstance(node.value.value, ast.Name)
+            and self._is_dynamic_char_list_name(node.value.value.id)
+        ):
+            sequence = self.dynamic_char_sequence
+            assert sequence is not None
+            rhs_index = self._pack_index(node.value.slice)
+            value = self.temps.cell()
+            self.bf.clear(value)
+            sequence.load_byte_signed(self.bf, value, rhs_index)
+            lhs_index = self._pack_index(node.targets[0].slice)
+            sequence.store_byte_signed(self.bf, lhs_index, value)
+            self.bf.clear(value)
+            return
+
         if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
