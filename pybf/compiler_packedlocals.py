@@ -56,12 +56,33 @@ def _fixed_int_unpack_names(stmt: ast.stmt) -> list[str] | None:
     return names or None
 
 
+def _has_packed_loop_shape(tree: ast.AST) -> bool:
+    """Cheap pre-layout test for whether packed workspace can possibly be used.
+
+    The exact escape/store proof needs the initialized compiler, but static tape
+    layout is chosen before that proof runs.  Reserve the extra workspace only
+    for modules containing the required range-loop/input-tuple shape.  Programs
+    without such a loop retain the pre-packedlocals physical layout exactly;
+    this matters because literal BF pointer distance directly affects source
+    size even when an optimization is otherwise dormant.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For) or not node.body:
+            continue
+        targets = _fixed_int_unpack_names(node.body[0])
+        if (
+            targets is not None
+            and len(targets) <= PACKED_LOCAL_LIMIT
+            and len(set(targets)) == len(targets)
+        ):
+            return True
+    return False
+
+
 class PythonToBFStream(_BasePythonToBFStream):
     """Final compiler plus conservative packed loop-local scalar shadows."""
 
-    SHARED_WORKSPACE_CELLS = (
-        _BasePythonToBFStream.SHARED_WORKSPACE_CELLS + PACKED_EXTRA_CELLS
-    )
+    SHARED_WORKSPACE_CELLS = _BasePythonToBFStream.SHARED_WORKSPACE_CELLS
 
     def __init__(
         self,
@@ -77,6 +98,15 @@ class PythonToBFStream(_BasePythonToBFStream):
             for parent in ast.walk(tree)
             for child in ast.iter_child_nodes(parent)
         }
+        self._packed_workspace_enabled = _has_packed_loop_shape(tree)
+        # Base initializers consult ``self.SHARED_WORKSPACE_CELLS`` while laying
+        # out scratch/runtime regions.  Keep non-candidate programs byte-for-byte
+        # on the established layout instead of paying pointer-distance overhead
+        # for a dormant optimizer.
+        self.SHARED_WORKSPACE_CELLS = (
+            _BasePythonToBFStream.SHARED_WORKSPACE_CELLS
+            + (PACKED_EXTRA_CELLS if self._packed_workspace_enabled else 0)
+        )
         self._active_packed_locals: dict[str, PackedI64Ref] = {}
         self._active_packed_readonly: dict[str, PackedI64Ref] = {}
         super().__init__(
@@ -88,10 +118,18 @@ class PythonToBFStream(_BasePythonToBFStream):
         self._packed_extra_base = (
             self.workspace_base + _BasePythonToBFStream.SHARED_WORKSPACE_CELLS
         )
-        scratch = self._packed_extra_base + (
-            PACKED_LOCAL_LIMIT + PACKED_CACHE_LIMIT
-        ) * PACKED_BYTES
-        self.packed_ops = PackedI64Ops(self.bf, scratch)
+        if self._packed_workspace_enabled:
+            scratch = self._packed_extra_base + (
+                PACKED_LOCAL_LIMIT + PACKED_CACHE_LIMIT
+            ) * PACKED_BYTES
+            self.packed_ops: PackedI64Ops | None = PackedI64Ops(self.bf, scratch)
+        else:
+            self.packed_ops = None
+
+    def _ops(self) -> PackedI64Ops:
+        if self.packed_ops is None:
+            raise RuntimeError("packed scalar workspace was not reserved")
+        return self.packed_ops
 
     # ------------------------------------------------------------------
     # fixed packed storage inside the shared workspace
@@ -119,10 +157,12 @@ class PythonToBFStream(_BasePythonToBFStream):
 
     def _literal_packed(self, value: int) -> PackedI64Ref:
         result = self._new_packed_temp()
-        self.packed_ops.set_u64(result, value)
+        self._ops().set_u64(result, value)
         return result
 
     def _packed_ref_for_expr(self, node: ast.AST) -> PackedI64Ref | None:
+        if not self._packed_workspace_enabled:
+            return None
         if isinstance(node, ast.Name):
             return self._packed_name(node.id)
         if isinstance(node, ast.Constant) and type(node.value) is int:
@@ -142,14 +182,14 @@ class PythonToBFStream(_BasePythonToBFStream):
     def _quad_from_packed(self, src: PackedI64Ref):
         """Expand a preserved packed value through a disposable packed copy."""
         copy = self._new_packed_temp()
-        self.packed_ops.copy(copy, src)
+        self._ops().copy(copy, src)
         result = self._new_word()
         self.backend.copy64(result, copy)
         return result
 
     def _assign_packed_from_quad(self, dst: PackedI64Ref, value) -> None:
         packed = self._pack_word(value)
-        self.packed_ops.copy(dst, packed)
+        self._ops().copy(dst, packed)
 
     # ------------------------------------------------------------------
     # conservative range-loop selection
@@ -228,7 +268,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             mark = self.temps.mark()
             try:
                 packed = self._pack_word(self.variables[name])
-                self.packed_ops.copy(dst, packed)
+                self._ops().copy(dst, packed)
             finally:
                 self.temps.rewind(mark)
             mapping[name] = dst
@@ -284,7 +324,7 @@ class PythonToBFStream(_BasePythonToBFStream):
         token = self._packed_input_token()
 
         for destination in destinations:
-            self.packed_ops.clear(destination)
+            self._ops().clear(destination)
         for cell in (
             line_open,
             has_token,
@@ -315,7 +355,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             self.backend.copy_cell(has_token, token_gate, self.backend.s0)
             self.bf.begin_while(token_gate)
             self.bf.add_const(token_gate, -1)
-            self.packed_ops.copy(destination, token)
+            self._ops().copy(destination, token)
             self.bf.end_while(token_gate)
             self.bf.end_while(route)
 
@@ -359,21 +399,21 @@ class PythonToBFStream(_BasePythonToBFStream):
                 out = result.bit(0)
                 op = node.ops[0]
                 if isinstance(op, ast.Eq):
-                    self.packed_ops.equal(out, left, right)
+                    self._ops().equal(out, left, right)
                 elif isinstance(op, ast.NotEq):
-                    self.packed_ops.equal(out, left, right)
+                    self._ops().equal(out, left, right)
                     self.backend._toggle_bit(out, self.backend.s0)
                     self.backend._clear_scratch()
                 elif isinstance(op, ast.Lt):
-                    self.packed_ops.signed_lt(out, left, right)
+                    self._ops().signed_lt(out, left, right)
                 elif isinstance(op, ast.Gt):
-                    self.packed_ops.signed_lt(out, right, left)
+                    self._ops().signed_lt(out, right, left)
                 elif isinstance(op, ast.LtE):
-                    self.packed_ops.signed_lt(out, right, left)
+                    self._ops().signed_lt(out, right, left)
                     self.backend._toggle_bit(out, self.backend.s0)
                     self.backend._clear_scratch()
                 elif isinstance(op, ast.GtE):
-                    self.packed_ops.signed_lt(out, left, right)
+                    self._ops().signed_lt(out, left, right)
                     self.backend._toggle_bit(out, self.backend.s0)
                     self.backend._clear_scratch()
                 else:
@@ -395,7 +435,7 @@ class PythonToBFStream(_BasePythonToBFStream):
             dst = self._active_packed_locals[node.targets[0].id]
             packed = self._packed_ref_for_expr(node.value)
             if packed is not None:
-                self.packed_ops.copy(dst, packed)
+                self._ops().copy(dst, packed)
             else:
                 self._assign_packed_from_quad(dst, self.compile_expr(node.value))
             return
@@ -408,10 +448,10 @@ class PythonToBFStream(_BasePythonToBFStream):
             dst = self._active_packed_locals[node.target.id]
             rhs = self._packed_ref_for_expr(node.value)
             if rhs is not None and isinstance(node.op, ast.Add):
-                self.packed_ops.add_inplace(dst, rhs)
+                self._ops().add_inplace(dst, rhs)
                 return
             if rhs is not None and isinstance(node.op, ast.Sub):
-                self.packed_ops.sub_inplace(dst, rhs)
+                self._ops().sub_inplace(dst, rhs)
                 return
 
             # Correctness fallback for uncommon augmented operators: synchronize
