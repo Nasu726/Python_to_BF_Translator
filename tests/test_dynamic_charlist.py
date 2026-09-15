@@ -43,6 +43,15 @@ print("".join(chars))
 '''
 
 
+DIRECT_COPY_SOURCE = '''
+chars = list(input())
+i = int(input())
+j = int(input())
+chars[i] = chars[j]
+print("".join(chars))
+'''
+
+
 def test_selector_accepts_one_owned_runtime_character_list():
     selection = select_dynamic_char_list(ast.parse(INDEX_SOURCE))
     assert selection is not None
@@ -144,6 +153,40 @@ def test_runtime_character_list_signed_index_load_store(index):
 
     result = _run(code, f"{text}\n{index}\n")
     assert result.output == f"{old}\n300\n{''.join(expected)}\n"
+
+
+def test_runtime_character_list_direct_subscript_copy_beyond_fixed_capacity():
+    code = _compile(DIRECT_COPY_SOURCE)
+    text = "".join(chr(ord("A") + i % 26) for i in range(300))
+    expected = list(text)
+    expected[10] = text[290]
+
+    result = _run(code, f"{text}\n10\n290\n")
+    assert result.output == "".join(expected) + "\n"
+
+
+def test_runtime_character_list_direct_subscript_copy_negative_indexes():
+    code = _compile(DIRECT_COPY_SOURCE)
+    text = "".join(chr(ord("A") + i % 26) for i in range(300))
+    expected = list(text)
+    expected[-1] = text[-300]
+
+    result = _run(code, f"{text}\n-1\n-300\n")
+    assert result.output == "".join(expected) + "\n"
+
+
+def test_direct_subscript_copy_preserves_python_rhs_before_target_evaluation():
+    source = '''
+chars = list(input())
+chars[int(input())] = chars[int(input())]
+print("".join(chars))
+'''
+    code = _compile(source)
+
+    # Assignment evaluates the RHS first. The first numeric line is therefore
+    # the source index (1), and the second numeric line is the destination (3).
+    result = _run(code, "ABCDE\n1\n3\n")
+    assert result.output == "ABCBE\n"
 
 
 def test_runtime_character_list_vertical_slice_stays_under_submission_limit():
