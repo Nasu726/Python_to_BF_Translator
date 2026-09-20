@@ -458,16 +458,10 @@ class PythonToBFCompiler(PythonToBFInputs):
                 self.backend.get_const(old, ref, constant)
             else:
                 self.backend.get_dynamic(old, ref, index, workspace, self.temps.cell())
-            rhs = self.compile_expr(node.value)
-            result = self._new_word()
-            if isinstance(node.op, ast.Add):
-                self.backend.add64(result, old, rhs)
-            elif isinstance(node.op, ast.Sub):
-                self.backend.sub64(result, old, rhs)
-            elif isinstance(node.op, ast.Mult):
-                self.backend.mul64(result, old, rhs, self.workspace_base)
-            else:
-                raise self._error(node, f"unsupported augmented operator {type(node.op).__name__}")
+            result = self._compile_power_of_two_divmod(node.op, old, node.value)
+            if result is None:
+                rhs = self.compile_expr(node.value)
+                result = self._compile_augmented_value(node, old, rhs)
             if constant is not None:
                 self.backend.set_const(ref, constant, result)
             else:

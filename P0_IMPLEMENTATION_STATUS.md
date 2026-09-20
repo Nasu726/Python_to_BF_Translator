@@ -6,7 +6,46 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: contiguous repeat and physical traversal
+## Current increment: integer augmented assignment and ABC100 C
+
+Scalar and integer-list targets now support `//=`, `%=`, `&=`, `|=`, `^=`
+as well as `+=`, `-=`, `*=`. Subscript target evaluation and loading precede
+RHS evaluation; the index is evaluated once. These additions use the existing
+fixed-capacity list frontend, not the pending dynamic object model.
+
+A differential regression exposed an existing Quad signed-divmod bug:
+boolean/negation kernels borrowed shared Quad temporaries while that workspace
+still held division magnitudes and sign flags. Negative remainder correction
+could produce zero (for example `-17 % 3`). Signed division now uses the binary
+bit-addressed kernel throughout its owned workspace; Quad operands need no
+conversion or extra tape. Both ordinary expressions and updates are covered.
+
+Positive literal power-of-two divisors through 2**62 use sign-extended bit
+copies for floor division and low bits for modulo. The transformation applies
+to expressions and updates, preserves negative-dividend floor semantics, and
+does not skip evaluation of an effectful RHS. Other divisors retain the generic
+kernel. Zero-divisor error handling remains part of the unfinished error ABI.
+
+[ABC100 C — *3 or /2](https://atcoder.jp/contests/abc100/tasks/abc100_c)
+is a new public-API fixture: ordinary indexed list mutation with `a[i] //= 2`.
+All three official samples match CPython and the published output. The public
+source is **2,485,322 B**, versus **29,415,994 B** with the power-of-two
+transformation disabled and the same corrected general division kernel.
+Sample raw steps: **12,894,431 / 23,979,296 / 290,989,246**.
+This is still above 512 KiB. The official N<=10000 bound is not established:
+this sample fixture still uses fixed-capacity storage, and no maximum-scale
+Tritium benchmark was performed.
+
+Local validation: 26 new focused cases passed (including the three official
+samples and 24 arithmetic boundary executions), plus 29 public-API, layout,
+source-size, compile-performance and older frontend tests. The new cases are
+in the existing contest CI shard; no test/step limit was raised.
+
+The preceding #7/#8/#9/#12/#13 stack is now merged; see the handoff for the
+exact tested tree and successful CI runs. The allocation/identity/mobile
+workspace work below remains the next P0 architectural boundary.
+
+## Previous increment: contiguous repeat and physical traversal
 
 `bfpackedseq.RuntimePackedIntSequence` now has two additional runtime primitives:
 
@@ -53,7 +92,7 @@ travel even with this walker, so that bridge requires its own scaling test.
 
 ## Previous increment: integer-list mutation
 
-Implemented in a separate branch stacked on runtime-byte-sequence-1:
+Implemented in PR #12, now merged:
 
 - `DynamicIntListRuntime.set_packed`: indexed mutation through object handles,
   visible through aliases and isolated from other list objects; preserves index,

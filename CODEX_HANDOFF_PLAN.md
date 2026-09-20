@@ -53,9 +53,14 @@ Do not weaken source-size, correctness, or CI gates to make a feature appear com
 
 ---
 
-# 3. Current PR stack
+# 3. Merged PR stack (historical details below)
 
-The current work is stacked. Landing order matters.
+PRs #7, #8, #9, #12 and #13 were merged in dependency order on 2026-09-20.
+The resulting main commit is `aac498e768e99eeeef7db65b39ecfd7437786d50`.
+Its tree exactly matches tested stack head `50444f117cd24751c395f3a0debaf681366c8414`
+(normal four-shard CI run `35501143319`, success). The upstream streaming fix
+also passed CI run `35501093384` before #7 merged. The PR descriptions below
+are historical; do not resume development from these old branch heads.
 
 ## PR #7 — `dynamic-list-linear-1`
 
@@ -881,43 +886,26 @@ A future session should begin with this checklist.
 
 ## Step 1 — inspect repository / PR state
 
-Check PRs #7, #8, #9 and current branch heads.
-
-Expected stack at the time this document was written:
-
-```text
-main
-  -> PR #7 dynamic-list-linear-1
-       -> PR #8 string-conversions-1
-            -> PR #9 runtime-byte-sequence-1
-```
-
-If any have been merged, rebase/retarget descendants as appropriate before new work.
-
-Do not assume the SHA values in this document remain current after subsequent commits.
+Fetch main and inspect currently open PRs. The original #7/#8/#9/#12/#13
+stack is merged; do not reopen or retarget it. New work branches from main.
+Do not assume the SHA values in this document remain current after later work.
 
 ## Step 2 — inspect latest CI
 
-Do not trust only an older green run if the current head has newer commits.
+Verify the exact current head, not an older green run. Run all four normal
+shards before merging a new milestone; keep the collection guard enabled.
 
 ## Step 3 — determine current milestone
 
-At the latest local handoff:
+Read `P0_IMPLEMENTATION_STATUS.md` first. The public frontend still has fixed
+integer-list capacity/value-copy semantics. Contiguous repeat and physical
+forward/reverse traversal are tested low-level primitives, not public aliases
+or a finished object model. Next P0 architecture work must join allocation,
+identity and mobile scalar storage without reintroducing root-to-item scans.
 
-```text
-S1a = DONE + four-shard green
-S1b = DONE + four-shard green (run #479)
-S1c = DONE + four-shard green (run #479)
-S1d = DONE + four-shard green (run #480)
-S1e = DONE + four-shard green (run #481)
-S2a = IMPLEMENTED + local 429-test green; head CI pending
-S2b = NOT STARTED (ABC199 C source reduction / cursor coordinates)
-S3  = NOT STARTED
-S4  = NOT STARTED
-```
-
-The immediate next action is to verify the S2a branch head in normal CI, then
-start the generic source-reduction work listed under S2b.
+The subsequent integer augmented-assignment increment adds //=, %=, &=, |=,
+^= for scalars/list items, fixes signed-divmod workspace corruption, and tests
+ordinary ABC100 C. That increment does not close the dynamic-list boundary.
 
 ## Step 4 — update this file after each milestone
 
