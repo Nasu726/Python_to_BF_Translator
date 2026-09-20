@@ -12,6 +12,15 @@ Do not record routine green CI runs. Record only baselines or results that affec
 
 ---
 
+## 2026-09-20 — Feature completeness takes priority
+
+User clarification supersedes the narrow character-access priority below:
+`IMPLEMENTATION_PLAN.md` is the minimum implementation scope. Feature support,
+optimization and real ABC validation are all required, in any useful order.
+Track the current P0 increment and remaining gaps in
+`P0_IMPLEMENTATION_STATUS.md`. Do not equate passing primitive tests with public
+frontend support, or passing official samples with maximum-scale practicality.
+
 ## 2026-09-20 — Repository split and compiler-first continuation
 
 - Compiler work stays in this repository. General standard-BF compression is

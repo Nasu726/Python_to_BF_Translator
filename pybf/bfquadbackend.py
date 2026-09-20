@@ -123,6 +123,17 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             return
         super().copy64(dst, src)
 
+    def get_const(self, dst, ref, index: int) -> None:
+        if isinstance(dst, Quad64Ref):
+            # Packed -> Quad conversion consumes its input. A list payload is
+            # persistent, so snapshot it into the slot's disposable result lane
+            # just as the dynamic walker does before conversion.
+            snapshot = ref.result(index)
+            self.packed64.copy(snapshot, ref.item(index))
+            self.copy64(dst, snapshot)
+            return
+        super().get_const(dst, ref, index)
+
     def set_u64(self, dst, value: int) -> None:
         if isinstance(dst, Quad64Ref):
             self.quad.set_u64(dst, value)

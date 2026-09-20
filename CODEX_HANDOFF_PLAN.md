@@ -1,11 +1,11 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-20):** read the dated section at the top of
-`ENGINEERING_STATE.md` first. General compression research has moved to
-`Nasu726/bf_compression`; current work here focuses on reusable character-access
-lowering. Older milestone/size entries in this plan remain historical. The
-exchange primitive reduces current ordinary ABC199 output from 1,381,045 to
-1,342,585 bytes, still above the 512 KiB gate.
+**Latest checkpoint (2026-09-20):** `IMPLEMENTATION_PLAN.md` is the minimum
+feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
+for the current implementation/optimization/real-ABC acceptance track. General
+compression research stays in `Nasu726/bf_compression`. The preceding ABC199
+exchange improvement (1,381,045 -> 1,342,585 B) remains valid, but instruction
+optimization alone is no longer the primary next task.
 
 This document is the persistent source of truth for continuing the current compiler work across Codex, ChatGPT, or another implementation session.
 
