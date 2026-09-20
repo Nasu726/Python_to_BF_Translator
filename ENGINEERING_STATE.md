@@ -78,6 +78,14 @@ lowering; do not try to close the remaining gap with cosmetic local rewrites.
 
 ## Product target
 
+### [PERMANENT] Autonomous development and merges
+
+The user authorized autonomous PR merges on 2026-09-20. Review, validate and
+merge dependency-ordered increments without asking again, then continue the
+implementation plan. Earlier handoff instructions requiring a new explicit
+merge request are superseded. Keep incomplete feature and performance claims
+explicit, and keep all existing correctness/source/runtime gates.
+
 ### [PERMANENT] Public contract
 
 - Public entry point remains ordinary Python source -> standalone standard Brainfuck (`><+-.,[]`).

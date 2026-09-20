@@ -36,7 +36,7 @@ Do not weaken source-size, correctness, or CI gates to make a feature appear com
 
 # 2. Working rules / non-negotiable constraints
 
-1. **Never merge a PR unless the user explicitly asks.**
+1. **Autonomous PR merging is authorized by the user (2026-09-20).** Review the change, run the necessary tests, verify green CI, and merge in dependency order without requesting permission again. Keep using PR branches; do not bypass repository protections or claim unfinished features are complete.
 2. Keep PR boundaries reviewable. Do not mix an unfinished next architecture phase into a PR whose current feature is already complete.
 3. Standard BF only: emitted programs must contain only `><+-.,[]`.
 4. Treat raw Python BF interpreter step counts as regression/complexity proxies, not as AtCoder wall-clock predictions.

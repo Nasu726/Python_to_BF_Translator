@@ -20,10 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Callable
 
 from bfbase4 import Base4I64Core, Base4I64Ref, WORD_CELLS as BASE4_WORD_CELLS
 from bfbase4decimal import Base4DecimalCore
 from bfcore import BFEmitter
+from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Ref
 
 
@@ -352,6 +354,44 @@ def _read_record_body() -> str:
     return r.code()
 
 
+class PackedIntRecordBody:
+    """Compile-time builder for operations local to one runtime record.
+
+    There are no absolute addresses or list indexes in this interface. The
+    builder owns a separate relative emitter; sequence markers/back-links are
+    inaccessible to its public operations. The enclosing walker emits this
+    body once, regardless of runtime length. I/O uses eight little-endian raw
+    bytes, not decimal text. Arithmetic/decimal formatting and arbitrary Python
+    statements need a larger mobile workspace and are not supported here yet.
+    """
+
+    def __init__(self) -> None:
+        self._bf = BFEmitter()
+
+    def write_value(self) -> None:
+        """Emit the current packed int64 without consuming its payload."""
+        for i in range(PAYLOAD_BYTES):
+            self._bf.move(PAYLOAD + i)
+            self._bf.emit(".")
+
+    def read_value(self) -> None:
+        """Replace the current payload with eight raw input bytes."""
+        for i in range(PAYLOAD_BYTES):
+            self._bf.move(PAYLOAD + i)
+            self._bf.emit(",")
+
+    def set_value(self, value: int) -> None:
+        """Assign a compile-time int64 constant with modulo-2**64 wrapping."""
+        if type(value) is not int:
+            raise TypeError("record constant must be an integer")
+        for i in range(PAYLOAD_BYTES):
+            self._bf.set_const(PAYLOAD + i, (value >> (8 * i)) & 255)
+
+    def _code(self) -> str:
+        self._bf.move(MARKER)
+        return self._bf.code()
+
+
 @dataclass(frozen=True)
 class RuntimePackedIntSequence:
     """Contiguous runtime-grown signed-int64 records beginning at ``base``."""
@@ -376,6 +416,98 @@ class RuntimePackedIntSequence:
         if index < 0:
             raise IndexError(index)
         return PackedI64Ref(self.base + index * RECORD_STRIDE + PAYLOAD)
+
+    def repeat_constant(self, bf: BFEmitter, count: PackedU32Ref, value: int) -> None:
+        """Materialize ``[constant] * runtime_u32`` into a fresh zero region.
+
+        ``count`` must be outside this sequence and is preserved. The caller
+        owns enough zero-initialized space for count+1 records. This is an
+        allocation primitive, not an in-place resize or a signed Python repeat
+        frontend. The remaining count travels in uninitialized payload lanes;
+        no element allocation or fixed-origin lookup occurs inside the loop.
+        """
+        self._check_layout()
+        if type(value) is not int:
+            raise TypeError("record constant must be an integer")
+        if count.base < 0 or count.base + count.cells > self.base:
+            raise ValueError("repeat count must precede the runtime sequence")
+        local_count = PackedU32Ref(PAYLOAD)
+
+        def arm(emitter, packed, marker, gate, counter):
+            packed.is_zero(marker, counter)
+            emitter.set_const(gate, 1)
+            emitter.begin_while(marker)
+            emitter.clear(marker)
+            emitter.clear(gate)
+            emitter.end_while(marker)
+            emitter.begin_while(gate)
+            emitter.add_const(gate, -1)
+            emitter.add_const(marker, 1)
+            emitter.end_while(gate)
+
+        packed = PackedU32Core(bf, self.base + PAYLOAD + 4)
+        packed.copy(PackedU32Ref(self.base + PAYLOAD), count)
+        bf.clear(self.base + BACK)
+        arm(bf, packed, self.base + MARKER, self.base + RECORD_STRIDE + MARKER,
+            PackedU32Ref(self.base + PAYLOAD))
+
+        # Build once in coordinates relative to the currently materialized item.
+        body = BFEmitter()
+        core = PackedU32Core(body, PAYLOAD + 4)
+        next_count = PackedU32Ref(RECORD_STRIDE + PAYLOAD)
+        # Current count is dead once transported; move instead of preserving a
+        # copy and clearing it again when this record becomes a payload.
+        for i in range(4):
+            body.begin_while(local_count.byte(i))
+            body.add_const(local_count.byte(i), -1)
+            body.add_const(next_count.byte(i), 1)
+            body.end_while(local_count.byte(i))
+        core.decrement(next_count)
+        arm(body, core, RECORD_STRIDE + MARKER, RECORD_STRIDE + BACK, next_count)
+        body.set_const(RECORD_STRIDE + BACK, 1)
+        for i in range(PAYLOAD_BYTES):
+            body.set_const(PAYLOAD + i, (value >> (8 * i)) & 255)
+        body.move(RECORD_STRIDE + MARKER)
+        bf.move(self.base + MARKER)
+        bf.emit("[" + body.code() + "]")
+        bf.emit(">" * BACK + "[" + "<" * RECORD_STRIDE + "]" + "<" * BACK)
+        bf.ptr = self.base
+
+    def walk_records(
+        self,
+        bf: BFEmitter,
+        build_body: Callable[[PackedIntRecordBody], None],
+        *,
+        reverse: bool = False,
+    ) -> None:
+        """Run a record-local body once per item with a retained physical head.
+
+        Requires a previously materialized sequence with intact marker/back
+        metadata. The compile-time callback is invoked once with a relative
+        builder; it must not emit into ``bf`` or access fixed-address state.
+        No scratch is borrowed from neighbouring payload. Empty sequences are
+        valid, and both directions restore the fixed base on completion.
+
+        Forward traversal includes one final rewind. Reverse traversal first
+        scans to the end sentinel and then processes each record on the return
+        walk. Both take O(N + body runtime), with source independent of N.
+        This primitive does not yet lower arbitrary Python list iterations.
+        """
+        self._check_layout()
+        body = PackedIntRecordBody()
+        build_body(body)
+        code = body._code()
+        bf.move(self.base + MARKER)
+        if reverse:
+            bf.emit("[" + ">" * RECORD_STRIDE + "]")
+            bf.emit(">" * BACK)
+            bf.emit("[" + "<" * (RECORD_STRIDE + BACK) + code + ">" * BACK + "]")
+        else:
+            bf.emit("[" + code + ">" * RECORD_STRIDE + "]")
+            bf.emit(">" * BACK)
+            bf.emit("[" + "<" * RECORD_STRIDE + "]")
+        bf.emit("<" * BACK)
+        bf.ptr = self.base
 
     def read_lf_terminated_s64s(self, bf: BFEmitter) -> None:
         """Read one whitespace-separated signed-int line with no capacity limit."""
@@ -402,4 +534,5 @@ __all__ = [
     "PAYLOAD",
     "PAYLOAD_BYTES",
     "RuntimePackedIntSequence",
+    "PackedIntRecordBody",
 ]
