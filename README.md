@@ -36,6 +36,7 @@ Python側が実行時に計算・管理する仕組みはありません。Pytho
 - `print(int)` → Brainfuck上のdecimal conversion
 - `input()` / `int(input())` → `,` とBrainfuck上のparser
 - `input().split()` → Brainfuck上の空白tokenizerとnewline管理
+- `str(int)` / `int(str)` → Brainfuck上のdecimal format / parse
 - string/list → tape上の固定レイアウト
 - listの動的index → Brainfuck上のindex比較・走査
 - 一時変数・変数配置 → コンパイル時にtape addressへ割当
@@ -66,10 +67,12 @@ zero-initialized tapeは生成コード最適化の正式なABI前提です。�
 - `for c in s`の1文字loop変数を、安全な場合はcompactな1-byte payloadとして保持
 - `c == "A"`等の1文字比較をbyte比較へspecialize
 - 安全性を証明できる` s = input(); for c in s:`パターンでは、255-byte文字列のmaterializeと再走査をせず入力を直接loopへstreamingする
+- `list(input())`で作るrestricted character-list viewでは、runtime index / input / join outputをpreserving rotationで処理し、255個の候補addressを静的展開しない
+- `int(str)` / `str(int)`でも同じく、固定255-byte stringへのdynamic selectorを避けるcompact loweringを使用する
 
-streaming optimizationは、loop body内に別の`input()`がある場合や、元のstring値が後から必要になる場合には適用しません。`break`時も元の`input()`と同じく現在行を最後まで消費してから次へ進みます。
+streaming optimizationは、loop body内に別の`input()`がある場合や、元の値が後から必要になる場合には適用しません。`break`時も元の`input()`と同じく現在行を最後まで消費してから次へ進みます。
 
-`main.py` は生成byte数を表示し、512 KiBを超えた場合には警告します。CIにも代表的な短いstring走査について512 KiB以下を要求するregression testがあります。
+`main.py` は生成byte数を表示し、512 KiBを超えた場合には警告します。CIでは代表的なcontest source shapeについて、correctnessとは別に512 KiB以下を要求するregression gateを置いています。
 
 ## 固定ランタイム型
 
@@ -80,10 +83,28 @@ CLIオプションで型サイズは変更できません。型表現はABIと�
 - `str`: 最大255 byteの固定長領域（NUL終端）
 - `list[int]`: 最大64要素、各要素signed 64-bit
 - `list[str]`: 最大64要素、各要素は固定長byte string
+- `list(input())`で生成されるcharacter-list view: 最大255文字。既存string payloadをmutableな1文字要素列として見るrestricted representation
 
 Python本来の任意精度int、動的長string/list、完全なobject alias semanticsとは異なります。
 
-## 入力
+### `list(input())` / `"".join(chars)` の現在の範囲
+
+次のような競プロ向け文字配列操作をサポートします。
+
+```python
+chars = list(input())
+chars[0] = "A"
+chars[-1] = "Z"
+print("".join(chars))
+```
+
+`list(input())` と `"".join(chars)` の変換自体は、同じbyte payloadに対するviewとして扱います。別のstring変数へ代入した場合はPythonのimmutable string semanticsを保つためsnapshot copyを作ります。
+
+現在このrestricted viewで対応するのは、1文字load/store、runtime/負index、`len`、iteration、1文字temporaryを使うswap、empty-separator joinです。element storeに使えるliteral/値は現行のNUL終端byte ABIに合わせて **code point 1..255のnon-NUL 1-byte文字**に限定します。一般のmutable `list[str]` と同一ではないため、multi-character element assignment、NUL要素、255を超えるUnicode文字、alias assignment、insert/delete/append、直接のlist repr出力などは未対応です。
+
+runtime `IndexError` の伝播もまだありません。範囲外character indexは暫定runtime contractとしてempty load / no-op storeになり、低byteへwrapして別要素を壊さないことを保証します。
+
+## 入力と型変換
 
 通常の競技プログラミング向けPythonと同じ書き方を使えます。
 
@@ -93,13 +114,19 @@ a, b = map(int, input().split())
 name, country = input().split()
 A = list(map(int, input().split()))
 words = input().split()
+chars = list(input())
+
+text = str(n)
+value = int(text)
 ```
 
 各 `input()` はBrainfuck実行時にも **1行単位** です。整数化・空白tokenize・string/listへの格納・newline管理はすべて生成Brainfuck自身が行います。
 
-`int(input())` は最初の整数tokenを読み、同じ物理行に残りがあってもその行を最後まで消費してから次の `input()` へ進みます。`input().split()` 系もnewlineを越えて次行のtokenを盗みません。
+`int(input())` は既存のcompact signed-integer readerを使い、最初の整数tokenを読んだ後は同じ物理行を最後まで消費して次の `input()` と行境界を保ちます。`input().split()` 系もnewlineを越えて次行のtokenを盗みません。
 
-固定長ABIのため、list容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。現時点ではPythonの`ValueError`等の例外再現までは行いません。固定数unpackで値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する固定runtime仕様です。
+`int(str_value)` は現在、projectのsigned-int64 ABI内の有効なASCII十進文字列を対象とし、先頭の`+` / `-`と前後のASCII whitespaceを扱います。Pythonの任意精度intやinvalid textに対するruntime `ValueError` の完全再現はまだ行いません。`str(int_value)` はsigned-int64の全範囲（`INT64_MIN` / `INT64_MAX`を含む）を扱います。
+
+固定長ABIのため、list容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。固定数unpackで値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する固定runtime仕様です。
 
 整数入力の実例は `examples/input_patterns.py` にあります。
 
@@ -120,11 +147,19 @@ words = input().split()
 - `A = list(map(int, input().split()))`
 - `S = input().split()` / `list(input().split())`
 - `S = list(map(str, input().split()))`
+- `chars = list(input())`, character index load/store, `len(chars)`, `"".join(chars)`
+- `str(int_value)`, `int(str_value)`, `str(str_value)`, `int(int_value)`
 - int/string listのindex、代入、`append`, `len`, iteration
 - runtime list repetition (`[x] * n`, `A * n`, `n * A`) ※現行固定容量まで
 - runtime負index
 - `print(...)`, `sep=`, `end=`
 - `abs`, `bool`, `min`, `max`
+
+`float` / float64は未対応です。整数・文字列・dynamic containerの実用性を優先し、必要になった段階でsoftware IEEE-754 runtimeとして実装する方針です。
+
+## 実装計画
+
+長期のobject / heap / dynamic container計画は `IMPLEMENTATION_PLAN.md`、今回のcontest syntax・`int`/`str`変換・実ABC acceptance corpus・float延期方針は `IMPLEMENTATION_PLAN_EXTENSIONS.md` に記録しています。
 
 ## リポジトリ構成
 
