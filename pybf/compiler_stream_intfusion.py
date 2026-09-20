@@ -213,12 +213,13 @@ class PythonToBFStream(_BasePythonToBFStream):
             end_line,
             self.workspace_base,
         )
-        self.backend.copy64(target, token)
-        self.backend.packed64.clear(token)
-
         self.backend.copy_cell(has_token, token_gate, self.backend.s0)
         self.bf.begin_while(token_gate)
         self.bf.add_const(token_gate, -1)
+        # Empty input (or trailing whitespace after the last token) performs no
+        # Python iteration and must preserve the previous loop-target value.
+        self.backend.copy64(target, token)
+        self.backend.packed64.clear(token)
         self.bf.set_const(body_active, 1)
 
         ctx = _LoopContext(body_active, broke)

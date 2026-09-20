@@ -46,6 +46,22 @@ print()
     assert _run(code, "1 2 3\n").output == "1|2|3|\n"
 
 
+def test_empty_or_exhausted_stream_preserves_python_loop_target():
+    source = '''
+x = 77
+a = list(map(int, input().split()))
+for x in a:
+    x += 1
+else:
+    print(x)
+print(x)
+print(input())
+'''
+    code = _compile(source)
+    for line, expected in [("", 77), ("  ", 77), ("1 2 3", 4), ("1 2 3  ", 4)]:
+        assert _run(code, line + "\nnext\n").output == f"{expected}\n{expected}\nnext\n"
+
+
 def test_single_use_input_list_streams_beyond_configured_capacity():
     source = """
 a = list(map(int, input().split()))
