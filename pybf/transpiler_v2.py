@@ -455,9 +455,14 @@ class PythonToBFV2:
             start_node, stop_node, step = args[0], args[1], 1
         elif len(args) == 3:
             start_node, stop_node = args[0], args[1]
-            if not isinstance(args[2], ast.Constant) or not isinstance(args[2].value, int):
+            # Python represents -1 / +1 as UnaryOp, not Constant. literal_eval
+            # accepts signed literals without executing calls or runtime names.
+            try:
+                step = ast.literal_eval(args[2])
+            except (ValueError, TypeError):
+                raise self._error(node, 'range step must currently be a constant integer') from None
+            if not isinstance(step, int):
                 raise self._error(node, 'range step must currently be a constant integer')
-            step = args[2].value
         else:
             raise self._error(node, 'range expects one to three arguments')
         if step == 0:

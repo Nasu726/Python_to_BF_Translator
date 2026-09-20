@@ -205,29 +205,68 @@ class DynamicIntListRuntime(DynamicIntListRootRuntime):
         self._append_packed_body(ref, self._value_tmp)
         self._clear_workspace()
 
-    def _get_packed_body(
-        self,
-        dst: PackedI64Ref,
-        ref: ObjectHandleRef,
-        index: PackedU32Ref,
-    ) -> None:
+    def _arm_index_walk(self) -> None:
+        """Continue only while both the remaining index and node are nonzero."""
         bf = self.heap.bf
-        self.packed64.clear(dst)
-        self.heap.read_next(self._current, ref)
-        self.packed.copy(self._counter, index)
         self.packed.is_zero(self._is_zero, self._counter)
         self._set_not_flag(self._loop, self._is_zero)
+        self.handles.is_zero(self._is_zero, self._current)
+        bf.begin_while(self._is_zero)
+        bf.clear(self._is_zero)
+        bf.clear(self._loop)
+        bf.end_while(self._is_zero)
+
+    def _locate_index(self, ref: ObjectHandleRef, index: PackedU32Ref) -> None:
+        """Locate at most len(list) links, leaving null on an invalid index.
+
+        The ordinal heap lookup remains expensive; this only bounds the number
+        of linked-list hops. It does not claim linear-time physical traversal.
+        """
+        bf = self.heap.bf
+        self.heap.read_next(self._current, ref)
+        self.packed.copy(self._counter, index)
+        self._arm_index_walk()
 
         bf.begin_while(self._loop)
         bf.add_const(self._loop, -1)
         self.heap.read_next(self._next, self._current)
         self.handles.copy(self._current, self._next)
         self.packed.decrement(self._counter)
-        self.packed.is_zero(self._is_zero, self._counter)
-        self._set_not_flag(self._loop, self._is_zero)
+        self._arm_index_walk()
         bf.end_while(self._loop)
 
+    def _get_packed_body(
+        self,
+        dst: PackedI64Ref,
+        ref: ObjectHandleRef,
+        index: PackedU32Ref,
+    ) -> None:
+        self.packed64.clear(dst)
+        self._locate_index(ref, index)
         self.heap.read_payload_i64(dst, self._current)
+
+    def set_packed(
+        self,
+        ref: ObjectHandleRef,
+        index: PackedU32Ref,
+        value: PackedI64Ref,
+    ) -> None:
+        """Update a nonnegative index through the shared object identity.
+
+        Preserve all external operands and list metadata. An invalid index is
+        currently a no-op, matching the heap compatibility ABI; this is not the
+        final Python IndexError contract. Operands must be outside workspace.
+        """
+        self._clear_workspace()
+        self._locate_index(ref, index)
+        self.handles.is_zero(self._is_zero, self._current)
+        self._set_not_flag(self._loop, self._is_zero)
+        bf = self.heap.bf
+        bf.begin_while(self._loop)
+        bf.clear(self._loop)
+        self.heap.write_payload_i64(self._current, value)
+        bf.end_while(self._loop)
+        self._clear_workspace()
 
     def get_packed(
         self,

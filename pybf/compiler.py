@@ -441,6 +441,40 @@ class PythonToBFCompiler(PythonToBFInputs):
 
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         if (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.target, ast.Subscript)
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id in self.lists
+        ):
+            # Augmented assignment evaluates the target/index and loads the old
+            # value BEFORE the RHS, and evaluates the index exactly once.
+            ref = self.lists[node.target.value.id]
+            index, constant = self._list_index_word(node.target.slice, ref)
+            old = self._new_word()
+            workspace = self._new_word()
+            if constant is not None:
+                if constant >= ref.capacity:
+                    raise self._error(node, "constant list index exceeds configured capacity")
+                self.backend.get_const(old, ref, constant)
+            else:
+                self.backend.get_dynamic(old, ref, index, workspace, self.temps.cell())
+            rhs = self.compile_expr(node.value)
+            result = self._new_word()
+            if isinstance(node.op, ast.Add):
+                self.backend.add64(result, old, rhs)
+            elif isinstance(node.op, ast.Sub):
+                self.backend.sub64(result, old, rhs)
+            elif isinstance(node.op, ast.Mult):
+                self.backend.mul64(result, old, rhs, self.workspace_base)
+            else:
+                raise self._error(node, f"unsupported augmented operator {type(node.op).__name__}")
+            if constant is not None:
+                self.backend.set_const(ref, constant, result)
+            else:
+                self.backend.set_dynamic(ref, index, result, workspace, self.temps.cell())
+            return
+
+        if (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
             and isinstance(node.targets[0], (ast.Tuple, ast.List))
