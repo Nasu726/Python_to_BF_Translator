@@ -535,8 +535,8 @@ def _finish_location_code(*, carry_loaded_byte: bool) -> str:
     return r.code()
 
 
-@lru_cache(maxsize=1)
-def _store_located_body() -> str:
+@lru_cache(maxsize=2)
+def _store_located_body(*, exchange: bool = False) -> str:
     """Carry a source byte forward and replace the tagged payload lane."""
     r = _RelativeBuilder()
     next_marker = RECORD_STRIDE + MARKER
@@ -554,8 +554,16 @@ def _store_located_body() -> str:
         r.move(LENGTH + 2)
         r.emit("[")
         r.clear(LENGTH + 2)
-        r.clear(PAYLOAD0 + lane_index)
+        if exchange:
+            r.transfer(PAYLOAD0 + lane_index, LENGTH + 3)
+        else:
+            r.clear(PAYLOAD0 + lane_index)
         r.transfer(LENGTH + 1, PAYLOAD0 + lane_index)
+        if exchange:
+            r.transfer(LENGTH + 3, LENGTH + 1)
+            # The stopped-at record is never entered by this forward walker.
+            # Its scratch flag distinguishes a hit from natural EOF.
+            r.set_const(RECORD_STRIDE + LENGTH + 2, 1)
         r.move(LENGTH + 2)
         r.emit("]")
 
@@ -573,6 +581,35 @@ def _store_located_body() -> str:
 
     r.transfer(LENGTH + 1, RECORD_STRIDE + LENGTH + 1)
     r.move(next_marker)
+    return r.code()
+
+
+@lru_cache(maxsize=1)
+def _finish_exchange_code() -> str:
+    """Carry the old byte home, or return zero for an out-of-range exchange."""
+    r = _RelativeBuilder()
+    r.move(LENGTH + 2)
+    r.emit("[")
+    r.clear(LENGTH + 2)
+    r.transfer(LENGTH + 1, LENGTH + 3)
+    r.move(LENGTH + 2)
+    r.emit("]")
+    r.clear(LENGTH + 1)
+
+    _set_zero_flag(r, LENGTH + 2, COUNT, LENGTH, LENGTH + 1)
+    r.set_const(MARKER, 1)
+    r.move(LENGTH + 2)
+    r.emit("[")
+    r.clear(LENGTH + 2)
+    r.clear(MARKER)
+    r.move(LENGTH + 2)
+    r.emit("]")
+    r.move(BACK)
+    r.emit("[")
+    r.transfer(LENGTH + 3, -RECORD_STRIDE + LENGTH + 3)
+    r.move(-RECORD_STRIDE + BACK)
+    r.emit("]")
+    r.emit("<")
     return r.code()
 
 
@@ -1240,6 +1277,32 @@ class RuntimeByteSequence:
         bf.emit("[" + _store_located_body() + "]")
         bf.emit(_finish_store_code())
         bf.ptr = self.base
+
+    def exchange_byte(self, bf: BFEmitter, index: PackedU32Ref, value: int) -> None:
+        """Replace a byte and return its previous value in the same fixed cell.
+
+        Preserves index, length and all other payload. Invalid indexes leave
+        the sequence unchanged and return zero, matching load-then-store.
+        ``value`` and index must be disjoint fixed storage outside the sequence
+        and its reserved workspace. Uses one locator plus one value walker,
+        instead of the three forward walks needed by separate load and store.
+        """
+        self._check_layout()
+        self._locate_index(bf, index, load=False)
+        _copy_cell_preserved(
+            bf, value, self.base + LENGTH + 1, self._fixed_access_tmp,
+        )
+        bf.move(self.base + MARKER)
+        bf.emit("[" + _store_located_body(exchange=True) + "]")
+        bf.emit(_finish_exchange_code())
+        bf.ptr = self.base
+        bf.clear(value)
+        result = self.base + LENGTH + 3
+        bf.begin_while(result)
+        bf.add_const(result, -1)
+        bf.add_const(value, 1)
+        bf.end_while(result)
+        bf.move(self.base)
 
     def open_cursor(self, bf: BFEmitter) -> "RuntimeByteCursor":
         """Open a scoped physical-record cursor at the sequence base.

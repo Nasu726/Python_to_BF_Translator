@@ -12,6 +12,61 @@ Do not record routine green CI runs. Record only baselines or results that affec
 
 ---
 
+## 2026-09-20 — Repository split and compiler-first continuation
+
+- Compiler work stays in this repository. General standard-BF compression is
+  independently developed in `https://github.com/Nasu726/bf_compression`.
+  Do not import experimental compression passes here before complete executable
+  BF, equivalence, source-size and integration-time gates are established.
+- Inspected compiler PR #9 head `04d980c` (normal CI green) and compressor PR #2
+  head `831027d`. The compression research has a verified roughly 6% local
+  reduction on its seven-artifact suite and much stronger grammar payload
+  encoding results, but the payload sizes exclude the BF decoder/VM/cleanup.
+  Neither aggregate suite sizes nor payload constructors establish that an
+  individual MB-scale program fits 512 KiB.
+- Near-term focus: compiler runtime character access. This has existing
+  correctness infrastructure and independently measurable improvements; a
+  complete compression VM is a larger separate research milestone.
+- The older 1,909,540-byte ABC199 figure below is historical. Reproducing
+  `PYTHONPATH=pybf python tools/profile_abc199_source.py` on `04d980c` gives
+  **1,381,045 B** with public defaults following direct-copy/swap fusion.
+
+### Exchange primitive
+
+`RuntimeByteSequence.exchange_byte` replaces a selected byte while returning
+its previous value in the supplied fixed cell. It preserves the index, runtime
+length and other payload; an invalid index returns zero without modifying the
+sequence, consistent with the existing non-raising load/store compatibility ABI.
+One locator plus one value walk replaces the three forward walks required by
+separate load and store. Source size is independent of runtime sequence length.
+
+Canonical three-statement swaps now load the left byte, exchange the right byte,
+then store the old right byte on the left. Reordering the two stores is safe only
+under the existing exclusive-ownership and pure/reusable-index guards. The
+named temporary retains the old left byte, including when the indexes coincide.
+
+Public-default source measurements:
+
+| Ordinary Python shape | Before | After |
+| --- | ---: | ---: |
+| ABC199 C | 1,381,045 B | 1,342,585 B |
+| Three-statement swap micro-case | 358,175 B | 341,766 B |
+
+ABC199 still exceeds 512 KiB by **818,297 B**. This is a small reusable compiler
+improvement, not completion of the size target or maximum-constraint support.
+Rooted accesses remain linear in traversed sequence distance; exchange is a
+constant-factor improvement, not a retained physical cursor or O(1) access.
+Focused runtime/character frontend validation: **235 tests passed**. New
+primitive tests compare complete tape, final pointer, output and consumed input
+against separate load/store, including empty input, all chunk lanes, indexes
+255/256, invalid u32 indexes and byte values 0/255. Frontend regressions include
+coincident indexes, negative indexes and repeated swaps using the same scratch.
+ABC199 official-sample raw steps decrease from 9,358,761 to **8,944,198**, and
+17,697,861 to **17,225,934**, with unchanged `LPFI` / `ILPF` outputs. These are
+reference-interpreter counts, not a Tritium maximum-constraint benchmark.
+Next measure index conversion and query scalar costs before further structural
+lowering; do not try to close the remaining gap with cosmetic local rewrites.
+
 ## Product target
 
 ### [PERMANENT] Public contract

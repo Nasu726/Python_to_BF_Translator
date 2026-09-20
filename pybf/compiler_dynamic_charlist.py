@@ -519,11 +519,13 @@ class PythonToBFStream(_BasePythonToBFStream):
 
         right = self._normalize_dynamic_index(swap.right_index)
         right_value = self.temps.cell()
-        self.bf.clear(right_value)
-        sequence.load_byte(self.bf, right_value, right)
+        self.backend.copy_cell(temp.char(0), right_value, self.backend.s0)
+        # Both indexes are pure and the array is exclusively owned. Updating
+        # the right element first is unobservable between these assignments;
+        # equal indexes and invalid-index compatibility also retain behavior.
+        sequence.exchange_byte(self.bf, right, right_value)
 
         sequence.store_byte(self.bf, left, right_value)
-        sequence.store_byte(self.bf, right, temp.char(0))
         self.bf.clear(right_value)
 
     def _compile_for_string_control(self, node: ast.For) -> None:

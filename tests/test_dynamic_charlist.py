@@ -223,6 +223,28 @@ def test_runtime_character_list_fused_swap_negative_indexes():
     assert result.output == f"{old_left}\n{''.join(expected)}\n"
 
 
+@pytest.mark.parametrize("left,right", [(0, 0), (7, 8), (8, 7), (-1, 0), (0, -9)])
+def test_fused_swap_same_cell_and_chunk_boundaries(left, right):
+    text = "ABCDEFGHI"
+    expected = list(text)
+    expected[left], expected[right] = expected[right], expected[left]
+    result = _run(_compile(SWAP_SOURCE), f"{text}\n{left}\n{right}\n")
+    assert result.output == f"{text[left]}\n{''.join(expected)}\n"
+
+
+def test_fused_swap_reuses_clean_exchange_workspace_in_loop():
+    source = '''
+chars = list(input())
+for i in range(9):
+    tmp = chars[i]
+    chars[i] = chars[8 - i]
+    chars[8 - i] = tmp
+print(tmp)
+print("".join(chars))
+'''
+    assert _run(_compile(source), "ABCDEFGHI\n").output == "A\nABCDEFGHI\n"
+
+
 def test_runtime_character_list_vertical_slice_stays_under_submission_limit():
     code = _compile(INDEX_SOURCE)
     assert len(code) < SOURCE_LIMIT

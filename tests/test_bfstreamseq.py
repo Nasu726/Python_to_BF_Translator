@@ -21,6 +21,45 @@ from bfstreamseq import (
 CHUNK_BOUNDARIES = (0, 1, 7, 8, 9, 15, 16, 17, 255, 256)
 
 
+@pytest.mark.parametrize("length,index", [(0, 0), (1, 0), (1, 1),
+    *[(17, i) for i in range(18)], (256, 255), (300, 256),
+    (300, 299), (300, 300), (9, 2**32 - 1)])
+@pytest.mark.parametrize("replacement", [0, 255])
+def test_exchange_matches_separate_load_store_full_state(length, index, replacement):
+    def program(fused):
+        bf = BFEmitter()
+        seq = RuntimeByteSequence(base=96)
+        ref = PackedU32Ref(0)
+        for i in range(4):
+            bf.set_const(ref.byte(i), (index >> (8 * i)) & 255)
+        bf.set_const(8, replacement)
+        seq.read_lf_terminated_bytes(bf)
+        if fused:
+            seq.exchange_byte(bf, ref, 8)
+        else:
+            seq.load_byte(bf, 9, ref)
+            seq.store_byte(bf, ref, 8)
+            bf.clear(8)
+            bf.begin_while(9)
+            bf.add_const(9, -1)
+            bf.add_const(8, 1)
+            bf.end_while(9)
+        seq.write_all_bytes(bf)
+        return bf.code()
+
+    payload = list(_payload(length))
+    if length > 8:
+        payload[7:9] = ["\x00", "\xff"]
+    data = "".join(payload) + "\n"
+    baseline = run_bf(program(False), data, memory_size=2048, step_limit=100_000_000)
+    fused = run_bf(program(True), data, memory_size=2048, step_limit=100_000_000)
+    assert fused.output == baseline.output
+    assert fused.memory == baseline.memory
+    assert fused.pointer == baseline.pointer
+    assert fused.input_consumed == baseline.input_consumed
+    assert len(program(True)) < len(program(False))
+
+
 def _roundtrip_program():
     bf = BFEmitter()
     seq = RuntimeByteSequence(base=64)
