@@ -195,6 +195,9 @@ class PythonToBFV2:
                 return self._compile_constant_pow(node)
 
             left = self.compile_expr(node.left)
+            reduced = self._compile_power_of_two_divmod(node.op, left, node.right)
+            if reduced is not None:
+                return reduced
             right = self.compile_expr(node.right)
 
             if isinstance(node.op, ast.Add):
@@ -343,6 +346,60 @@ class PythonToBFV2:
         finally:
             self.temps.rewind(mark)
 
+    def _compile_power_of_two_divmod(self, op, left, right_node):
+        """Signed floor division / modulo by a positive int64 power of two.
+
+        Two's-complement sign extension implements floor (not truncation),
+        including negative odd dividends. The low bits are Python's nonnegative
+        remainder. Inspect only literal RHS values; never skip a side effect.
+        """
+        if not isinstance(op, (ast.FloorDiv, ast.Mod)):
+            return None
+        if not isinstance(right_node, ast.Constant) or not isinstance(right_node.value, int):
+            return None
+        divisor = right_node.value
+        if not (0 < divisor < (1 << (WORD_BITS - 1))) or divisor & (divisor - 1):
+            return None
+        shift = divisor.bit_length() - 1
+        result = self._new_word(0)
+        if isinstance(op, ast.Mod):
+            for bit in range(shift):
+                self.backend.copy_cell(left.bit(bit), result.bit(bit), self.backend.s0)
+        else:
+            for bit in range(WORD_BITS):
+                source_bit = min(bit + shift, WORD_BITS - 1)
+                self.backend.copy_cell(left.bit(source_bit), result.bit(bit), self.backend.s0)
+        self.backend._clear_scratch()
+        return result
+
+    def _compile_augmented_value(self, node: ast.AugAssign, left, right):
+        """Apply an integer update to already evaluated operands.
+
+        Keep target/index evaluation in the caller: rewriting a subscript
+        update as an assignment plus BinOp would evaluate its index twice.
+        """
+        result = self._new_word()
+        if isinstance(node.op, ast.Add):
+            self.backend.add64(result, left, right)
+        elif isinstance(node.op, ast.Sub):
+            self.backend.sub64(result, left, right)
+        elif isinstance(node.op, ast.Mult):
+            self.backend.mul64(result, left, right, self.workspace_base)
+        elif isinstance(node.op, (ast.FloorDiv, ast.Mod)):
+            remainder = self._new_word()
+            self.backend.sdivmod64(result, remainder, left, right, self.workspace_base)
+            if isinstance(node.op, ast.Mod):
+                return remainder
+        elif isinstance(node.op, ast.BitAnd):
+            self.backend.and64(result, left, right)
+        elif isinstance(node.op, ast.BitOr):
+            self.backend.or64(result, left, right)
+        elif isinstance(node.op, ast.BitXor):
+            self.backend.xor64(result, left, right)
+        else:
+            raise self._error(node, f'unsupported augmented operator {type(node.op).__name__}')
+        return result
+
     def _compile_stmt_inner(self, node: ast.stmt) -> None:
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -357,16 +414,10 @@ class PythonToBFV2:
             if not isinstance(node.target, ast.Name):
                 raise self._error(node, 'only simple scalar augmented assignment is supported')
             dst = self._var(node.target)
-            rhs = self.compile_expr(node.value)
-            tmp = self._new_word()
-            if isinstance(node.op, ast.Add):
-                self.backend.add64(tmp, dst, rhs)
-            elif isinstance(node.op, ast.Sub):
-                self.backend.sub64(tmp, dst, rhs)
-            elif isinstance(node.op, ast.Mult):
-                self.backend.mul64(tmp, dst, rhs, self.workspace_base)
-            else:
-                raise self._error(node, f'unsupported augmented operator {type(node.op).__name__}')
+            tmp = self._compile_power_of_two_divmod(node.op, dst, node.value)
+            if tmp is None:
+                rhs = self.compile_expr(node.value)
+                tmp = self._compile_augmented_value(node, dst, rhs)
             self.backend.copy64(dst, tmp)
             return
 

@@ -1,3 +1,4 @@
+import ast
 import subprocess
 import sys
 
@@ -135,3 +136,95 @@ print(a)
     code = compile_layout_source(source, string_capacity=8, list_capacity=3)
     result = run_bf(code, memory_size=120_000, step_limit=500_000_000)
     assert result.output == "255 255 -1 256\n[255, -1, 256]\n"
+
+
+@pytest.mark.parametrize("op", ["//", "%", "&", "|", "^"])
+@pytest.mark.parametrize("left,right", [(-17, 3), (17, -3), (-17, -3), (0, 3)])
+def test_integer_augmented_operators_match_python(op, left, right):
+    # Both constant and runtime-negative subscripts must preserve other slots.
+    # Input for the index comes before the RHS and must be consumed just once.
+    source = f'''
+x = {left}
+x {op}= {right}
+a = [{left}, 255, {left}]
+a[0] {op}= {right}
+a[int(input())] {op}= int(input())
+print(x)
+print(a)
+print(input())
+'''
+    data = f"-1\n{right}\nnext\n"
+    expected = subprocess.run([sys.executable, "-c", source], input=data,
+        text=True, capture_output=True, check=True, timeout=5).stdout
+    code = compile_layout_source(source, string_capacity=8, list_capacity=3)
+    assert run_bf(code, data, memory_size=120_000,
+                  step_limit=500_000_000).output == expected
+
+
+ABC100_C_SOURCE = '''
+n = int(input())
+a = list(map(int, input().split()))
+answer = 0
+for i in range(n):
+    while a[i] % 2 == 0:
+        a[i] //= 2
+        answer += 1
+print(answer)
+'''
+
+
+def test_abc100_c_official_samples_against_cpython():
+    # https://atcoder.jp/contests/abc100/tasks/abc100_c
+    # Sample correctness, not a maximum-N or AtCoder runtime claim.
+    code = compile_public_source(ABC100_C_SOURCE)
+    assert len(code) <= 2_500_000  # Track this milestone; final target remains 512 KiB.
+    assert set(code) <= set("><+-.,[]")
+    samples = [
+        ("3\n5 2 4\n", "3\n"),
+        ("4\n631 577 243 199\n", "0\n"),
+        ("10\n2184 2126 1721 1800 1024 2528 3360 1945 1280 1776\n", "39\n"),
+    ]
+    for data, expected in samples:
+        reference = subprocess.run([sys.executable, "-c", ABC100_C_SOURCE],
+            input=data, text=True, capture_output=True, check=True, timeout=5).stdout
+        assert reference == expected
+        result = run_bf(code, data, memory_size=120_000, step_limit=500_000_000)
+        assert result.output == reference
+
+
+@pytest.mark.parametrize("divisor", [1, 2, 256, 1 << 62])
+def test_power_of_two_division_signed_boundaries(divisor):
+    from compiler_layout import PythonToBFLayout
+
+    # Inspect generated arithmetic directly, avoiding unrelated decimal-I/O
+    # cost at int64 extrema. Keep all variables live in the layout AST.
+    for value in [-(1 << 63), -17, -1, 0, 17, (1 << 63) - 1]:
+        tree = ast.parse(f"x = {value}\nq = x // {divisor}\nr = x % {divisor}\n"
+                         f"x //= {divisor}\nr %= {divisor}\nprint(x, q, r)\n")
+        compiler = PythonToBFLayout(tree, string_capacity=8, list_capacity=1)
+        for statement in tree.body[:-1]:
+            compiler.compile_stmt(statement)
+        result = run_bf(compiler.bf.code(), memory_size=120_000,
+                        step_limit=500_000_000)
+        for name, expected in [("x", value // divisor), ("q", value // divisor),
+                               ("r", value % divisor)]:
+            ref = compiler.variables[name]
+            actual = sum(result.memory[ref.bit(i)] << i for i in range(64))
+            assert actual == expected & ((1 << 64) - 1)
+
+
+def test_runtime_divmod_preserves_operands_and_negative_remainder_correction():
+    source = '''
+x = -17
+y = 3
+print(x // y, x % y)
+print(x, y)
+x = 17
+y = -3
+print(x // y, x % y)
+print(x, y)
+'''
+    code = compile_layout_source(source, string_capacity=8, list_capacity=1)
+    assert run_bf(code, memory_size=120_000, step_limit=500_000_000).output == (
+        "-6 1\n-17 3\n-6 -1\n17 -3\n"
+    )

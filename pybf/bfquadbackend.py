@@ -19,6 +19,7 @@ from bfquad import (
     _RelativeBuilder,
 )
 from bfstringlists import BinaryStringListIO
+from bfsigned import Binary64Signed
 
 
 _DECIMAL_DIGITS = 20
@@ -139,6 +140,15 @@ class QuadBinaryStringListIO(BinaryStringListIO):
             self.quad.set_u64(dst, value)
             return
         super().set_u64(dst, value)
+
+    def sdivmod64(self, quotient, remainder, dividend, divisor, workspace_base) -> None:
+        # Signed division owns the shared workspace until floor/sign correction
+        # finishes. Dispatching its nested bool/negation to Quad kernels borrows
+        # _qtmp lanes in that SAME workspace and corrupts abs_b / sign flags.
+        # The binary kernel addresses operands through bit(), so it also accepts
+        # Quad64Ref without converting or borrowing any additional tape cells.
+        binary = Binary64Signed(self.bf, scratch_base=self.s0)
+        binary.sdivmod64(quotient, remainder, dividend, divisor, workspace_base)
 
     def shl1_inplace(self, word) -> None:
         if isinstance(word, Quad64Ref):
