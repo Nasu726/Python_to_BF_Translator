@@ -1,6 +1,12 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-20):** `IMPLEMENTATION_PLAN.md` is the minimum
+**Latest checkpoint (2026-09-20):** PR #14 is merged at
+`d487bfc0416d010f66fbadd1ad1bfeef6176c736` after all four shards passed run
+`35516448741` for head `e25441239f9e1ec8abbc586c89c389cdadaae3fe`.
+The next increment is mobile sum/length reduction for contiguous int64 records;
+read the current status document for contracts, scaling and dense-byte limits.
+
+ `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
 for the current implementation/optimization/real-ABC acceptance track. General
 compression research stays in `Nasu726/bf_compression`. The preceding ABC199
@@ -902,6 +908,9 @@ integer-list capacity/value-copy semantics. Contiguous repeat and physical
 forward/reverse traversal are tested low-level primitives, not public aliases
 or a finished object model. Next P0 architecture work must join allocation,
 identity and mobile scalar storage without reintroducing root-to-item scans.
+The new sum/count primitive moves one shared 38-cell frame with the traversal
+and restores tape layout on return. It is not general public list routing;
+its dense-byte arithmetic remains costly (see the status/benchmark script).
 
 The subsequent integer augmented-assignment increment adds //=, %=, &=, |=,
 ^= for scalars/list items, fixes signed-divmod workspace corruption, and tests
