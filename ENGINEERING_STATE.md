@@ -12,6 +12,61 @@ Do not record routine green CI runs. Record only baselines or results that affec
 
 ---
 
+## 2026-09-20 — Repository split and compiler-first continuation
+
+- Compiler work stays in this repository. General standard-BF compression is
+  independently developed in `https://github.com/Nasu726/bf_compression`.
+  Do not import experimental compression passes here before complete executable
+  BF, equivalence, source-size and integration-time gates are established.
+- Inspected compiler PR #9 head `04d980c` (normal CI green) and compressor PR #2
+  head `831027d`. The compression research has a verified roughly 6% local
+  reduction on its seven-artifact suite and much stronger grammar payload
+  encoding results, but the payload sizes exclude the BF decoder/VM/cleanup.
+  Neither aggregate suite sizes nor payload constructors establish that an
+  individual MB-scale program fits 512 KiB.
+- Near-term focus: compiler runtime character access. This has existing
+  correctness infrastructure and independently measurable improvements; a
+  complete compression VM is a larger separate research milestone.
+- The older 1,909,540-byte ABC199 figure below is historical. Reproducing
+  `PYTHONPATH=pybf python tools/profile_abc199_source.py` on `04d980c` gives
+  **1,381,045 B** with public defaults following direct-copy/swap fusion.
+
+### Exchange primitive
+
+`RuntimeByteSequence.exchange_byte` replaces a selected byte while returning
+its previous value in the supplied fixed cell. It preserves the index, runtime
+length and other payload; an invalid index returns zero without modifying the
+sequence, consistent with the existing non-raising load/store compatibility ABI.
+One locator plus one value walk replaces the three forward walks required by
+separate load and store. Source size is independent of runtime sequence length.
+
+Canonical three-statement swaps now load the left byte, exchange the right byte,
+then store the old right byte on the left. Reordering the two stores is safe only
+under the existing exclusive-ownership and pure/reusable-index guards. The
+named temporary retains the old left byte, including when the indexes coincide.
+
+Public-default source measurements:
+
+| Ordinary Python shape | Before | After |
+| --- | ---: | ---: |
+| ABC199 C | 1,381,045 B | 1,342,585 B |
+| Three-statement swap micro-case | 358,175 B | 341,766 B |
+
+ABC199 still exceeds 512 KiB by **818,297 B**. This is a small reusable compiler
+improvement, not completion of the size target or maximum-constraint support.
+Rooted accesses remain linear in traversed sequence distance; exchange is a
+constant-factor improvement, not a retained physical cursor or O(1) access.
+Focused runtime/character frontend validation: **235 tests passed**. New
+primitive tests compare complete tape, final pointer, output and consumed input
+against separate load/store, including empty input, all chunk lanes, indexes
+255/256, invalid u32 indexes and byte values 0/255. Frontend regressions include
+coincident indexes, negative indexes and repeated swaps using the same scratch.
+ABC199 official-sample raw steps decrease from 9,358,761 to **8,944,198**, and
+17,697,861 to **17,225,934**, with unchanged `LPFI` / `ILPF` outputs. These are
+reference-interpreter counts, not a Tritium maximum-constraint benchmark.
+Next measure index conversion and query scalar costs before further structural
+lowering; do not try to close the remaining gap with cosmetic local rewrites.
+
 ## Product target
 
 ### [PERMANENT] Public contract
@@ -144,6 +199,55 @@ The emitted source remains independent of runtime N.
 
 ## General runtime object/list foundation
 
+### [MILESTONE: PR #9 dynamic byte sequence]
+
+`bfstreamseq.RuntimeByteSequence` stores eight payload bytes per 16-cell runtime
+record, carries a packed-u32 length back once after input, and supports
+source-size-independent packed-u32 load/store. Signed packed-int64 wrappers
+normalize Python-style negative indices once against runtime length and reject
+values outside u32/range without low-byte wrapping.
+
+S1e adds a scoped `RuntimeByteCursor`. Within the scope, the physical BF head
+stays at the runtime-selected record and consumes prevalidated relative record
+deltas plus a bounded lane. The cursor supports load/store/exchange, mobile
+query loops, and a final walk back to the static base. Commit
+`5db4ae750e927a85b3f714f55dce95279cbf6c55` passed all four CI shards in run
+#481; the full local suite was 408 tests.
+
+At length 256, cursor swaps reduced incremental raw steps/query versus rooted
+swaps by 6.50x (head-adjacent), 262.6x (middle-adjacent), 581.5x
+(tail-adjacent), 29.4x (alternating ends), and 70.6x (deterministic
+pseudo-random). These figures isolate the storage/session primitive because the
+fixture pre-encodes relative coordinates. Public frontend routing and runtime
+coordinate conversion remain separate concerns; the first rooted public route
+is recorded below, while cursor-coordinate production remains future work.
+
+### [MILESTONE: PR #9 restricted dynamic character-list frontend]
+
+Commit `fa36fd83a20d92f48c8601d787d939a211f3231c` connects one statically owned
+`list(input())` character list to `RuntimeByteSequence`. The selector accepts
+signed subscript load/store, `len`, generic character iteration, and directly
+printed empty join. Aliasing, rebinding, multiple constructions, and
+materialized joins retain the fixed compatibility route.
+
+The public compiler now uses a probe plus converging layout pass. The dynamic
+sequence's 16-cell left sentinel starts at the measured temporary high-water
+boundary, so neither later expression temporaries nor shared workspaces can
+overlap runtime-grown records. Runtime-derived one-character variables use
+capacity-one static storage when every producer proves that representation.
+
+Quad64 indexes are copied once through the runtime lane walker, packed in
+adjacent disposable cells, and then passed to the signed S1 API. The local suite
+is **429 passed**. Tests cover runtime length 1,024, 300-byte indexes
+255/256/-1/-300/-301, direct join, `len`, and iteration beyond the configured
+fixed capacity.
+
+The load/store/length/join slice emits **361,931 B** and generic iteration emits
+**411,334 B**, both below 512 KiB. Ordinary ABC199 C emits **1,909,540 B** and
+therefore remains rejected for source size even though official samples are
+correct. Do not broaden acceptance until generic scalar/query and repeated
+access source costs are reduced.
+
 ### [MILESTONE: general scalable Python lists]
 
 PR #6 also contains reusable but still experimental pieces:
@@ -227,6 +331,15 @@ Known rejected experiments from PR #6:
 
 The last experiment also exposed an ABI bug: LEFT[15] is the live count extent. Scratch-lane optimizations must respect count/parser fields that share the same runtime record.
 
+### [PERMANENT] Use problem-specialized BF as a laboratory, not a compiler shortcut
+
+For difficult real ABC workloads, a separately maintained code-golfed or
+problem-specialized BF implementation can reveal useful tape-native structure
+and establish an empirical upper bound. Compare it with public compiler output,
+then extract only reusable semantics-preserving ideas (for example cursor-aware
+indexing, logical offsets, or delayed permutations). Never dispatch production
+lowering by problem identity, exact source text, or expected output.
+
 ### [PERMANENT] Raw BF step counts and optimized-interpreter wall time are different metrics
 
 The Python reference interpreter is intentionally literal and excellent for deterministic complexity/regression checks. Tritium performs substantial static optimization and JIT/optimized execution. Billions of literal BF operations can therefore correspond to sub-second execution for this structured program. Keep both metrics: do not replace correctness-oriented raw-step gates with noisy wall-clock CI, and do not use raw steps alone to reject a practically fast Tritium program.
@@ -234,6 +347,27 @@ The Python reference interpreter is intentionally literal and excellent for dete
 ### [PERMANENT] Do not build list iteration from repeated indexed heap lookup
 
 On the current one-element-per-block heap, a 70-element two-pass generic list iteration exceeded 1,000,000,000 raw steps even though direct length/index/alias tests were correct. Sequential operations need a carried physical/chunk cursor. Repeated `get(index)` from head plus ordinal handle lookup from heap origin is an architectural anti-pattern for scalable BF containers.
+
+### [PERMANENT] A cursor must retain the physical BF head
+
+Keeping only a logical cursor value in fixed cells does not reduce tape travel
+if every access still returns the BF head to the static origin. A useful cursor
+is a scoped mobile execution frame: while open, its code and scratch coordinates
+are relative to the current runtime record, and fixed-address emitter operations
+are forbidden. Close the frame explicitly by walking back to a known sentinel.
+Measure nearby, alternating-end, and pseudo-random access distributions because
+each stresses a different movement pattern.
+
+### [PERMANENT] Localize statically unrolled representation conversion
+
+The generic Boolean-int64 to packed-int64 converter touches 64 bit cells. If
+those bits and shared scratch are far apart, the generated source repeats that
+distance 64 times even when runtime complexity looks bounded. For dynamic
+indexes, first snapshot a Quad64 value with its single emitted lane walker,
+then destructively pack the disposable snapshot into adjacent cells. This cut
+the first ordinary ABC199 C dynamic-route source from 4,399,170 B to 1,909,540
+B without changing task semantics. Apply the same locality rule to future
+packed query and object conversions.
 
 ### [PERMANENT] Bounded nested BF loops have strict control-flow semantics
 

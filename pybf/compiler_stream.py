@@ -6,7 +6,13 @@ The established generic implementation lives in ``compiler_stream_generic``.
 int/string conversions; ``compiler_charindex`` / ``compiler_chario`` /
 ``compiler_stringcompact`` remove fixed-slot source explosions from character
 and scalar-string operations; ``compiler_decimalconv`` makes ``int(str)``
-source-compact; and ``compiler_formatcompact`` does the same for ``str(int)``.
+source-compact; ``compiler_formatcompact`` does the same for ``str(int)``;
+``compiler_dynamic_charlist`` connects one statically safe character list to
+runtime-sized byte storage; ``compiler_quadlocal`` localizes distant scalar
+operations in shared workspace; and ``compiler_packedlocals`` keeps proven
+nonescaping loop-local integer inputs packed instead of repeatedly expanding
+and repacking 99-cell Quad words.
+
 This module keeps the separately proven whole-program specializations in front
 of those generic layers.
 """
@@ -16,13 +22,28 @@ from __future__ import annotations
 import ast
 
 from bfopt import optimize_bf
-from compiler_formatcompact import CompileError
-from compiler_formatcompact import PythonToBFStream as _GenericPythonToBFStream
+from compiler_packedlocals import CompileError
+from compiler_packedlocals import PythonToBFStream as _GenericPythonToBFStream
 from compiler_partition import lower_partition_program_if_supported
 
 
 class PythonToBFStream(_GenericPythonToBFStream):
     """Generic stream compiler plus narrowly proven scalable specializations."""
+
+    def __init__(
+        self,
+        tree: ast.Module,
+        *,
+        string_capacity: int = 255,
+        list_capacity: int = 64,
+        runtime_charlist_base: int | None = None,
+    ) -> None:
+        super().__init__(
+            tree,
+            string_capacity=string_capacity,
+            list_capacity=list_capacity,
+            runtime_charlist_base=runtime_charlist_base,
+        )
 
     def compile_module(self, tree: ast.AST) -> str:
         if not isinstance(tree, ast.Module):
