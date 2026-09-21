@@ -42,11 +42,16 @@ def _repeat_parts(node):
 def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
     if not isinstance(tree, ast.Module) or select_dynamic_char_list(tree) is not None:
         return None
-    candidates = [node for node in ast.walk(tree)
-                  if isinstance(node, ast.Assign) and len(node.targets) == 1
-                  and isinstance(node.targets[0], ast.Name)
-                  and (_is_list_map_int_input_split(node.value)
-                       or _repeat_parts(node.value) is not None)]
+    assignments = [node for node in ast.walk(tree)
+                   if isinstance(node, ast.Assign) and len(node.targets) == 1
+                   and isinstance(node.targets[0], ast.Name)]
+    candidates = [node for node in assignments
+                  if _is_list_map_int_input_split(node.value)]
+    # Preserve the established input-owner route when unrelated fixed repeats
+    # coexist. Selecting new repeats must not silently restore the input's old
+    # capacity bound. Multiple input owners retain the previous rejection.
+    if not candidates:
+        candidates = [node for node in assignments if _repeat_parts(node.value) is not None]
     if len(candidates) != 1 or candidates[0] not in tree.body:
         return None
     producer = candidates[0]

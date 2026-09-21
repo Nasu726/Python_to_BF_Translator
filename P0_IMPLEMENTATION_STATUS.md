@@ -20,10 +20,14 @@ b.clear()
 print(len(a), sum(b))
 ```
 
-Selection still requires one unconditional top-level construction, unconditional
-aliases and only len/sum/statement-clear uses. General indexed mutation,
+Repeat selection requires one unconditional top-level repeat construction,
+no input-list owner, unconditional aliases and only len/sum/statement-clear uses. General indexed mutation,
 append, nested lists, copying, rebinding, multiple dynamic owners and allocator
-reuse are **not** implemented by this increment. This does not complete P0's
+reuse are **not** implemented by this increment. The pre-existing input-owner
+route takes precedence over new repeat candidates: an unrelated fixed repeat
+must not silently restore the input list's old capacity bound. Such mixed
+programs keep the earlier behavior; the second list does not gain dynamic
+repeat support. This does not complete P0's
 repeat-plus-indexed-update-and-sort acceptance program.
 
 Both operands evaluate once, in Python order, even for an empty result.
@@ -86,7 +90,8 @@ from the pre-existing costly 19-digit decimal reader; the native benchmark
 additionally verifies those same boundaries through input. Existing parser
 budgets are unchanged. An early lifetime-analysis error (rewriting a repeat to
 zero let x's storage be reused for n) is fixed by preserving operand reads in
-the inference tree and has a dedicated regression case.
+the inference tree and has a dedicated regression case. An additional mixed input/repeat regression
+verifies that the new selector preserves the established input-owner route.
 
 ## Previous increment: public single-owner integer-list views
 

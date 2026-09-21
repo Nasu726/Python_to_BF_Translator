@@ -189,3 +189,12 @@ def test_zero_repeat_has_runtime_extent_and_bounded_source():
     for n in (0, -1, 65, 256, 1024):
         data = f"{n}\n"
         assert execute(code, data).output == reference(source, data)
+
+
+
+def test_repeat_candidate_does_not_disable_established_dynamic_input_owner():
+    source = 'a=list(map(int,input().split()))\nb=[0]*1\nprint(len(a))\n'
+    selection = select_dynamic_int_list(ast.parse(source))
+    assert selection is not None and selection.owner == 'a'
+    data = ' '.join(['2'] * 65) + '\n'
+    assert execute(compile_source(source), data).output == reference(source, data)
