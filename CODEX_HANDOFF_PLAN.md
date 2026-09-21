@@ -1,13 +1,14 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-21):** PR #15 is merged at
-`475e65b308807aa874ea33b89920f72ce035d558` after all four shards passed run
-`35517568434` for head `21f122d40ddb122e25d0ba15d6db6a6da758ecb1`.
-The current increment reduces packed-add cost for dense bytes while retaining
-that mobile workspace. Read `P0_IMPLEMENTATION_STATUS.md` for measured benefits,
-small-increment regressions and the still-incomplete public dynamic-list scope.
+**Latest checkpoint (2026-09-21):** PR #16 is merged at
+`02b0b685679ec6d3899b6402f4faadcd4eb773c3` after all four shards passed run
+`35578860966` for head `b474177cfd4a329cbaa44b5560842b02a572573b`.
+The current increment connects one statically owned integer input list and its
+proven aliases to runtime-sized storage, cached len/sum and shared clear.
+Read `P0_IMPLEMENTATION_STATUS.md` for the narrow selection contract, ABC103 C
+source/maximum-N measurements and the still-incomplete general object model.
 
- `IMPLEMENTATION_PLAN.md` is the minimum
+`IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
 for the current implementation/optimization/real-ABC acceptance track. General
 compression research stays in `Nasu726/bf_compression`. The preceding ABC199
@@ -904,8 +905,10 @@ shards before merging a new milestone; keep the collection guard enabled.
 
 ## Step 3 — determine current milestone
 
-Read `P0_IMPLEMENTATION_STATUS.md` first. The public frontend still has fixed
-integer-list capacity/value-copy semantics. Contiguous repeat and physical
+Read `P0_IMPLEMENTATION_STATUS.md` first. The general public integer-list
+fallback still has fixed capacity/value-copy semantics. The new single-owner
+input-list len/sum/clear route has uncapped records and proven shared aliases,
+but does not establish general heap/handle semantics. Contiguous repeat and physical
 forward/reverse traversal are tested low-level primitives, not public aliases
 or a finished object model. Next P0 architecture work must join allocation,
 identity and mobile scalar storage without reintroducing root-to-item scans.

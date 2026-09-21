@@ -20,7 +20,8 @@ from bfstreamseq import RECORD_STRIDE
 from bfopt import optimize_bf
 from bftemparena import PeakTempArena
 from compiler_dynamic_charlist import select_dynamic_char_list
-from compiler_stream import CompileError, PythonToBFStream
+from compiler_dynamic_intlist import CompileError, PythonToBFStream, select_dynamic_int_list
+from bfpackedseq import REDUCTION_WORKSPACE_CELLS
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class LayoutPlan:
     temp_base: int
     temp_peak: int
     dynamic_charlist_base: int | None = None
+    dynamic_intlist_base: int | None = None
 
     @property
     def temp_cells(self) -> int:
@@ -51,12 +53,14 @@ class PythonToBFLayout(PythonToBFStream):
         string_capacity: int = 255,
         list_capacity: int = 64,
         runtime_charlist_base: int | None = None,
+        runtime_intlist_base: int | None = None,
     ) -> None:
         super().__init__(
             tree,
             string_capacity=string_capacity,
             list_capacity=list_capacity,
             runtime_charlist_base=runtime_charlist_base,
+            runtime_intlist_base=runtime_intlist_base,
         )
         # __init__ above allocates only static/scratch/workspace regions.  All
         # expression/list/string temporaries are allocated later while lowering,
@@ -70,6 +74,7 @@ class PythonToBFLayout(PythonToBFStream):
             self.temps.base,
             self.temps.peak,
             self.runtime_charlist_base,
+            self.runtime_intlist_base,
         )
 
 
@@ -83,15 +88,29 @@ def lower_with_layout(
     """Lower once and return both raw BF and the measured tape layout plan."""
     tree = ast.parse(source, filename=filename)
 
-    def lower_once(runtime_charlist_base: int | None):
+    def lower_once(runtime_charlist_base: int | None, runtime_intlist_base: int | None = None):
         compiler = PythonToBFLayout(
             tree,
             string_capacity=string_capacity,
             list_capacity=list_capacity,
             runtime_charlist_base=runtime_charlist_base,
+            runtime_intlist_base=runtime_intlist_base,
         )
         raw = compiler.compile_module(tree)
         return raw, compiler.layout_plan
+
+    if select_dynamic_int_list(tree) is not None:
+        _probe, probe_plan = lower_once(None)
+        del _probe
+        guard = REDUCTION_WORKSPACE_CELLS + 10
+        runtime_base = probe_plan.runtime_base(guard_cells=guard)
+        for _attempt in range(3):
+            raw, plan = lower_once(None, runtime_base)
+            exact_base = plan.runtime_base(guard_cells=guard)
+            if exact_base == runtime_base:
+                return raw, plan
+            runtime_base = exact_base
+        raise CompileError("runtime integer-list layout did not converge")
 
     if select_dynamic_char_list(tree) is None:
         return lower_once(None)

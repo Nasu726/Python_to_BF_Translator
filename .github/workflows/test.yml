@@ -72,6 +72,7 @@ jobs:
               tests/test_decimalconv.py
               tests/test_compiler_packedlocals.py
               tests/test_dynamic_charlist.py
+              tests/test_dynamic_intlist.py
               tests/test_streaming_int_list.py
               tests/test_controlflow.py
               tests/test_input_lines.py

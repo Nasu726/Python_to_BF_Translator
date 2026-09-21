@@ -6,7 +6,69 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: packed addition without repeated byte-overflow scans
+## Current increment: public single-owner integer-list views
+
+The public compiler now selects a statically proven ownership slice:
+
+```python
+a = list(map(int, input().split()))
+b = a
+print(len(b), sum(a))
+b.clear()
+print(len(a), sum(b))  # 0 0: one shared mutable object
+```
+
+There must be exactly one unconditional top-level input-list construction.
+Alias declarations must also be unconditional/top-level, and each use must
+follow its binding. Allowed uses are `len`, one-argument `sum`, alias binding,
+and statement-form `clear`. Rebinding, escaping, indexing, other mutations,
+multiple input-list owners, builtin shadowing and simultaneous dynamic character
+storage reject this selection and retain the previous route/diagnostics.
+This is **statically resolved shared identity**, not general runtime handles,
+heap allocation or complete Python list semantics. Unsupported programs do not
+acquire these alias/scalability guarantees through the old fallback.
+
+Input materializes uncapped 10-cell records. A persistent 12-cell header caches
+int64 sum and u32 length, computed with the mobile reduction. Only `clear` can
+mutate selected objects, so these caches stay valid; repeated queries preserve
+the header and never rescan the list. All aliases address the same header and
+sequence. `clear` is logical: payload becomes unreachable, with no allocator
+reuse. The public two-pass layout puts both records and the 38-cell mobile frame
+after the measured scalar/temp high-water mark. The input line is consumed at
+the original construction statement, without deferral across other input.
+
+New real acceptance fixture: [ABC103 C — Modulo Summation](https://atcoder.jp/contests/abc103/tasks/abc103_c),
+using the ordinary `n=input; a=list(map(...)); print(sum(a)-n)` solution through
+`pybf.compile_source` (the existing loop-based streaming fixture is retained).
+Generated source: **306,652 B**, **217,636 B below 512 KiB**. Official sample
+raw steps: **1,129,077 / 1,757,464 / 3,122,768**. N=3000 with all values 2
+matches CPython in **412,523,451** raw steps under the unchanged 500-million
+budget. This exercises runtime storage, not a raised fixed list capacity.
+
+Manual native measurement: built `rdebath/Brainfuck` revision `14a729d`
+(Tritium 1.2.73) and ran `bfi.out -b -e Main.bf`, 3 trials per N=3000 pattern:
+
+| Pattern | Correct output | Local elapsed range |
+| --- | ---: | ---: |
+| all 2 | 3000 | 0.032529–0.039071 s |
+| all 100000 | 299997000 | 0.040804–0.041731 s |
+| all 65535 | 196602000 | 0.044776–0.045180 s |
+| deterministic mixed | 150317490 | 0.043763–0.047519 s |
+
+Reproduce with `python tools/bench_tritium_abc103_sum.py --tritium /path/to/tritium/bfi.out`.
+These are local timings on four maximum-N distributions, not AtCoder judge
+acceptance or an exhaustive worst-case timing proof. The build used the local
+Makefile's native optimization flags and disabled unavailable optional engines.
+
+Validation: **22 new tests + 58 existing regression tests passed**. Coverage
+includes alias chains, clear inside loops, repeated metadata queries, following
+input, negative values, empty lines, 65/256/300-element arrays, unsafe-selection
+rejections, layout separation, all official samples and the maximum-N fixture.
+New tests are included in the normal frontend CI shard; existing size and step
+gates remain unchanged. Full runtime identity/allocation, indexed mutation,
+repeat, nested containers, copying and sorting remain P0 work.
+
+## Previous increment: packed addition without repeated byte-overflow scans
 
 PR #15's mobile reduction is merged at
 `475e65b308807aa874ea33b89920f72ce035d558` (head
