@@ -1,12 +1,51 @@
 # Feature / optimization / ABC acceptance track
 
-Updated 2026-09-20. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
+Updated 2026-09-21. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
 Every feature must eventually have all three: implementation, optimization, and
 validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: mobile sum/length workspace
+## Current increment: packed addition without repeated byte-overflow scans
+
+PR #15's mobile reduction is merged at
+`475e65b308807aa874ea33b89920f72ce035d558` (head
+`21f122d40ddb122e25d0ba15d6db6a6da758ecb1`, all four shards green in run
+`35517568434`). Its dense-byte bottleneck is addressed by changing
+`PackedI64Ops.add_inplace` to extract bits by repeated halving. A byte's bit
+positions share one BF loop whose weight goes 1,2,...,128 and wraps to zero.
+Carry is maintained across bytes. The RHS is preserved for disjoint operands;
+exact operand alias now explicitly supports doubling. Partial/scratch overlap
+is unsupported. Scratch is cleared, and an all-zero RHS bypasses arithmetic.
+
+The 38-cell mobile frame and 10-cell records remain unchanged. Re-running
+`tools/profile_packed_sequence_reduction.py` gives:
+
+- extra reduction source: **11,829 B** (was 10,569), still below the existing
+  **12,000 B** regression gate;
+- zero-repeat plus reduction: **15,010 B**, independent of runtime N;
+- zero-list N=256/512/1024/2048 reduction steps:
+  **2,338,832 / 4,694,983 / 9,460,376 / 19,203,526**;
+- `--value=-1 --counts 1 8 16`:
+  **1,331,609 / 12,344,933 / 24,920,405** steps, compared with the previous
+  **17,534,205 / 139,584,294 / 279,076,950**. N=16 improves about **11.2x**.
+
+This is a trade-off, not universal speedup: isolated `1234 + 1` at operand bases
+32/48 and scratch base 80 takes 122,294 steps versus 48,159 before. At that same
+layout, `1234 + 123` improves 3,030,816 -> 158,695; `MASK64 + MASK64` improves
+54,726,636 -> 1,701,023. Source grows 9,559 -> 10,597 B for the isolated add.
+Small increment lowering remains a possible separate improvement. All figures
+are raw BF steps, not Tritium wall-clock acceptance.
+
+Validation: **76 tests passed** for packed operations, sequences and the public
+packed-local frontend. New runtime-fed tests cover 45 boundary/random operand
+pairs and 9 exact-alias values, with full-tape/RHS/scratch/input checks and a
+3-million-step bound. `test_bfpackedops.py` is now included in normal runtime CI
+rather than only the optional experiment workflow. Existing size/step gates
+remain unchanged. General dynamic-list identity/allocation/frontend routing
+remains incomplete; this arithmetic change does not change that boundary.
+
+## Previous increment: mobile sum/length workspace
 
 `RuntimePackedIntSequence.sum_and_length` adds a preserving reduction over
 runtime-sized contiguous records. One 38-cell frame, initially reserved directly

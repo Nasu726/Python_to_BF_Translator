@@ -68,43 +68,90 @@ class PackedI64Ops:
             self._copy_cell(src.byte(index), dst.byte(index), self._s(14))
         self.bf.clear(self._s(14))
 
-    def add_inplace(self, dst: PackedI64Ref, rhs: PackedI64Ref) -> None:
-        """``dst = dst + rhs (mod 2**64)``, preserving ``rhs``."""
+    def _split_parity(self, src: int, quotient: int, parity: int, gate: int) -> None:
+        """Consume src into quotient/parity; outputs and gate must be zero."""
         bf = self.bf
-        count, carry, next_carry = self._s(0), self._s(1), self._s(2)
-        zero, tmp, helper, gate = self._s(3), self._s(4), self._s(5), self._s(6)
-        bf.clear(carry)
+        bf.begin_while(src)
+        bf.add_const(src, -1)
+        bf.set_const(gate, 1)
+        bf.begin_while(parity)
+        bf.add_const(parity, -1)
+        bf.add_const(quotient, 1)
+        bf.clear(gate)
+        bf.end_while(parity)
+        bf.begin_while(gate)
+        bf.add_const(gate, -1)
+        bf.add_const(parity, 1)
+        bf.end_while(gate)
+        bf.end_while(src)
 
+    def _move_cell(self, src: int, dst: int, scale: int = 1) -> None:
+        """Consume src, adding scale*src to dst."""
+        self.bf.begin_while(src)
+        self.bf.add_const(src, -1)
+        self.bf.add_const(dst, scale)
+        self.bf.end_while(src)
+
+    def _copy_into_zero_cell(self, src: int, dst: int, tmp: int) -> None:
+        """Preserving copy when dst/tmp are already known zero."""
+        self.bf.begin_while(src)
+        self.bf.add_const(src, -1)
+        self.bf.add_const(dst, 1)
+        self.bf.add_const(tmp, 1)
+        self.bf.end_while(src)
+        self._move_cell(tmp, src)
+
+    def add_inplace(self, dst: PackedI64Ref, rhs: PackedI64Ref) -> None:
+        """Add modulo 2**64, preserving a disjoint rhs; exact alias doubles.
+
+        Extract bits by repeated halving, so each input byte is scanned less
+        than twice. The eight bit positions share one emitted runtime body.
+        This avoids checking a full accumulated byte for every unit added.
+        Partial overlap and scratch overlap are unsupported.
+        """
+        bf = self.bf
+        a, b, q, pa, pb, carry, gate, tmp, weight, restore, bit = (
+            self._s(i) for i in range(11))
+        self._clear_scratch()
+        active, scan, scan_restore = self._s(15), self._s(13), self._s(14)
         for byte_index in range(I64_BYTES):
-            byte = dst.byte(byte_index)
-            bf.clear(next_carry)
-            self._copy_cell(carry, gate, helper)
-            bf.clear(carry)
-            bf.begin_while(gate)
-            bf.add_const(gate, -1)
-            bf.add_const(byte, 1)
-            self._zero_flag(zero, byte, tmp, helper)
-            bf.begin_while(zero)
-            bf.add_const(zero, -1)
-            bf.set_const(next_carry, 1)
-            bf.end_while(zero)
-            bf.end_while(gate)
-
-            self._copy_cell(rhs.byte(byte_index), count, helper)
-            bf.begin_while(count)
-            bf.add_const(count, -1)
-            bf.add_const(byte, 1)
-            self._zero_flag(zero, byte, tmp, helper)
-            bf.begin_while(zero)
-            bf.add_const(zero, -1)
-            bf.set_const(next_carry, 1)
-            bf.end_while(zero)
-            bf.end_while(count)
-
-            bf.begin_while(next_carry)
-            bf.add_const(next_carry, -1)
-            bf.add_const(carry, 1)
-            bf.end_while(next_carry)
+            self._copy_into_zero_cell(rhs.byte(byte_index), scan, scan_restore)
+            bf.begin_while(scan)
+            bf.clear(scan)
+            bf.set_const(active, 1)
+            bf.end_while(scan)
+        bf.begin_while(active)
+        bf.clear(active)
+        for byte_index in range(I64_BYTES):
+            out = dst.byte(byte_index)
+            self._copy_into_zero_cell(out, a, restore)
+            self._copy_into_zero_cell(rhs.byte(byte_index), b, restore)
+            bf.clear(out)
+            bf.set_const(weight, 1)
+            bf.begin_while(weight)
+            self._split_parity(a, q, pa, gate)
+            self._move_cell(q, a)
+            self._split_parity(b, q, pb, gate)
+            self._move_cell(q, b)
+            self._move_cell(pa, tmp)
+            self._move_cell(pb, tmp)
+            self._move_cell(carry, tmp)
+            self._split_parity(tmp, carry, bit, gate)
+            bf.begin_while(bit)
+            bf.add_const(bit, -1)
+            # Add the current power of two without consuming the loop weight.
+            bf.begin_while(weight)
+            bf.add_const(weight, -1)
+            bf.add_const(out, 1)
+            bf.add_const(restore, 1)
+            bf.end_while(weight)
+            self._move_cell(restore, weight)
+            bf.end_while(bit)
+            self._move_cell(weight, tmp, 2)
+            self._move_cell(tmp, weight)
+            # 128*2 wraps to zero, ending exactly after eight iterations.
+            bf.end_while(weight)
+        bf.end_while(active)
         self._clear_scratch()
 
     def sub_inplace(self, dst: PackedI64Ref, rhs: PackedI64Ref) -> None:
