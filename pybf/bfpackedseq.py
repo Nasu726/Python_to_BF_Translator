@@ -27,6 +27,7 @@ from bfbase4decimal import Base4DecimalCore
 from bfcore import BFEmitter
 from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Ref
+from bfpackedops import PackedI64Ops
 
 
 RECORD_STRIDE = 10
@@ -34,6 +35,14 @@ MARKER = 0
 BACK = 1
 PAYLOAD = 2
 PAYLOAD_BYTES = 8
+
+# One frame for the entire sequence, NOT one frame per element. During a
+# reduction it trades places with each record, then returns by inverse swaps.
+_MOBILE_TOTAL = 0
+_MOBILE_LENGTH = 8
+_MOBILE_SCRATCH = 12
+_MOBILE_SAVED_RECORD = _MOBILE_SCRATCH + PackedI64Ops.SCRATCH_CELLS
+REDUCTION_WORKSPACE_CELLS = _MOBILE_SAVED_RECORD + RECORD_STRIDE
 
 # Control scratch begins exactly at the next, still-unmaterialized record.
 # NEXT_MARKER/NEXT_BACK are intentionally reused as CH/SIGN until the very end
@@ -354,6 +363,63 @@ def _read_record_body() -> str:
     return r.code()
 
 
+def _move_bytes(bf: BFEmitter, src: int, dst: int) -> None:
+    """Move one byte into a known-zero destination."""
+    bf.begin_while(src)
+    bf.add_const(src, -1)
+    bf.add_const(dst, 1)
+    bf.end_while(src)
+
+
+def _rotate_mobile_frame(bf: BFEmitter, *, forward: bool) -> None:
+    """[frame][record] <-> [record][frame], using frame-owned scratch.
+
+    Coordinates start at the left end of the pair. Save the record, transport
+    the frame overlap-safely, then restore the record in the vacated cells.
+    Arithmetic scratch must be zero; saved-record cells are zero on return.
+    No adjacent record or end-sentinel cell is borrowed.
+    """
+    width = REDUCTION_WORKSPACE_CELLS
+    if forward:
+        for i in range(RECORD_STRIDE):
+            _move_bytes(bf, width + i, _MOBILE_SAVED_RECORD + i)
+        for i in range(width - 1, -1, -1):
+            _move_bytes(bf, i, i + RECORD_STRIDE)
+        for i in range(RECORD_STRIDE):
+            _move_bytes(bf, _MOBILE_SAVED_RECORD + RECORD_STRIDE + i, i)
+    else:
+        for i in range(RECORD_STRIDE):
+            _move_bytes(bf, i, RECORD_STRIDE + _MOBILE_SAVED_RECORD + i)
+        for i in range(width):
+            _move_bytes(bf, RECORD_STRIDE + i, i)
+        for i in range(RECORD_STRIDE):
+            _move_bytes(bf, _MOBILE_SAVED_RECORD + i, width + i)
+
+
+@lru_cache(maxsize=1)
+def _sum_length_walk_code() -> str:
+    width = REDUCTION_WORKSPACE_CELLS
+    body = BFEmitter()
+    body.ptr = width + MARKER
+    PackedI64Ops(body, _MOBILE_SCRATCH).add_inplace(
+        PackedI64Ref(_MOBILE_TOTAL), PackedI64Ref(width + PAYLOAD))
+    PackedU32Core(body, _MOBILE_SCRATCH).increment(PackedU32Ref(_MOBILE_LENGTH))
+    _rotate_mobile_frame(body, forward=True)
+    body.move(width + RECORD_STRIDE + MARKER)
+
+    rewind = BFEmitter()
+    # Previous record at 0, frame at STRIDE, current sentinel at STRIDE+width.
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(rewind, forward=False)
+    rewind.move(width + BACK)
+
+    # End marker is never rotated. Its BACK starts the inverse walk. Each
+    # inverse swap restores the preceding record; its BACK selects the next
+    # iteration, stopping at the original first record (also handles N=0).
+    return ("[" + body.code() + "]" + ">" * BACK
+            + "[" + rewind.code() + "]" + "<" * BACK)
+
+
 class PackedIntRecordBody:
     """Compile-time builder for operations local to one runtime record.
 
@@ -509,6 +575,42 @@ class RuntimePackedIntSequence:
         bf.emit("<" * BACK)
         bf.ptr = self.base
 
+    def sum_and_length(
+        self, bf: BFEmitter, total: PackedI64Ref, length: PackedU32Ref,
+    ) -> None:
+        """Preserving linear pass with a mobile int64 sum and u32 length.
+
+        Reserve REDUCTION_WORKSPACE_CELLS immediately before base, exclusively
+        for this operation. Outputs must be disjoint and precede that region.
+        The frame is initialized/cleared here. Sequence contents, metadata and
+        end sentinel are restored exactly, and the pointer returns to base.
+
+        Sum wraps modulo 2**64; length wraps modulo 2**32. Each record is crossed
+        a constant number of times with a fixed-width frame (byte values are
+        bounded by 255). Tape is 10*N + O(1), source size independent of N.
+        Fixed output addresses are accessed only after the complete traversal.
+        This does not yet supply heap identity or arbitrary Python loop bodies.
+        """
+        self._check_layout()
+        frame = self.base - REDUCTION_WORKSPACE_CELLS
+        outputs = [(total.base, total.base + total.cells),
+                   (length.base, length.base + length.cells)]
+        if frame < 0 or any(lo < 0 or hi > frame for lo, hi in outputs):
+            raise ValueError("reduction outputs must precede the reserved mobile frame")
+        if max(outputs[0][0], outputs[1][0]) < min(outputs[0][1], outputs[1][1]):
+            raise ValueError("reduction outputs must not overlap")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+        bf.emit(_sum_length_walk_code())
+        bf.ptr = self.base
+        for source, dest, size in [(frame + _MOBILE_TOTAL, total.base, total.cells),
+                                   (frame + _MOBILE_LENGTH, length.base, length.cells)]:
+            for i in range(size):
+                bf.clear(dest + i)
+                _move_bytes(bf, source + i, dest + i)
+        bf.move(self.base)
+
     def read_lf_terminated_s64s(self, bf: BFEmitter) -> None:
         """Read one whitespace-separated signed-int line with no capacity limit."""
         self._check_layout()
@@ -533,6 +635,7 @@ __all__ = [
     "BACK",
     "PAYLOAD",
     "PAYLOAD_BYTES",
+    "REDUCTION_WORKSPACE_CELLS",
     "RuntimePackedIntSequence",
     "PackedIntRecordBody",
 ]

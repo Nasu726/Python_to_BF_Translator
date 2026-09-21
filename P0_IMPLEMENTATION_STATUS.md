@@ -6,7 +6,56 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: integer augmented assignment and ABC100 C
+## Current increment: mobile sum/length workspace
+
+`RuntimePackedIntSequence.sum_and_length` adds a preserving reduction over
+runtime-sized contiguous records. One 38-cell frame, initially reserved directly
+before the sequence, contains an int64 total, u32 count and scratch. Each forward
+step rotates `[frame][record]` into `[record][frame]`. An inverse return walk
+restores every record and carries the results back; fixed output addresses are
+accessed only after the traversal. Empty sequences and repeated calls work.
+Outputs must be disjoint and precede the reserved frame; invalid layouts fail
+before any BF is emitted. The frame is exclusively caller-reserved scratch and
+is zero on return. Sum/count wrap modulo 2**64 / 2**32 respectively.
+
+This closes the specific *fixed scalar return on every item* gap for sum/count.
+It does not close general object allocation/alias routing, arbitrary loop bodies
+or public `sum(list)` support. Sequential traversal needs **10*N + O(1)** tape,
+including just one frame rather than padding every record. There is one forward
+reduction and one restoring return pass. Each record incurs bounded fixed-width
+byte operations and constant-distance moves, so runtime is O(N) in the byte-tape
+ABI; byte-value-dependent constants remain significant. A future object header
+should cache length instead of rescanning for each public `len` call.
+
+Reproduce with `PYTHONPATH=pybf python tools/profile_packed_sequence_reduction.py`:
+
+- reduction adds **10,569 BF bytes** at sequence base 64 / output bases 8 and 16;
+- runtime zero-repeat plus reduction: **13,750 B**, independent of runtime N;
+- additional workspace: **38 cells**, independent of N;
+- zero-list reduction steps for N=256/512/1024/2048:
+  **2,462,736 / 4,942,791 / 9,955,992 / 20,194,758**.
+
+The default profile is not a worst-case arithmetic benchmark. The same tool
+with `--value=-1 --counts 1 8 16` reports **17,534,205 / 139,584,294 /
+279,076,950** reduction steps. Existing packed addition repeatedly detects
+byte overflow and is costly for dense bytes. This is a remaining arithmetic
+bottleneck, not evidence of maximum-constraint practicality. No step limit was
+raised to hide it, and no public ABC acceptance milestone is claimed here.
+
+Validation: **70 tests passed** in packed sequence/u32/int64 suites, including
+18 new cases. Full-memory comparison checks exact record/sentinel restoration,
+frame cleanup and untouched outside cells; tests cover empty/singleton lists,
+negative values, int64 overflow, repeated calls, decimal-input integration,
+following-input preservation and runtime lengths through 2048. The same emitted
+program is reused across lengths, with source/step scaling gates. All new tests
+are in the existing runtime CI shard.
+
+Next P0 boundary remains runtime allocation + identity/header routing. The
+mobile-frame technique now has a concrete reduction proof/test; extending it to
+arbitrary live scalars and loop control is separate work. Retain compact records
+and avoid reinserting rooted heap lookup inside the sequential loop.
+
+## Previous increment: integer augmented assignment and ABC100 C
 
 Scalar and integer-list targets now support `//=`, `%=`, `&=`, `|=`, `^=`
 as well as `+=`, `-=`, `*=`. Subscript target evaluation and loading precede

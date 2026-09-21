@@ -183,3 +183,106 @@ def test_repeat_rejects_count_overlapping_dynamic_storage(count_base):
     with pytest.raises(ValueError):
         RuntimePackedIntSequence(base=64).repeat_constant(bf, PackedU32Ref(count_base), 0)
     assert bf.code() == ""
+
+
+def _reduction_program(*, read_values=True, twice=False):
+    from bfpacked64 import PackedI64Ref
+
+    bf = BFEmitter()
+    for i in range(4):
+        bf.move(i)
+        bf.emit(",")
+    bf.set_const(25, 173)  # Last cell before the reserved mobile frame.
+    for i in range(8, 20):
+        bf.set_const(i, 211)  # Outputs must replace previous values.
+    seq = RuntimePackedIntSequence(64)
+    seq.repeat_constant(bf, PackedU32Ref(0), 0)
+    if read_values:
+        seq.walk_records(bf, lambda record: record.read_value())
+    baseline = bf.code()
+    seq.sum_and_length(bf, PackedI64Ref(8), PackedU32Ref(16))
+    if twice:
+        seq.sum_and_length(bf, PackedI64Ref(8), PackedU32Ref(16))
+    assert bf.ptr == seq.base
+    return baseline, bf.code(), seq
+
+
+@pytest.mark.parametrize("values", [
+    [], [0], [-1], [255, 1, 256, -257],
+    [(1 << 63) - 1, 1], [-(1 << 63), -1],
+    [-(1 << 63), (1 << 63) - 1, 1],
+    [i * 104729 - 500000 for i in range(16)],
+])
+def test_mobile_reduction_preserves_full_sequence_and_repeats(values):
+    baseline, code, seq = _reduction_program(twice=True)
+    data = _raw_word(len(values))[:4] + "".join(map(_raw_word, values)) + "X"
+    kwargs = dict(memory_size=64 + (len(values) + 2) * RECORD_STRIDE,
+                  step_limit=500_000_000)
+    before = run_bf(baseline, data, **kwargs)
+    result = run_bf(code, data, **kwargs)
+    expected_memory = before.memory[:]
+    expected_memory[8:16] = list(map(ord, _raw_word(sum(values))))
+    expected_memory[16:20] = list(map(ord, _raw_word(len(values))[:4]))
+    assert result.memory == expected_memory
+    assert result.pointer == before.pointer == seq.base
+    assert result.input_consumed == before.input_consumed == 4 + 8 * len(values)
+    assert result.output == before.output == ""
+    assert set(code) <= set("><+-.,[]")
+
+
+def test_mobile_reduction_runtime_length_and_scaling():
+    baseline, code, seq = _reduction_program(read_values=False)
+    assert len(code) - len(baseline) < 12_000
+    large_steps = []
+    for count in (0, 1, 2, 255, 256, 257, 512, 1024, 2048):
+        data = _raw_word(count)[:4]
+        kwargs = dict(memory_size=64 + (count + 2) * RECORD_STRIDE,
+                      step_limit=500_000_000)
+        before = run_bf(baseline, data, **kwargs)
+        result = run_bf(code, data, **kwargs)
+        expected_memory = before.memory[:]
+        expected_memory[8:16] = [0] * 8
+        expected_memory[16:20] = list(map(ord, data))
+        assert result.memory == expected_memory
+        assert result.pointer == before.pointer == seq.base
+        assert result.input_consumed == before.input_consumed == 4
+        delta = result.steps - before.steps
+        # Counter transport depends on byte values (each <=255); this is a
+        # measured ceiling, not an exact constant-step-per-element formula.
+        assert delta <= 40_000 * count + 100_000
+        if count in (256, 512, 1024, 2048):
+            large_steps.append(delta)
+    assert all(b < 2.2 * a for a, b in zip(large_steps, large_steps[1:]))
+
+
+@pytest.mark.parametrize("base,total,length", [
+    (20, 0, 8), (64, -1, 8), (64, 20, 8), (64, 0, 24),
+    (64, 0, 6), (64, 30, 0), (64, 64, 0),
+])
+def test_mobile_reduction_rejects_invalid_layout_before_emitting(base, total, length):
+    from bfpacked64 import PackedI64Ref
+
+    bf = BFEmitter()
+    with pytest.raises(ValueError):
+        RuntimePackedIntSequence(base).sum_and_length(
+            bf, PackedI64Ref(total), PackedU32Ref(length))
+    assert bf.code() == ""
+
+
+@pytest.mark.parametrize("text,values", [("  \t\n", []), ("-1 255 256  \n", [-1, 255, 256])])
+def test_mobile_reduction_after_decimal_input_leaves_next_line(text, values):
+    from bfpacked64 import PackedI64Ref
+
+    bf = BFEmitter()
+    seq = RuntimePackedIntSequence(64)
+    seq.read_lf_terminated_s64s(bf)
+    seq.sum_and_length(bf, PackedI64Ref(0), PackedU32Ref(8))
+    seq.walk_records(bf, lambda record: record.write_value())
+    bf.move(12)
+    bf.emit(",.")
+    result = run_bf(bf.code(), text + "X\n", memory_size=3000,
+                    step_limit=500_000_000)
+    assert result.output == "".join(map(_raw_word, values)) + "X"
+    assert result.memory[:8] == list(map(ord, _raw_word(sum(values))))
+    assert result.memory[8:12] == list(map(ord, _raw_word(len(values))[:4]))
+    assert result.input_consumed == len(text) + 1
