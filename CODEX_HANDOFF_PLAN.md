@@ -1,10 +1,11 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-20):** PR #14 is merged at
-`d487bfc0416d010f66fbadd1ad1bfeef6176c736` after all four shards passed run
-`35516448741` for head `e25441239f9e1ec8abbc586c89c389cdadaae3fe`.
-The next increment is mobile sum/length reduction for contiguous int64 records;
-read the current status document for contracts, scaling and dense-byte limits.
+**Latest checkpoint (2026-09-21):** PR #15 is merged at
+`475e65b308807aa874ea33b89920f72ce035d558` after all four shards passed run
+`35517568434` for head `21f122d40ddb122e25d0ba15d6db6a6da758ecb1`.
+The current increment reduces packed-add cost for dense bytes while retaining
+that mobile workspace. Read `P0_IMPLEMENTATION_STATUS.md` for measured benefits,
+small-increment regressions and the still-incomplete public dynamic-list scope.
 
  `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`

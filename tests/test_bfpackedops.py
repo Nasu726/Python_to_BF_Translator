@@ -127,3 +127,53 @@ def test_packed_ops_remain_source_compact():
     code = bf.code()
     assert set(code) <= set("><+-.,[]")
     assert len(code) < 100_000
+
+
+def test_packed_add_runtime_operands_full_state_and_dense_byte_budget():
+    import random
+
+    bf = BFEmitter()
+    a, b = PackedI64Ref(32), PackedI64Ref(48)
+    guards = (31, 40, 47, 56, 79, 96)
+    for cell in guards:
+        bf.set_const(cell, 173)
+    for ref in (a, b):
+        for i in range(8):
+            bf.move(ref.byte(i))
+            bf.emit(",")
+    PackedI64Ops(bf, 80).add_inplace(a, b)
+    code = bf.code()
+    rng = random.Random(20260921)
+    cases = [(0, MASK64), (MASK64, MASK64), (MASK64, 0),
+             (INT64_MAX, INT64_MAX), (INT64_MIN, INT64_MIN)]
+    cases += [((1 << (8 * i)) - 1, 1) for i in range(1, 9)]
+    cases += [(rng.getrandbits(64), rng.getrandbits(64)) for _ in range(32)]
+    for left, right in cases:
+        data = ((left & MASK64).to_bytes(8, "little")
+                + (right & MASK64).to_bytes(8, "little")).decode("latin1") + "X"
+        result = run_bf(code, data, memory_size=128, step_limit=3_000_000)
+        expected = [0] * 128
+        for cell in guards:
+            expected[cell] = 173
+        expected[32:40] = ((left + right) & MASK64).to_bytes(8, "little")
+        expected[48:56] = (right & MASK64).to_bytes(8, "little")
+        assert result.memory == expected
+        assert result.input_consumed == 16
+        assert result.output == ""
+
+
+def test_packed_add_exact_alias_doubles_and_clears_scratch():
+    bf = BFEmitter()
+    a = PackedI64Ref(32)
+    for i in range(8):
+        bf.move(a.byte(i))
+        bf.emit(",")
+    PackedI64Ops(bf, 80).add_inplace(a, a)
+    code = bf.code()
+    for value in (0, 1, 127, 128, 255, 256, INT64_MIN, INT64_MAX, MASK64):
+        data = (value & MASK64).to_bytes(8, "little").decode("latin1")
+        result = run_bf(code, data, memory_size=128, step_limit=3_000_000)
+        expected = [0] * 128
+        expected[32:40] = ((value * 2) & MASK64).to_bytes(8, "little")
+        assert result.memory == expected
+        assert result.input_consumed == 8
