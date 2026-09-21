@@ -286,3 +286,68 @@ def test_mobile_reduction_after_decimal_input_leaves_next_line(text, values):
     assert result.memory[:8] == list(map(ord, _raw_word(sum(values))))
     assert result.memory[8:12] == list(map(ord, _raw_word(len(values))[:4]))
     assert result.input_consumed == len(text) + 1
+
+@pytest.mark.parametrize("count,value", [(0, -1), (1, -(1 << 63)), (3, -1),
+                                           (65, 256), (256, 0), (300, 2)])
+def test_runtime_value_repeat_preserves_inputs_and_cleans_future_scratch(count, value):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    from bfpackedseq import REPEAT_FORWARD_WORKSPACE_CELLS
+    bf = BFEmitter()
+    n, x = PackedI64Ref(0), PackedI64Ref(8)
+    ops = PackedI64Ops(bf, 16)
+    ops.set_u64(n, count)
+    ops.set_u64(x, value)
+    seq = RuntimePackedIntSequence(80)
+    seq.repeat_value(bf, n, x)
+    result = run_bf(bf.code(), memory_size=8000, step_limit=500_000_000)
+    assert _decode_s64(result.memory, n) == count
+    assert _decode_s64(result.memory, x) == value
+    for i in range(count):
+        assert result.memory[seq.marker(i)] == 1
+        assert result.memory[seq.back(i)] == bool(i)
+        assert _decode_s64(result.memory, seq.item(i)) == value
+    assert result.memory[seq.marker(count)] == 0
+    assert result.memory[seq.back(count)] == bool(count)
+    end = seq.marker(count)
+    assert not any(result.memory[end + 2:end + REPEAT_FORWARD_WORKSPACE_CELLS])
+    assert result.pointer == seq.base
+    assert set(bf.code()) <= set("><+-.,[]")
+    assert len(bf.code()) < 20_000
+
+
+@pytest.mark.parametrize("count", [1, 256, 65536, (1 << 32), (1 << 32) + 1, (1 << 63) - 1])
+def test_repeat_counter_keeps_upper_word_and_borrows_across_u32(count):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    from bfpackedseq import _decrement_repeat_count
+    bf = BFEmitter()
+    ref = PackedI64Ref(8)
+    PackedI64Ops(bf, 16).set_u64(ref, count)
+    _decrement_repeat_count(bf)
+    result = run_bf(bf.code(), memory_size=64, step_limit=1_000_000)
+    assert _decode_s64(result.memory, ref) == count - 1
+    assert not any(result.memory[16:32])
+
+
+def test_runtime_value_repeat_linear_step_growth_and_invalid_layout():
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    seq = RuntimePackedIntSequence(80)
+    steps = []
+    for n in (256, 512, 1024):
+        bf = BFEmitter()
+        count, value = PackedI64Ref(0), PackedI64Ref(8)
+        ops = PackedI64Ops(bf, 16)
+        ops.set_u64(count, n)
+        ops.set_u64(value, -1)
+        seq.repeat_value(bf, count, value)
+        result = run_bf(bf.code(), memory_size=12000, step_limit=500_000_000)
+        assert _decode_s64(result.memory, seq.item(n - 1)) == -1
+        steps.append(result.steps)
+    assert steps[1] < 2.5 * steps[0]
+    assert steps[2] < 2.5 * steps[1]
+    bf = BFEmitter()
+    with pytest.raises(ValueError, match="precede"):
+        seq.repeat_value(bf, PackedI64Ref(74), PackedI64Ref(0))
+    assert bf.code() == ""

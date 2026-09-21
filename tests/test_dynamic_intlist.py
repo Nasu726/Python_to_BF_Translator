@@ -116,3 +116,76 @@ def test_abc103_c_official_samples_and_maximum_n_small_values():
     for data, expected in cases:
         assert reference(ABC103_C_SOURCE, data) == expected
         assert execute(code, data).output == expected
+
+
+@pytest.mark.parametrize("value,count", [(0, 0), (17, -1), (2, 65), (-1, 3), (256, 256), (2, 300)])
+def test_runtime_singleton_repeat_and_shared_clear(value, count):
+    source = '''
+x = int(input())
+n = int(input())
+a = [x] * n
+b = a
+print(len(b), sum(a), x, n)
+b.clear()
+print(len(a), sum(b))
+print(input())
+'''
+    data = f"{value}\n{count}\nnext\n"
+    code = compile_source(source)
+    assert execute(code, data).output == reference(source, data)
+
+
+@pytest.mark.parametrize("expression,data", [
+    ("[int(input())] * int(input())", "7\n3\n"),
+    ("int(input()) * [int(input())]", "3\n7\n"),
+    ("[int(input())] * int(input())", "7\n-3\n"),
+    ("int(input()) * [int(input())]", "-3\n7\n"),
+])
+def test_repeat_operands_evaluate_once_in_python_order_even_if_empty(expression, data):
+    source = f"a = {expression}\nprint(sum(a), len(a))\nprint(input())\n"
+    data += "tail\n"
+    result = execute(compile_source(source), data)
+    assert result.output == reference(source, data)
+    assert result.input_consumed == len(data)
+
+
+@pytest.mark.parametrize("source", [
+    'n=3\na=["x"]*n\nprint(len(a))',
+    'n=3\na=[[1]]*n\nprint(len(a))',
+    'a=[1]*"2"\nprint(len(a))',
+])
+def test_integer_repeat_route_rejects_non_integer_operands(source):
+    from pybf import CompileError
+    with pytest.raises(CompileError):
+        compile_source(source)
+
+
+def test_repeat_count_mutation_does_not_change_constructed_list():
+    source = 'n=int(input())\nx=int(input())\na=n*[x]\nn=1\nx=99\nprint(len(a),sum(a))\n'
+    data = '65\n2\n'
+    assert execute(compile_source(source), data).output == reference(source, data)
+
+
+@pytest.mark.parametrize("value,count", [(5, -(1 << 63)), (-(1 << 63), 1), ((1 << 63) - 1, 1)])
+def test_repeat_int64_boundaries_without_decimal_input_cost(value, count):
+    # Direct 19-digit scalar parsing has a separate, larger existing test budget.
+    # This gate isolates repetition/normalization and stays at 500M raw steps.
+    source = f"x={value}\nn={count}\na=[x]*n\nprint(len(a),sum(a))\n"
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_repeat_operand_liveness_without_later_scalar_reads():
+    source = 'x=int(input())\nn=int(input())\na=[x]*n\nprint(len(a),sum(a))\n'
+    data = '2\n3\n'
+    assert execute(compile_source(source), data).output == reference(source, data)
+
+
+def test_zero_repeat_has_runtime_extent_and_bounded_source():
+    source = 'n=int(input())\na=[0]*n\nprint(len(a),sum(a))\n'
+    code = compile_source(source)
+    assert len(code) <= 512 * 1024
+    _, plan = lower_with_layout(source)
+    assert plan.dynamic_intlist_base - REDUCTION_WORKSPACE_CELLS > plan.temp_peak
+    for n in (0, -1, 65, 256, 1024):
+        data = f"{n}\n"
+        assert execute(code, data).output == reference(source, data)
