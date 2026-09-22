@@ -7,7 +7,8 @@ import pytest
 from bf_runtime import run_bf
 from compiler_dynamic_intlist import select_dynamic_int_list
 from compiler_layout import lower_with_layout
-from bfpackedseq import REDUCTION_WORKSPACE_CELLS
+from bfpackedseq import (ACCESS_WORKSPACE_CELLS, LOAD_ACCESS_WORKSPACE_CELLS,
+                         REDUCTION_WORKSPACE_CELLS)
 from pybf import compile_source
 
 
@@ -77,7 +78,8 @@ print(input())
 @pytest.mark.parametrize("source", [
     "a=list(map(int,input().split()))\na=[1]\nprint(len(a))",
     "a=list(map(int,input().split()))\nb=a\nb=[2]\nprint(len(a))",
-    "a=list(map(int,input().split()))\nb=a\na[0]=2\nprint(len(b))",
+    "a=list(map(int,input().split()))\na[0]+=2\nprint(len(a))",
+    "a=list(map(int,input().split()))\nprint(a[:])",
     "a=list(map(int,input().split()))\nb=[a]\nprint(len(a))",
     "a=list(map(int,input().split()))\nprint(sum(a, 1))",
     "a=list(map(int,input().split()))\nx=a.clear()",
@@ -198,3 +200,90 @@ def test_repeat_candidate_does_not_disable_established_dynamic_input_owner():
     assert selection is not None and selection.owner == 'a'
     data = ' '.join(['2'] * 65) + '\n'
     assert execute(compile_source(source), data).output == reference(source, data)
+
+
+@pytest.mark.parametrize("uses,needs_load,needs_store", [
+    ("print(len(a))", False, False),
+    ("print(a[0])", True, False),
+    ("a[0] = 1", False, True),
+    ("a[0] = a[1]", True, True),
+])
+def test_dynamic_integer_selection_tracks_required_access_frame(
+    uses, needs_load, needs_store,
+):
+    selection = select_dynamic_int_list(ast.parse(
+        "a=list(map(int,input().split()))\n" + uses + "\n"
+    ))
+    assert selection is not None
+    assert selection.needs_load is needs_load
+    assert selection.needs_store is needs_store
+
+
+@pytest.mark.parametrize("index", [0, 64, 256, -1, -65])
+def test_dynamic_integer_index_load_store_alias_and_cached_sum(index):
+    source = '''
+a = list(map(int, input().split()))
+b = a
+i = int(input())
+x = int(input())
+b[i] = x
+print(a[i], len(b), sum(a))
+'''
+    values = list(range(65))
+    data = " ".join(map(str, values)) + f"\n{index}\n-7\n"
+    code = compile_source(source)
+    result = execute(code, data)
+    if -len(values) <= index < len(values):
+        assert result.output == reference(source, data)
+    else:
+        # Runtime exceptions remain deferred: invalid load is zero and store is
+        # a no-op. Crucially, 256 does not wrap to element zero.
+        assert result.output == f"0 65 {sum(values)}\n"
+
+
+def test_dynamic_integer_store_evaluates_rhs_before_runtime_index():
+    source = '''
+a = [0] * 3
+a[int(input())] = int(input())
+print(a[0], a[1], a[2], sum(a))
+'''
+    data = "7\n1\n"
+    # RHS consumes 7 first, then the target index consumes 1.
+    assert execute(compile_source(source), data).output == reference(source, data)
+    _, plan = lower_with_layout(source)
+    assert plan.dynamic_intlist_base - ACCESS_WORKSPACE_CELLS > plan.temp_peak
+
+
+def test_dynamic_integer_index_survives_clear_as_legacy_noop_zero_contract():
+    source = '''
+a = [4] * 3
+b = a
+b.clear()
+a[0] = 9
+print(a[0], len(b), sum(a))
+'''
+    assert execute(compile_source(source), "").output == "0 0 0\n"
+
+
+ABC170_A_SOURCE = '''
+x = list(map(int, input().split()))
+for i in range(5):
+    if x[i] == 0:
+        print(i + 1)
+'''
+
+
+def test_abc170_a_official_samples_with_runtime_index_loop():
+    # https://atcoder.jp/contests/abc170/tasks/abc170_a
+    code = compile_source(ABC170_A_SOURCE)
+    assert len(code) <= 512 * 1024
+    raw, plan = lower_with_layout(ABC170_A_SOURCE)
+    assert plan.dynamic_intlist_base is not None
+    assert plan.dynamic_intlist_base - LOAD_ACCESS_WORKSPACE_CELLS > plan.temp_peak
+    assert set(raw) <= set("><+-.,[]")
+    for data, expected in [
+        ("0 2 3 4 5\n", "1\n"),
+        ("1 2 0 4 5\n", "3\n"),
+    ]:
+        assert reference(ABC170_A_SOURCE, data) == expected
+        assert execute(code, data).output == expected

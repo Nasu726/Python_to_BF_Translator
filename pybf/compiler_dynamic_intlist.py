@@ -1,9 +1,10 @@
 """One statically owned runtime integer list with proven alias views.
 
 This route supports one top-level input-list or singleton-repeat construction
-and unconditional alias bindings, with len/sum/clear uses only. It is not the general heap/object
-model: rebinding, escaping, indexing and multiple dynamic owners stay on the
-existing route. Selection is based on uses/definitions, never a problem name.
+and unconditional alias bindings, with len/sum/clear/index uses. It is not the
+general heap/object model: rebinding, escaping and multiple dynamic owners stay
+on the existing route. Selection is based on uses/definitions, never a problem
+name.
 """
 
 from __future__ import annotations
@@ -16,8 +17,10 @@ from bfcore import Int64Ref
 from bfstreamseq import _extract_packed_sign
 from bfpacked import PackedU32Ref
 from bfpacked64 import PackedI64Ref
-from bfpackedseq import (BACK, REDUCTION_WORKSPACE_CELLS,
-                         RuntimePackedIntSequence)
+from bfpackedops import PackedI64Ops
+from bfpackedseq import (ACCESS_WORKSPACE_CELLS, BACK,
+                         LOAD_ACCESS_WORKSPACE_CELLS,
+                         REDUCTION_WORKSPACE_CELLS, RuntimePackedIntSequence)
 from compiler_dynamic_charlist import select_dynamic_char_list
 from compiler_stream import CompileError, PythonToBFStream as _Base
 from transpiler import _is_list_map_int_input_split
@@ -27,6 +30,17 @@ from transpiler import _is_list_map_int_input_split
 class DynamicIntListSelection:
     owner: str
     bindings: dict[str, ast.Assign]
+    needs_load: bool
+    needs_store: bool
+
+
+def dynamic_int_workspace_cells(selection: DynamicIntListSelection) -> int:
+    width = REDUCTION_WORKSPACE_CELLS
+    if selection.needs_load:
+        width = max(width, LOAD_ACCESS_WORKSPACE_CELLS)
+    if selection.needs_store:
+        width = max(width, ACCESS_WORKSPACE_CELLS)
+    return width
 
 
 def _repeat_parts(node):
@@ -68,6 +82,8 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                 return None
             bindings[name] = statement
     binding_nodes = set(bindings.values())
+    needs_load = False
+    needs_store = False
     top_positions = {node: i for i, statement in enumerate(tree.body) for node in ast.walk(statement)}
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     builtin_names = {"list", "map", "int", "input", "sum", "len"}
@@ -92,6 +108,18 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                 and parent.func.id in ("len", "sum") and parent.args == [node]
                 and not parent.keywords):
             continue
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            if isinstance(parent.slice, ast.Slice):
+                return None
+            if isinstance(parent.ctx, ast.Load):
+                needs_load = True
+                continue
+            grandparent = parents.get(parent)
+            if (isinstance(parent.ctx, ast.Store)
+                    and isinstance(grandparent, ast.Assign)
+                    and grandparent.targets == [parent]):
+                needs_store = True
+                continue
         if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == "clear":
             call = parents.get(parent)
             if (isinstance(call, ast.Call) and call.func is parent
@@ -99,7 +127,7 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                     and isinstance(parents.get(call), ast.Expr)):
                 continue
         return None
-    return DynamicIntListSelection(owner, bindings)
+    return DynamicIntListSelection(owner, bindings, needs_load, needs_store)
 
 
 class PythonToBFStream(_Base):
@@ -143,7 +171,9 @@ class PythonToBFStream(_Base):
             # public entrypoint reruns lowering after measuring all temporaries.
             base = runtime_intlist_base
             if base is None:
-                base = self.temps.top + REDUCTION_WORKSPACE_CELLS + 10
+                base = self.temps.top + dynamic_int_workspace_cells(
+                    self.dynamic_int_selection
+                ) + 10
             self.runtime_intlist_base = base
             self.dynamic_int_sequence = RuntimePackedIntSequence(base)
 
@@ -162,6 +192,9 @@ class PythonToBFStream(_Base):
         return result
 
     def compile_expr(self, node):
+        if (isinstance(node, ast.Subscript)
+                and self._dynamic_int_name(node.value)):
+            return self._load_dynamic_int(node.slice)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id in ("sum", "len") and len(node.args) == 1
                 and not node.keywords and self._dynamic_int_name(node.args[0])):
@@ -169,7 +202,66 @@ class PythonToBFStream(_Base):
             return self._cached_int_value(ref)
         return super().compile_expr(node)
 
-    def _repeat_operand(self, node):
+    def _dynamic_int_packed_ops(self) -> PackedI64Ops:
+        scratch = self.temps.top
+        self.temps.top += PackedI64Ops.SCRATCH_CELLS
+        return PackedI64Ops(self.bf, scratch)
+
+    def _ensure_provisional_access_base(self) -> None:
+        if self._int_provisional_layout:
+            self.runtime_intlist_base = (
+                self.temps.top
+                + dynamic_int_workspace_cells(self.dynamic_int_selection)
+                + 10
+            )
+            self.dynamic_int_sequence = RuntimePackedIntSequence(
+                self.runtime_intlist_base
+            )
+
+    def _normalize_dynamic_int_index(self, node: ast.AST) -> PackedI64Ref:
+        """Evaluate one Python index and normalize a negative value once."""
+        normalized = self._packed_int_expr(
+            node, "dynamic integer-list index must be an integer"
+        )
+        scratch = [self.temps.cell() for _ in range(4)]
+        negative = scratch[0]
+        _extract_packed_sign(self.bf, normalized.byte(7), *scratch)
+        ops = self._dynamic_int_packed_ops()
+        self.bf.begin_while(negative)
+        self.bf.add_const(negative, -1)
+        ops.add_inplace(normalized, self._int_length)
+        self.bf.end_while(negative)
+        return normalized
+
+    def _load_dynamic_int(self, index_node: ast.AST):
+        index = self._normalize_dynamic_int_index(index_node)
+        packed = self._new_packed_i64()
+        self._ensure_provisional_access_base()
+        self.dynamic_int_sequence.load_value(self.bf, index, packed)
+        result = self._new_word()
+        self.backend.copy64(result, packed)
+        return result
+
+    def _store_dynamic_int(self, target: ast.Subscript, value_node: ast.AST) -> None:
+        # Python evaluates the RHS before the subscription target/index.
+        value = self._packed_int_expr(
+            value_node, "dynamic integer-list item must be an integer"
+        )
+        index = self._normalize_dynamic_int_index(target.slice)
+        previous = self._new_packed_i64()
+        found = self.temps.cell()
+        ops = self._dynamic_int_packed_ops()
+        self._ensure_provisional_access_base()
+        self.dynamic_int_sequence.exchange_value(
+            self.bf, index, value, previous, found=found,
+        )
+        self.bf.begin_while(found)
+        self.bf.add_const(found, -1)
+        ops.sub_inplace(self._int_total, previous)
+        ops.add_inplace(self._int_total, value)
+        self.bf.end_while(found)
+
+    def _packed_int_expr(self, node, error_message):
         if (isinstance(node, ast.Constant)
                 or (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub))
                     and isinstance(node.operand, ast.Constant))):
@@ -183,8 +275,13 @@ class PythonToBFStream(_Base):
                 return packed
         value = self.compile_expr(node)
         if not isinstance(value, Int64Ref):
-            raise CompileError("dynamic integer-list repetition requires integer operands")
+            raise CompileError(error_message)
         return self._pack_word(value)
+
+    def _repeat_operand(self, node):
+        return self._packed_int_expr(
+            node, "dynamic integer-list repetition requires integer operands"
+        )
 
     def _construct_repeat(self, parts):
         value_node, count_node, count_first = parts
@@ -208,7 +305,9 @@ class PythonToBFStream(_Base):
         self.bf.end_while(negative)
         discarded_length = self._new_packed_u32()
         if self._int_provisional_layout:
-            self.runtime_intlist_base = self.temps.top + REDUCTION_WORKSPACE_CELLS + 10
+            self.runtime_intlist_base = self.temps.top + dynamic_int_workspace_cells(
+                self.dynamic_int_selection
+            ) + 10
             self.dynamic_int_sequence = RuntimePackedIntSequence(self.runtime_intlist_base)
         self.dynamic_int_sequence.repeat_value(self.bf, count, value)
         # Reduction uses a u32 traversal length, but repetition already knows
@@ -219,6 +318,11 @@ class PythonToBFStream(_Base):
 
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Subscript)
+                and self._dynamic_int_name(node.targets[0].value)):
+            self._store_dynamic_int(node.targets[0], node.value)
+            return
         if selection is not None and node in self._int_binding_nodes:
             if node is selection.bindings[selection.owner]:
                 repeat = _repeat_parts(node.value)
@@ -248,4 +352,9 @@ class PythonToBFStream(_Base):
         return super()._compile_stmt_inner(node)
 
 
-__all__ = ["CompileError", "PythonToBFStream", "select_dynamic_int_list"]
+__all__ = [
+    "CompileError",
+    "PythonToBFStream",
+    "dynamic_int_workspace_cells",
+    "select_dynamic_int_list",
+]

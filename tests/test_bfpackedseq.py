@@ -2,8 +2,8 @@ import pytest
 
 from bf_runtime import run_bf
 from bfcore import BFEmitter
-from bfpacked import PackedU32Ref
-from bfpackedseq import RECORD_STRIDE, RuntimePackedIntSequence
+from bfpacked import PackedU32Core, PackedU32Ref
+from bfpackedseq import ACCESS_WORKSPACE_CELLS, RECORD_STRIDE, RuntimePackedIntSequence
 
 
 def _program(base=64):
@@ -350,4 +350,96 @@ def test_runtime_value_repeat_linear_step_growth_and_invalid_layout():
     bf = BFEmitter()
     with pytest.raises(ValueError, match="precede"):
         seq.repeat_value(bf, PackedI64Ref(74), PackedI64Ref(0))
+    assert bf.code() == ""
+
+
+@pytest.mark.parametrize("index,expected,found", [
+    (0, 11, 1),
+    (2, 11, 1),
+    (64, 11, 1),
+    (65, 0, 0),
+    (256, 0, 0),
+    (-1, 0, 0),
+    (1 << 32, 0, 0),
+])
+def test_runtime_packed_sequence_load_value_preserves_index(index, expected, found):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    bf = BFEmitter()
+    count = PackedU32Ref(0)
+    packed_index = PackedI64Ref(8)
+    result = PackedI64Ref(16)
+    hit = 24
+    PackedU32Core(bf, 32).set_u32(count, 65)
+    PackedI64Ops(bf, 32).set_u64(packed_index, index)
+    seq = RuntimePackedIntSequence(128)
+    seq.repeat_constant(bf, count, 11)
+    seq.load_value(bf, packed_index, result, found=hit)
+    execution = run_bf(bf.code(), memory_size=4_000, step_limit=500_000_000)
+    assert _decode_s64(execution.memory, packed_index) == index
+    assert _decode_s64(execution.memory, result) == expected
+    assert execution.memory[hit] == found
+    assert execution.pointer == seq.base
+    assert not any(execution.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base])
+    for item in range(65):
+        assert _decode_s64(execution.memory, seq.item(item)) == 11
+        assert execution.memory[seq.marker(item)] == 1
+        assert execution.memory[seq.back(item)] == (item != 0)
+    assert execution.memory[seq.marker(65)] == 0
+    assert execution.memory[seq.back(65)] == 1
+
+
+@pytest.mark.parametrize("index,replacement,found", [
+    (0, -7, 1),
+    (64, 1 << 40, 1),
+    (65, 99, 0),
+    (-1, 99, 0),
+])
+def test_runtime_packed_sequence_exchange_value_changes_only_a_hit(
+    index, replacement, found,
+):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    bf = BFEmitter()
+    count = PackedU32Ref(0)
+    packed_index = PackedI64Ref(8)
+    value = PackedI64Ref(16)
+    previous = PackedI64Ref(24)
+    hit = 40
+    PackedU32Core(bf, 48).set_u32(count, 65)
+    ops = PackedI64Ops(bf, 48)
+    ops.set_u64(packed_index, index)
+    ops.set_u64(value, replacement)
+    seq = RuntimePackedIntSequence(160)
+    seq.repeat_constant(bf, count, 11)
+    seq.exchange_value(bf, packed_index, value, previous, found=hit)
+    execution = run_bf(bf.code(), memory_size=4_000, step_limit=500_000_000)
+    assert _decode_s64(execution.memory, packed_index) == index
+    assert _decode_s64(execution.memory, value) == replacement
+    assert _decode_s64(execution.memory, previous) == (11 if found else 0)
+    assert execution.memory[hit] == found
+    for item in range(65):
+        expected = replacement if found and item == index else 11
+        assert _decode_s64(execution.memory, seq.item(item)) == expected
+        assert execution.memory[seq.marker(item)] == 1
+        assert execution.memory[seq.back(item)] == (item != 0)
+    assert execution.memory[seq.marker(65)] == 0
+    assert execution.memory[seq.back(65)] == 1
+    assert not any(execution.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base])
+    assert execution.pointer == seq.base
+
+
+def test_runtime_packed_sequence_access_rejects_overlapping_workspace():
+    from bfpacked64 import PackedI64Ref
+    bf = BFEmitter()
+    seq = RuntimePackedIntSequence(ACCESS_WORKSPACE_CELLS - 1)
+    with pytest.raises(ValueError, match="precede"):
+        seq.load_value(bf, PackedI64Ref(0), PackedI64Ref(8))
+    assert bf.code() == ""
+
+    seq = RuntimePackedIntSequence(128)
+    with pytest.raises(ValueError, match="must not overlap"):
+        seq.load_value(bf, PackedI64Ref(0), PackedI64Ref(0))
+    with pytest.raises(ValueError, match="hit flag must not overlap"):
+        seq.load_value(bf, PackedI64Ref(0), PackedI64Ref(8), found=8)
     assert bf.code() == ""

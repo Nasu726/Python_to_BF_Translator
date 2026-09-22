@@ -45,6 +45,37 @@ _MOBILE_SAVED_RECORD = _MOBILE_SCRATCH + PackedI64Ops.SCRATCH_CELLS
 REDUCTION_WORKSPACE_CELLS = _MOBILE_SAVED_RECORD + RECORD_STRIDE
 REPEAT_FORWARD_WORKSPACE_CELLS = 48
 
+# Maximum/store mobile random-access frame.  It carries the normalized index,
+# incoming value, previous/result value and hit flag across every record.  The
+# final ten cells save one record while the frame trades places with it.
+_ACCESS_INDEX = 0
+_ACCESS_VALUE = 8
+_ACCESS_RESULT = 16
+_ACCESS_FOUND = 24
+_ACCESS_ZERO = 25
+_ACCESS_TMP = 26
+_ACCESS_HELPER = 27
+_ACCESS_GATE = 28
+_ACCESS_NONZERO = 29
+_ACCESS_SCRATCH = 30
+_ACCESS_SAVED_RECORD = _ACCESS_SCRATCH + PackedI64Ops.SCRATCH_CELLS
+ACCESS_WORKSPACE_CELLS = _ACCESS_SAVED_RECORD + RECORD_STRIDE
+
+# Loads omit the incoming-value lane.  The remaining fields keep the same
+# physical addresses relative to the sequence base, while the index and left
+# edge move eight cells right.  Stores use the maximum workspace above.
+_LOAD_ACCESS_INDEX = 0
+_LOAD_ACCESS_RESULT = 8
+_LOAD_ACCESS_FOUND = 16
+_LOAD_ACCESS_ZERO = 17
+_LOAD_ACCESS_TMP = 18
+_LOAD_ACCESS_HELPER = 19
+_LOAD_ACCESS_GATE = 20
+_LOAD_ACCESS_NONZERO = 21
+_LOAD_ACCESS_SCRATCH = 22
+_LOAD_ACCESS_SAVED_RECORD = _LOAD_ACCESS_SCRATCH + PackedI64Ops.SCRATCH_CELLS
+LOAD_ACCESS_WORKSPACE_CELLS = _LOAD_ACCESS_SAVED_RECORD + RECORD_STRIDE
+
 # Control scratch begins exactly at the next, still-unmaterialized record.
 # NEXT_MARKER/NEXT_BACK are intentionally reused as CH/SIGN until the very end
 # of an iteration; all rolling scratch is cleared before those cells are armed.
@@ -372,7 +403,13 @@ def _move_bytes(bf: BFEmitter, src: int, dst: int) -> None:
     bf.end_while(src)
 
 
-def _rotate_mobile_frame(bf: BFEmitter, *, forward: bool) -> None:
+def _rotate_mobile_frame(
+    bf: BFEmitter,
+    *,
+    forward: bool,
+    width: int = REDUCTION_WORKSPACE_CELLS,
+    saved_record: int = _MOBILE_SAVED_RECORD,
+) -> None:
     """[frame][record] <-> [record][frame], using frame-owned scratch.
 
     Coordinates start at the left end of the pair. Save the record, transport
@@ -380,21 +417,20 @@ def _rotate_mobile_frame(bf: BFEmitter, *, forward: bool) -> None:
     Arithmetic scratch must be zero; saved-record cells are zero on return.
     No adjacent record or end-sentinel cell is borrowed.
     """
-    width = REDUCTION_WORKSPACE_CELLS
     if forward:
         for i in range(RECORD_STRIDE):
-            _move_bytes(bf, width + i, _MOBILE_SAVED_RECORD + i)
+            _move_bytes(bf, width + i, saved_record + i)
         for i in range(width - 1, -1, -1):
             _move_bytes(bf, i, i + RECORD_STRIDE)
         for i in range(RECORD_STRIDE):
-            _move_bytes(bf, _MOBILE_SAVED_RECORD + RECORD_STRIDE + i, i)
+            _move_bytes(bf, saved_record + RECORD_STRIDE + i, i)
     else:
         for i in range(RECORD_STRIDE):
-            _move_bytes(bf, i, RECORD_STRIDE + _MOBILE_SAVED_RECORD + i)
+            _move_bytes(bf, i, RECORD_STRIDE + saved_record + i)
         for i in range(width):
             _move_bytes(bf, RECORD_STRIDE + i, i)
         for i in range(RECORD_STRIDE):
-            _move_bytes(bf, _MOBILE_SAVED_RECORD + i, width + i)
+            _move_bytes(bf, saved_record + i, width + i)
 
 
 @lru_cache(maxsize=1)
@@ -445,6 +481,105 @@ def _repeat_value_walk_code() -> str:
     tail.move(BACK)
     return ("[" + body.code() + "]" + tail.code()
             + "[" + "<" * RECORD_STRIDE + "]<")
+
+
+@lru_cache(maxsize=2)
+def _access_walk_code(*, store: bool) -> str:
+    """Scan every record once with a mobile load/exchange frame."""
+    if store:
+        width = ACCESS_WORKSPACE_CELLS
+        index = _ACCESS_INDEX
+        result = _ACCESS_RESULT
+        found = _ACCESS_FOUND
+        zero = _ACCESS_ZERO
+        tmp = _ACCESS_TMP
+        helper = _ACCESS_HELPER
+        gate = _ACCESS_GATE
+        nonzero = _ACCESS_NONZERO
+        scratch = _ACCESS_SCRATCH
+        saved_record = _ACCESS_SAVED_RECORD
+    else:
+        width = LOAD_ACCESS_WORKSPACE_CELLS
+        index = _LOAD_ACCESS_INDEX
+        result = _LOAD_ACCESS_RESULT
+        found = _LOAD_ACCESS_FOUND
+        zero = _LOAD_ACCESS_ZERO
+        tmp = _LOAD_ACCESS_TMP
+        helper = _LOAD_ACCESS_HELPER
+        gate = _LOAD_ACCESS_GATE
+        nonzero = _LOAD_ACCESS_NONZERO
+        scratch = _LOAD_ACCESS_SCRATCH
+        saved_record = _LOAD_ACCESS_SAVED_RECORD
+    body = BFEmitter()
+    body.ptr = width + MARKER
+    ops = PackedI64Ops(body, scratch)
+
+    # gate = not found.  Once a hit occurs, later records only transport the
+    # frame and cannot observe or modify their payload.
+    body.set_const(gate, 1)
+    ops._copy_cell(found, tmp, helper)
+    body.begin_while(tmp)
+    body.clear(tmp)
+    body.clear(gate)
+    body.end_while(tmp)
+
+    body.begin_while(gate)
+    body.add_const(gate, -1)
+
+    # zero = (remaining signed-normalized index == 0).
+    body.set_const(zero, 1)
+    for i in range(8):
+        ops._copy_cell(index + i, tmp, helper)
+        body.begin_while(tmp)
+        body.clear(tmp)
+        body.clear(zero)
+        body.end_while(tmp)
+
+    # nonzero = not zero, preserving zero for the hit arm.
+    body.set_const(nonzero, 1)
+    ops._copy_cell(zero, tmp, helper)
+    body.begin_while(tmp)
+    body.clear(tmp)
+    body.clear(nonzero)
+    body.end_while(tmp)
+
+    body.begin_while(zero)
+    body.add_const(zero, -1)
+    ops.copy(PackedI64Ref(result), PackedI64Ref(width + PAYLOAD))
+    if store:
+        ops.copy(PackedI64Ref(width + PAYLOAD), PackedI64Ref(_ACCESS_VALUE))
+    body.set_const(found, 1)
+    body.end_while(zero)
+
+    body.begin_while(nonzero)
+    body.add_const(nonzero, -1)
+    _decrement_repeat_count(
+        body,
+        count_base=index,
+        scratch_base=scratch,
+    )
+    body.end_while(nonzero)
+    body.end_while(gate)
+
+    _rotate_mobile_frame(
+        body,
+        forward=True,
+        width=width,
+        saved_record=saved_record,
+    )
+    body.move(width + RECORD_STRIDE + MARKER)
+
+    rewind = BFEmitter()
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(
+        rewind,
+        forward=False,
+        width=width,
+        saved_record=saved_record,
+    )
+    rewind.move(width + BACK)
+    return ("[" + body.code() + "]" + ">" * BACK
+            + "[" + rewind.code() + "]" + "<" * BACK)
 
 
 def _decrement_repeat_count(bf: BFEmitter, *, count_base=8, scratch_base=16) -> None:
@@ -619,6 +754,86 @@ class RuntimePackedIntSequence:
         bf.emit(_repeat_value_walk_code())
         bf.ptr = self.base
 
+    def _access_value(
+        self,
+        bf: BFEmitter,
+        index: PackedI64Ref,
+        result: PackedI64Ref,
+        *,
+        value: PackedI64Ref | None = None,
+        found: int | None = None,
+    ) -> None:
+        """Load or exchange one signed-normalized runtime index.
+
+        ``index`` is already normalized for Python negative indexing.  A still
+        negative value or any value beyond the sequence naturally reaches the
+        sentinel without a hit.  This keeps all 64 bits and cannot wrap index
+        2**32 to zero.  Result is zero and an exchange is a no-op on a miss.
+        Inputs/outputs must be disjoint and precede the exclusive mobile frame.
+        """
+        self._check_layout()
+        store = value is not None
+        width = ACCESS_WORKSPACE_CELLS if store else LOAD_ACCESS_WORKSPACE_CELLS
+        frame = self.base - width
+        index_offset = _ACCESS_INDEX if store else _LOAD_ACCESS_INDEX
+        result_offset = _ACCESS_RESULT if store else _LOAD_ACCESS_RESULT
+        found_offset = _ACCESS_FOUND if store else _LOAD_ACCESS_FOUND
+        scratch_offset = _ACCESS_SCRATCH if store else _LOAD_ACCESS_SCRATCH
+        refs = [index, result] + ([] if value is None else [value])
+        if frame < 0 or any(ref.base < 0 or ref.base + ref.cells > frame for ref in refs):
+            raise ValueError("access inputs and outputs must precede the mobile frame")
+        spans = [(ref.base, ref.base + ref.cells) for ref in refs]
+        if any(max(left[0], right[0]) < min(left[1], right[1])
+               for position, left in enumerate(spans)
+               for right in spans[position + 1:]):
+            raise ValueError("access inputs and outputs must not overlap")
+        if found is not None and not 0 <= found < frame:
+            raise ValueError("access hit flag must precede the mobile frame")
+        if found is not None and any(start <= found < end for start, end in spans):
+            raise ValueError("access hit flag must not overlap inputs or outputs")
+
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        ops = PackedI64Ops(bf, frame + scratch_offset)
+        ops.copy(PackedI64Ref(frame + index_offset), index)
+        if value is not None:
+            ops.copy(PackedI64Ref(frame + _ACCESS_VALUE), value)
+
+        bf.move(self.base)
+        bf.emit(_access_walk_code(store=store))
+        bf.ptr = self.base
+
+        ops.copy(result, PackedI64Ref(frame + result_offset))
+        if found is not None:
+            bf.clear(found)
+            _move_bytes(bf, frame + found_offset, found)
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def load_value(
+        self,
+        bf: BFEmitter,
+        index: PackedI64Ref,
+        result: PackedI64Ref,
+        *,
+        found: int | None = None,
+    ) -> None:
+        """Load one normalized index, returning zero on an invalid index."""
+        self._access_value(bf, index, result, found=found)
+
+    def exchange_value(
+        self,
+        bf: BFEmitter,
+        index: PackedI64Ref,
+        value: PackedI64Ref,
+        previous: PackedI64Ref,
+        *,
+        found: int | None = None,
+    ) -> None:
+        """Replace one normalized index and return its previous value."""
+        self._access_value(bf, index, previous, value=value, found=found)
+
     def walk_records(
         self,
         bf: BFEmitter,
@@ -716,6 +931,8 @@ __all__ = [
     "PAYLOAD",
     "PAYLOAD_BYTES",
     "REDUCTION_WORKSPACE_CELLS",
+    "ACCESS_WORKSPACE_CELLS",
+    "LOAD_ACCESS_WORKSPACE_CELLS",
     "RuntimePackedIntSequence",
     "PackedIntRecordBody",
 ]
