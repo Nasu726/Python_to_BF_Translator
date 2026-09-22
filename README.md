@@ -81,7 +81,10 @@ CLIオプションで型サイズは変更できません。型表現はABIと�
 - `int`: signed 64-bit two's complement
 - `bool`: 64-bit scalar上の0/1
 - `str`: 最大255 byteの固定長領域（NUL終端）
-- `list[int]`: 最大64要素、各要素signed 64-bit
+- 一般の`list[int]`: 最大64要素、各要素signed 64-bit
+- restricted single-owner `list[int]`: 入力行または`[x] * n`からruntime長で
+  構築し、静的に証明したalias間で`len` / `sum` / `clear` / 単純な添字
+  load/storeを共有
 - `list[str]`: 最大64要素、各要素は固定長byte string
 - `list(input())`で生成されるcharacter-list view: 最大255文字。既存string payloadをmutableな1文字要素列として見るrestricted representation
 
@@ -103,6 +106,28 @@ print("".join(chars))
 現在このrestricted viewで対応するのは、1文字load/store、runtime/負index、`len`、iteration、1文字temporaryを使うswap、empty-separator joinです。element storeに使えるliteral/値は現行のNUL終端byte ABIに合わせて **code point 1..255のnon-NUL 1-byte文字**に限定します。一般のmutable `list[str]` と同一ではないため、multi-character element assignment、NUL要素、255を超えるUnicode文字、alias assignment、insert/delete/append、直接のlist repr出力などは未対応です。
 
 runtime `IndexError` の伝播もまだありません。範囲外character indexは暫定runtime contractとしてempty load / no-op storeになり、低byteへwrapして別要素を壊さないことを保証します。
+
+### runtime長のrestricted整数list
+
+次のように、top-levelで1個だけ構築され、用途を静的に追跡できる整数listは
+固定64要素ではなく、Brainfuck実行時に10-cell recordsとして伸長します。
+
+```python
+a = list(map(int, input().split()))  # または a = [0] * n
+b = a
+i = int(input())
+b[i] = 7
+print(a[i], len(b), sum(a))
+a.clear()
+```
+
+現時点の対象は1個のownerと無条件alias、`len` / `sum` / statement-form
+`clear`、`a[i]`、単純な`a[i] = value`です。一般のheap object modelでは
+ないため、複数owner、rebind、escape、slice、augmented item assignment、
+`append`、nested list、copy、sortはこのruntime長routeでは未対応です。
+1回の添字アクセスはlist全体をmobile frameで往復するO(N)処理なので、
+N回のindexed loopがまだO(N²)になる点にも注意してください。範囲外は
+error ABI完成まで暫定的にload 0 / store no-opです。
 
 ## 入力と型変換
 
@@ -126,7 +151,11 @@ value = int(text)
 
 `int(str_value)` は現在、projectのsigned-int64 ABI内の有効なASCII十進文字列を対象とし、先頭の`+` / `-`と前後のASCII whitespaceを扱います。Pythonの任意精度intやinvalid textに対するruntime `ValueError` の完全再現はまだ行いません。`str(int_value)` はsigned-int64の全範囲（`INT64_MIN` / `INT64_MAX`を含む）を扱います。
 
-固定長ABIのため、list容量を超えるtokenは保存せず同じ行の残りをdrainし、次の`input()`が次行から始まるようにします。固定数unpackで値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する固定runtime仕様です。
+一般の固定長list routeでは、容量を超えるtokenを保存せず同じ行の残りを
+drainし、次の`input()`が次行から始まるようにします。上記restricted
+single-owner整数list routeはこの64要素上限を使いません。固定数unpackで
+値が不足した場合は不足分を0または空文字列、余剰分は同じ行内で破棄する
+固定runtime仕様です。
 
 整数入力の実例は `examples/input_patterns.py` にあります。
 
@@ -148,9 +177,11 @@ value = int(text)
 - `S = input().split()` / `list(input().split())`
 - `S = list(map(str, input().split()))`
 - `chars = list(input())`, character index load/store, `len(chars)`, `"".join(chars)`
+- restricted runtime長整数listのalias、`len` / `sum` / `clear`、単純なindex load/store
 - `str(int_value)`, `int(str_value)`, `str(str_value)`, `int(int_value)`
 - int/string listのindex、代入、`append`, `len`, iteration
-- runtime list repetition (`[x] * n`, `A * n`, `n * A`) ※現行固定容量まで
+- 一般のruntime list repetition (`[x] * n`, `A * n`, `n * A`)は固定容量。
+  上記restricted singleton `[x] * n`だけruntime長
 - runtime負index
 - `print(...)`, `sep=`, `end=`
 - `abs`, `bool`, `min`, `max`

@@ -1,14 +1,16 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-21):** PR #17 is merged at
-`d00a03f683a6a9231662c1f6b3607c1b30e02338` after all four shards passed run
-`35612005284` for head `8af127d96e6f1588238e6319e67386063856b129`.
-The current increment adds public singleton integer repetition `[x] * n` and
-`n * [x]` to that same statically owned alias/len/sum/clear slice. Construction
-uses a forward count/value carrier, with signed count normalization and full
-64-bit countdown. It is not general object allocation or mutable indexing.
-Read the current section of `P0_IMPLEMENTATION_STATUS.md` for scope, source-size
-limits, linear-step evidence and reproducible native measurements.
+**Latest checkpoint (2026-09-22):** PR #18 is merged at
+`35b9a2723b9fcf00338cfbef9213acf8689618f2`. The active
+`dynamic-intlist-index-1` increment adds runtime `a[i]` loads and simple stores
+to the same statically owned input/repetition alias slice. A 48-cell load /
+56-cell store mobile frame retains full int64 indexes, restores tape after every
+access and updates the cached sum on mutation. ABC170 A's ordinary indexed loop
+is 518,124 bytes and passes both official samples plus all five zero positions
+on native Tritium.
+This is O(N) per access, not general object allocation and not yet a scalable
+indexed pass. Read the current section of `P0_IMPLEMENTATION_STATUS.md` for the
+exact scope, source-size limits, tests and reproducible benchmark.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
@@ -909,14 +911,13 @@ shards before merging a new milestone; keep the collection guard enabled.
 
 Read `P0_IMPLEMENTATION_STATUS.md` first. The general public integer-list
 fallback still has fixed capacity/value-copy semantics. The new single-owner
-input-list len/sum/clear route has uncapped records and proven shared aliases,
-but does not establish general heap/handle semantics. Contiguous repeat and physical
-forward/reverse traversal are tested low-level primitives, not public aliases
-or a finished object model. Next P0 architecture work must join allocation,
-identity and mobile scalar storage without reintroducing root-to-item scans.
-The new sum/count primitive moves one shared 38-cell frame with the traversal
-and restores tape layout on return. It is not general public list routing;
-its dense-byte arithmetic remains costly (see the status/benchmark script).
+input/repetition route has uncapped records, proven shared aliases, len/sum,
+clear and basic indexed load/store, but does not establish general heap/handle
+semantics. Each indexed access moves one 48- or 56-cell frame across every
+record and restores tape layout on return. That makes isolated access scalable
+in capacity but an N-element indexed loop O(N²). The immediate P0 boundary is a persistent
+physical cursor or batched loop lowering, followed by general allocation and
+identity routing; see the status/benchmark scripts for measured limits.
 
 The subsequent integer augmented-assignment increment adds //=, %=, &=, |=,
 ^= for scalars/list items, fixes signed-divmod workspace corruption, and tests

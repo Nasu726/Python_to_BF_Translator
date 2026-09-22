@@ -20,8 +20,9 @@ from bfstreamseq import RECORD_STRIDE
 from bfopt import optimize_bf
 from bftemparena import PeakTempArena
 from compiler_dynamic_charlist import select_dynamic_char_list
-from compiler_dynamic_intlist import CompileError, PythonToBFStream, select_dynamic_int_list
-from bfpackedseq import REDUCTION_WORKSPACE_CELLS
+from compiler_dynamic_intlist import (CompileError, PythonToBFStream,
+                                      dynamic_int_workspace_cells,
+                                      select_dynamic_int_list)
 
 
 @dataclass(frozen=True)
@@ -99,10 +100,11 @@ def lower_with_layout(
         raw = compiler.compile_module(tree)
         return raw, compiler.layout_plan
 
-    if select_dynamic_int_list(tree) is not None:
+    dynamic_int_selection = select_dynamic_int_list(tree)
+    if dynamic_int_selection is not None:
         _probe, probe_plan = lower_once(None)
         del _probe
-        guard = REDUCTION_WORKSPACE_CELLS + 10
+        guard = dynamic_int_workspace_cells(dynamic_int_selection) + 10
         runtime_base = probe_plan.runtime_base(guard_cells=guard)
         for _attempt in range(3):
             raw, plan = lower_once(None, runtime_base)

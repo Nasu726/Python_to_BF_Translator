@@ -1,12 +1,74 @@
 # Feature / optimization / ABC acceptance track
 
-Updated 2026-09-21. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
+Updated 2026-09-22. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
 Every feature must eventually have all three: implementation, optimization, and
 validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: public runtime singleton integer repetition
+## Current increment: dynamic integer-list indexing and ABC170 A
+
+The restricted single-owner dynamic integer-list route now supports ordinary
+runtime `a[i]` loads and simple `a[i] = value` stores. This applies to both the
+uncapped input-list constructor and runtime singleton repetition, and all
+statically proven aliases observe the same mutation. Store lowering evaluates
+the right-hand side before the target index, matching Python assignment order.
+The old element is returned by the store primitive so the persistent cached sum
+can be updated as `sum -= old; sum += value`; cached length remains unchanged.
+
+The low-level implementation carries one mobile frame across the contiguous
+10-cell records: **48 cells for a load** and **56 cells for a store**. The load
+layout omits the unused incoming-value lane. The frame contains the full 64-bit
+normalized index, result/old value, hit state and arithmetic scratch (plus the
+incoming value for stores). Every materialized record is crossed once, then
+inverse swaps restore the records and return the frame to the fixed base.
+Therefore one access uses `10*N + O(1)`
+tape, has source independent of N, and runs in O(N) record work. It deliberately
+continues to the sentinel after a hit so fixed outputs are touched only after
+the frame returns; a loop containing N indexed accesses is consequently O(N²).
+A locality-preserving cursor/batched loop lowering remains required before
+claiming scalable ABC136-style indexed passes.
+
+All eight index bytes participate. Index `2**32` cannot wrap to element zero.
+Negative indexes add the cached 64-bit length once before traversal, so `-1`
+and `-len(a)` work while values below `-len(a)` miss. Until the runtime error ABI
+exists, an invalid load returns zero and an invalid store is a no-op, preserving
+the project's explicitly documented legacy contract rather than pretending to
+raise Python `IndexError`. Slices and augmented assignment on this dynamic route
+remain rejected. Rebinding, escaping, multiple dynamic owners, append/capacity
+growth, general heap handles and nested lists are also outside this increment.
+
+Current public source telemetry:
+
+| Source shape | Generated BF | 512 KiB headroom |
+| --- | ---: | ---: |
+| runtime repeat + store + load | 407,441 B | 116,847 B |
+| ABC170 A ordinary loop | 518,124 B | 6,164 B |
+| repeat + store + cached len/sum | 583,615 B | -59,327 B |
+| repeat + store/load + cached sum | 611,103 B | -86,815 B |
+
+Thus this is functional progress, not a claim that every combination is under
+the submission limit. The ABC gate is intentionally kept at 512 KiB; it was not
+raised to accommodate the feature.
+
+[ABC170 A — Five Variables](https://atcoder.jp/contests/abc170/tasks/abc170_a)
+is compiled from its ordinary Python loop through `pybf.compile_source`, with
+no task-name detection or problem-specific BF. Both official samples match
+CPython and their published output. `tools/bench_tritium_abc170_index.py`
+reproduces a native Tritium revision `14a729d` check for every possible zero
+position, three trials each. All 15 runs returned the exact result in
+0.033–0.045 seconds locally. These timings are not an AtCoder-host guarantee.
+
+Local validation: **146 tests passed** in the two directly affected low-level
+and frontend suites, plus **58 existing regression tests** for layout, public
+API, source size, compile performance, dynamic character lists and streaming
+integer lists. Coverage includes empty/cleared lists, aliases, cache updates,
+RHS/index input order, positions 0/64/256, negative indexes, `2**32`, int64
+values, complete record/frame restoration and layout separation. A regression
+run also caught and fixed an internal method-name collision with the dynamic
+character-list index normalizer; its fused swaps remain covered.
+
+## Previous increment: public runtime singleton integer repetition
 
 The single-owner route now accepts ordinary `[x] * n` and `n * [x]`, where both
 operands are integer expressions. For example:
@@ -375,12 +437,15 @@ Both edited test modules are already included in the normal CI matrix.
 ## What is still missing before P0 is complete
 
 1. General public object-handle routing: ordinary list variables still do not
-   have Python alias semantics. Low-level handle tests are not frontend support.
-2. Scalable allocation and traversal: the retained linked-list heap is a
-   correctness prototype. Each handle lookup scans from heap origin; stopping
-   at null does not remove this compounded traversal cost. Do not restore the
-   previously rejected public route or raise its billion-step guard.
-3. Runtime-sized repeat and nested containers on the reference model.
+   have Python alias semantics beyond the one statically proven owner/alias
+   slice. Low-level handle tests are not general frontend support.
+2. Scalable repeated access/traversal: the new contiguous access primitive is
+   O(N) per access, so an indexed pass is O(N²). The retained linked-list heap
+   is also only a correctness prototype because each handle lookup scans from
+   heap origin. Do not hide either issue behind a larger step limit.
+3. Append/capacity growth, multiple runtime-sized objects and nested containers
+   on the reference model. Singleton repetition currently exists only in the
+   restricted single-owner slice.
 4. Shallow copy and basic deep copy on that model.
 5. Stable bottom-up merge sort and reverse sorting.
 6. Temporary allocation reuse; current heap allocation is monotonic.
@@ -390,11 +455,13 @@ The final error-state contract remains required, not waived.
 
 ## Next implementation boundary
 
-Design chunk/physical-cursor traversal and heap object routing together so a
-sequential list pass does not repeatedly perform indexed lookup from the root.
-Expose alias + runtime repeat + mutation through ordinary Python only after
-that boundary is validated. Then proceed through nested lists, copying and
-sorting in the plan's P0 order. Keep separate ledger entries for:
+Design a locality-preserving physical cursor or batched indexed-loop lowering
+so a sequential pass does not restart a full scan from the list base for every
+element. Validate that boundary with the existing ABC136 C ordinary source,
+beyond-old-capacity inputs and a scaling/Tritium benchmark. Then join the proven
+single-owner semantics to general heap object routing and proceed through
+append, nested lists, copying and sorting in the plan's P0 order. Keep separate
+ledger entries for:
 
 - semantics (CPython differential cases, alias/rebinding and operand order);
 - source bytes, steps and tape use (no weakened gates);
