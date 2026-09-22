@@ -6,7 +6,94 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: public single-owner integer-list views
+## Current increment: public runtime singleton integer repetition
+
+The single-owner route now accepts ordinary `[x] * n` and `n * [x]`, where both
+operands are integer expressions. For example:
+
+```python
+n = int(input())
+a = [0] * n
+b = a
+print(len(b), sum(a))
+b.clear()
+print(len(a), sum(b))
+```
+
+Repeat selection requires one unconditional top-level repeat construction,
+no input-list owner, unconditional aliases and only len/sum/statement-clear uses. General indexed mutation,
+append, nested lists, copying, rebinding, multiple dynamic owners and allocator
+reuse are **not** implemented by this increment. The pre-existing input-owner
+route takes precedence over new repeat candidates: an unrelated fixed repeat
+must not silently restore the input list's old capacity bound. Such mixed
+programs keep the earlier behavior; the second list does not gain dynamic
+repeat support. This does not complete P0's
+repeat-plus-indexed-update-and-sort acceptance program.
+
+Both operands evaluate once, in Python order, even for an empty result.
+Negative signed-int64 counts normalize to zero (including INT64_MIN). Positive
+counts retain all 64 bits: no u32/byte truncation. The cached length is now an
+8-byte value alongside the 8-byte cached sum. Input-list construction still
+uses its existing u32 reduction count, zero-extended into this header. Repeated
+metadata reads preserve their cache; all aliases share logical clear. Sum uses
+the existing modulo-2**64 arithmetic ABI.
+
+The runtime constructor carries only remaining count and repeated value through
+fresh future cells. Each step shifts this 16-byte carrier forward, fills one
+10-cell record, and advances; one marker walk returns to the static base.
+It never looks up each element from the list origin. Peak tape is 10*N+O(1),
+emitted source is independent of N, and scratch at the final sentinel is
+scrubbed. The generic mobile-frame reduction then computes the initial sum.
+A prototype that rotated finished records with a larger frame exceeded the
+500M-step budget on dense 1024-element input; it was replaced, not retained
+behind an increased limit.
+
+Low-level runtime-value constructor (including input initialization), value -1:
+
+| N | Raw BF bytes | Executed raw commands |
+| ---: | ---: | ---: |
+| 256 | 17,141 | 58,174,912 |
+| 512 | 17,142 | 115,793,292 |
+| 1024 | 17,144 | 231,227,839 |
+
+The tiny byte differences are only count initialization literals. The loop is
+emitted once; doubling N doubles work. Tests preserve every element, both
+inputs, markers/backlinks, scratch cleanup and the final pointer. Separate
+bounded counter tests verify borrowing at 2**32 and the upper word at INT64_MAX,
+without attempting infeasible billion-element allocations.
+
+Public source sizes:
+
+- `n=int(input()); a=[0]*n; print(len(a),sum(a))`: **498,860 B**, below 512 KiB.
+- `n,x=map(int,input().split()); a=[x]*n; print(len(a),sum(a))`:
+  **543,644 B**, still **19,356 B over 512 KiB**. Runtime support is not a claim
+  that every repeated-value program is ready for submission.
+- Unchanged ABC103 C retained-list solution: **307,892 B**, still below 512 KiB.
+  The 1,240-byte increase from PR #17 is the wider persistent length header.
+
+`tools/bench_tritium_repeat.py` is the reproducible manual benchmark using
+Tritium revision 14a729d with `-b -e`. All 18 local trials returned exact output:
+zero-repeat N=100000 (0.082–0.117 s), runtime value 2 and -1 at N=3000,
+INT64_MIN count, and both int64 value endpoints at N=1 (0.071–0.239 s across the
+runtime-value cases). These are local timings, not judge acceptance.
+The ABC103 C native benchmark also passes all four maximum-N distributions,
+three trials each. Its official samples and N=3000/all-2 retain the unchanged
+500M-step regression guard.
+
+Local validation: **178 focused tests passed** across the two affected suites
+and existing layout, public API, code-size, compile-performance, character-list
+and streaming-list regressions. Both affected suites already run in normal CI.
+Regression tests cover operand evaluation/input order, empty results, negative
+counts, 65/256/300/1024 extents, aliases and clear, scalar preservation, and
+layout separation. Boundary semantics use scalar literals to isolate repetition
+from the pre-existing costly 19-digit decimal reader; the native benchmark
+additionally verifies those same boundaries through input. Existing parser
+budgets are unchanged. An early lifetime-analysis error (rewriting a repeat to
+zero let x's storage be reused for n) is fixed by preserving operand reads in
+the inference tree and has a dedicated regression case. An additional mixed input/repeat regression
+verifies that the new selector preserves the established input-owner route.
+
+## Previous increment: public single-owner integer-list views
 
 The public compiler now selects a statically proven ownership slice:
 

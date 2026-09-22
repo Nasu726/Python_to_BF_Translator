@@ -1,7 +1,7 @@
 """One statically owned runtime integer list with proven alias views.
 
-This route supports a single top-level input-list construction and unconditional
-alias bindings, with len/sum/clear uses only. It is not the general heap/object
+This route supports one top-level input-list or singleton-repeat construction
+and unconditional alias bindings, with len/sum/clear uses only. It is not the general heap/object
 model: rebinding, escaping, indexing and multiple dynamic owners stay on the
 existing route. Selection is based on uses/definitions, never a problem name.
 """
@@ -12,9 +12,12 @@ import ast
 import copy
 from dataclasses import dataclass
 
+from bfcore import Int64Ref
+from bfstreamseq import _extract_packed_sign
 from bfpacked import PackedU32Ref
 from bfpacked64 import PackedI64Ref
-from bfpackedseq import BACK, REDUCTION_WORKSPACE_CELLS, RuntimePackedIntSequence
+from bfpackedseq import (BACK, REDUCTION_WORKSPACE_CELLS,
+                         RuntimePackedIntSequence)
 from compiler_dynamic_charlist import select_dynamic_char_list
 from compiler_stream import CompileError, PythonToBFStream as _Base
 from transpiler import _is_list_map_int_input_split
@@ -26,13 +29,29 @@ class DynamicIntListSelection:
     bindings: dict[str, ast.Assign]
 
 
+def _repeat_parts(node):
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+        return None
+    if isinstance(node.left, ast.List) and len(node.left.elts) == 1:
+        return node.left.elts[0], node.right, False
+    if isinstance(node.right, ast.List) and len(node.right.elts) == 1:
+        return node.right.elts[0], node.left, True
+    return None
+
+
 def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
     if not isinstance(tree, ast.Module) or select_dynamic_char_list(tree) is not None:
         return None
-    candidates = [node for node in ast.walk(tree)
-                  if isinstance(node, ast.Assign) and len(node.targets) == 1
-                  and isinstance(node.targets[0], ast.Name)
-                  and _is_list_map_int_input_split(node.value)]
+    assignments = [node for node in ast.walk(tree)
+                   if isinstance(node, ast.Assign) and len(node.targets) == 1
+                   and isinstance(node.targets[0], ast.Name)]
+    candidates = [node for node in assignments
+                  if _is_list_map_int_input_split(node.value)]
+    # Preserve the established input-owner route when unrelated fixed repeats
+    # coexist. Selecting new repeats must not silently restore the input's old
+    # capacity bound. Multiple input owners retain the previous rejection.
+    if not candidates:
+        candidates = [node for node in assignments if _repeat_parts(node.value) is not None]
     if len(candidates) != 1 or candidates[0] not in tree.body:
         return None
     producer = candidates[0]
@@ -98,18 +117,28 @@ class PythonToBFStream(_Base):
             selected = set(self.dynamic_int_selection.bindings.values())
             for index, statement in enumerate(tree.body):
                 if statement in selected:
-                    inference_tree.body[index].value = ast.Constant(value=0)
+                    repeat = _repeat_parts(statement.value)
+                    if repeat is None:
+                        inference_tree.body[index].value = ast.Constant(value=0)
+                    else:
+                        # Preserve operand reads in lifetime analysis; replacing
+                        # the entire repeat with 0 could reuse x's slot for n.
+                        value, count, count_first = copy.deepcopy(repeat)
+                        left, right = (count, value) if count_first else (value, count)
+                        inference_tree.body[index].value = ast.BinOp(
+                            left=left, op=ast.Add(), right=right)
         super().__init__(inference_tree, string_capacity=string_capacity,
                          list_capacity=list_capacity,
                          runtime_charlist_base=runtime_charlist_base)
         self._int_binding_nodes = (set(self.dynamic_int_selection.bindings.values())
                                    if self.dynamic_int_selection is not None else set())
+        self._int_provisional_layout = runtime_intlist_base is None
         self.runtime_intlist_base = None
         self.dynamic_int_sequence = None
         if self.dynamic_int_selection is not None:
             self._int_total = PackedI64Ref(self.temps.top)
-            self._int_length = PackedU32Ref(self.temps.top + 8)
-            self.temps.top += 12  # Persistent header; statement rewind cannot reuse it.
+            self._int_length = PackedI64Ref(self.temps.top + 8)
+            self.temps.top += 16  # Persistent header; statement rewind cannot reuse it.
             # Provisional base is used only by the layout discovery pass. The
             # public entrypoint reruns lowering after measuring all temporaries.
             base = runtime_intlist_base
@@ -140,12 +169,67 @@ class PythonToBFStream(_Base):
             return self._cached_int_value(ref)
         return super().compile_expr(node)
 
+    def _repeat_operand(self, node):
+        if (isinstance(node, ast.Constant)
+                or (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub))
+                    and isinstance(node.operand, ast.Constant))):
+            literal = node.value if isinstance(node, ast.Constant) else node.operand.value
+            if isinstance(literal, (int, bool)):
+                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                    literal = -literal
+                packed = self._new_packed_i64()
+                for i in range(8):
+                    self.bf.set_const(packed.byte(i), (literal >> (8 * i)) & 255)
+                return packed
+        value = self.compile_expr(node)
+        if not isinstance(value, Int64Ref):
+            raise CompileError("dynamic integer-list repetition requires integer operands")
+        return self._pack_word(value)
+
+    def _construct_repeat(self, parts):
+        value_node, count_node, count_first = parts
+        # Snapshot operands immediately: later evaluation may perform input or
+        # reuse temporary scalar storage. Both operands evaluate even for n<=0.
+        if count_first:
+            count = self._repeat_operand(count_node)
+            value = self._repeat_operand(value_node)
+        else:
+            value = self._repeat_operand(value_node)
+            count = self._repeat_operand(count_node)
+        # Normalize every negative int64 directly in the packed snapshot;
+        # positive counts retain all 64 bits, including their upper u32.
+        scratch = [self.temps.cell() for _ in range(4)]
+        negative = scratch[0]
+        _extract_packed_sign(self.bf, count.byte(7), *scratch)
+        self.bf.begin_while(negative)
+        self.bf.clear(negative)
+        for i in range(8):
+            self.bf.clear(count.byte(i))
+        self.bf.end_while(negative)
+        discarded_length = self._new_packed_u32()
+        if self._int_provisional_layout:
+            self.runtime_intlist_base = self.temps.top + REDUCTION_WORKSPACE_CELLS + 10
+            self.dynamic_int_sequence = RuntimePackedIntSequence(self.runtime_intlist_base)
+        self.dynamic_int_sequence.repeat_value(self.bf, count, value)
+        # Reduction uses a u32 traversal length, but repetition already knows
+        # its exact signed-positive count. Retain the original 64-bit length.
+        self.dynamic_int_sequence.sum_and_length(self.bf, self._int_total, discarded_length)
+        for i in range(8):
+            self.backend.copy_cell(count.byte(i), self._int_length.byte(i), self.backend.s0)
+
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
         if selection is not None and node in self._int_binding_nodes:
             if node is selection.bindings[selection.owner]:
-                self.dynamic_int_sequence.read_lf_terminated_s64s(self.bf)
-                self.dynamic_int_sequence.sum_and_length(self.bf, self._int_total, self._int_length)
+                repeat = _repeat_parts(node.value)
+                if repeat is not None:
+                    self._construct_repeat(repeat)
+                else:
+                    self.dynamic_int_sequence.read_lf_terminated_s64s(self.bf)
+                    for i in range(8):
+                        self.bf.clear(self._int_length.byte(i))
+                    self.dynamic_int_sequence.sum_and_length(
+                        self.bf, self._int_total, PackedU32Ref(self._int_length.base))
             # All aliases denote this same statically proven object. No value
             # copy, additional sequence or heap lookup is emitted.
             return
@@ -155,7 +239,7 @@ class PythonToBFStream(_Base):
                 and self._dynamic_int_name(node.value.func.value)):
             for i in range(8):
                 self.bf.clear(self._int_total.byte(i))
-            for i in range(4):
+            for i in range(8):
                 self.bf.clear(self._int_length.byte(i))
             self.bf.clear(self.dynamic_int_sequence.base)
             self.bf.clear(self.dynamic_int_sequence.base + BACK)

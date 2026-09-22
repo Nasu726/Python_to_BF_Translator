@@ -43,6 +43,7 @@ _MOBILE_LENGTH = 8
 _MOBILE_SCRATCH = 12
 _MOBILE_SAVED_RECORD = _MOBILE_SCRATCH + PackedI64Ops.SCRATCH_CELLS
 REDUCTION_WORKSPACE_CELLS = _MOBILE_SAVED_RECORD + RECORD_STRIDE
+REPEAT_FORWARD_WORKSPACE_CELLS = 48
 
 # Control scratch begins exactly at the next, still-unmaterialized record.
 # NEXT_MARKER/NEXT_BACK are intentionally reused as CH/SIGN until the very end
@@ -420,6 +421,57 @@ def _sum_length_walk_code() -> str:
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
+@lru_cache(maxsize=1)
+def _repeat_value_walk_code() -> str:
+    # Each fresh record borrows future cells for count[2:10], value[10:18]
+    # and scratch[32:48]. Shift the carrier first, then fill vacated payload.
+    body = BFEmitter()
+    _decrement_repeat_count(body, count_base=PAYLOAD, scratch_base=32)
+    for i in range(15, -1, -1):
+        _move_bytes(body, PAYLOAD + i, RECORD_STRIDE + PAYLOAD + i)
+    ops = PackedI64Ops(body, 32)
+    for i in range(8):
+        ops._copy_cell(RECORD_STRIDE + PAYLOAD + 8 + i, PAYLOAD + i, 28)
+    body.set_const(RECORD_STRIDE + BACK, 1)
+    _arm_repeat_marker(body, marker=RECORD_STRIDE,
+                       count_base=RECORD_STRIDE + PAYLOAD, scratch_base=32)
+    body.move(RECORD_STRIDE)
+    tail = BFEmitter()
+    # The zero count and saved value at the terminal record are now dead.
+    for cell in range(PAYLOAD, PAYLOAD + 16):
+        tail.clear(cell)
+    for cell in range(32, REPEAT_FORWARD_WORKSPACE_CELLS):
+        tail.clear(cell)
+    tail.move(BACK)
+    return ("[" + body.code() + "]" + tail.code()
+            + "[" + "<" * RECORD_STRIDE + "]<")
+
+
+def _decrement_repeat_count(bf: BFEmitter, *, count_base=8, scratch_base=16) -> None:
+    """Decrement a nonzero u64 with bounded byte work and clean scratch."""
+    core = PackedU32Core(bf, scratch_base)
+    low, high = PackedU32Ref(count_base), PackedU32Ref(count_base + 4)
+    borrow = scratch_base + 4
+    core.is_zero(borrow, low)
+    core.decrement(low)
+    bf.begin_while(borrow)
+    bf.clear(borrow)
+    core.decrement(high)
+    bf.end_while(borrow)
+
+
+def _arm_repeat_marker(bf: BFEmitter, *, marker, count_base, scratch_base) -> None:
+    bf.clear(marker)
+    ops = PackedI64Ops(bf, scratch_base)
+    tmp, helper = scratch_base + 4, scratch_base + 5
+    for i in range(8):
+        ops._copy_cell(count_base + i, tmp, helper)
+        bf.begin_while(tmp)
+        bf.clear(tmp)
+        bf.set_const(marker, 1)
+        bf.end_while(tmp)
+
+
 class PackedIntRecordBody:
     """Compile-time builder for operations local to one runtime record.
 
@@ -537,6 +589,34 @@ class RuntimePackedIntSequence:
         bf.move(self.base + MARKER)
         bf.emit("[" + body.code() + "]")
         bf.emit(">" * BACK + "[" + "<" * RECORD_STRIDE + "]" + "<" * BACK)
+        bf.ptr = self.base
+
+    def repeat_value(self, bf: BFEmitter, count: PackedI64Ref,
+                     value: PackedI64Ref) -> None:
+        """Materialize runtime value/count in a fresh zero region, linearly.
+
+        Count is unsigned 64-bit; Python callers normalize negatives first.
+        Inputs are preserved and must precede the sequence. Each iteration
+        shifts a 16-byte count/value carrier into uninitialized future cells,
+        fills one record, then advances. Future scratch is scrubbed at exit.
+        Tape is 10*N + O(1); no fixed-origin access occurs inside the loop.
+        This is fresh construction, not an in-place resize or heap allocator.
+        """
+        self._check_layout()
+        if any(ref.base < 0 or ref.base + ref.cells > self.base
+               for ref in (count, value)):
+            raise ValueError("repeat inputs must precede the runtime sequence")
+        ops = PackedI64Ops(bf, self.base + 32)
+        # BACK is not live until construction starts; borrowing it keeps
+        # preserving input copies close to their destinations.
+        for ref, offset in ((count, PAYLOAD), (value, PAYLOAD + 8)):
+            for i in range(8):
+                ops._copy_cell(ref.byte(i), self.base + offset + i, self.base + BACK)
+        bf.clear(self.base + BACK)
+        _arm_repeat_marker(bf, marker=self.base, count_base=self.base + PAYLOAD,
+                           scratch_base=self.base + 32)
+        bf.move(self.base)
+        bf.emit(_repeat_value_walk_code())
         bf.ptr = self.base
 
     def walk_records(

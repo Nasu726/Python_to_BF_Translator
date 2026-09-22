@@ -1,12 +1,14 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-21):** PR #16 is merged at
-`02b0b685679ec6d3899b6402f4faadcd4eb773c3` after all four shards passed run
-`35578860966` for head `b474177cfd4a329cbaa44b5560842b02a572573b`.
-The current increment connects one statically owned integer input list and its
-proven aliases to runtime-sized storage, cached len/sum and shared clear.
-Read `P0_IMPLEMENTATION_STATUS.md` for the narrow selection contract, ABC103 C
-source/maximum-N measurements and the still-incomplete general object model.
+**Latest checkpoint (2026-09-21):** PR #17 is merged at
+`d00a03f683a6a9231662c1f6b3607c1b30e02338` after all four shards passed run
+`35612005284` for head `8af127d96e6f1588238e6319e67386063856b129`.
+The current increment adds public singleton integer repetition `[x] * n` and
+`n * [x]` to that same statically owned alias/len/sum/clear slice. Construction
+uses a forward count/value carrier, with signed count normalization and full
+64-bit countdown. It is not general object allocation or mutable indexing.
+Read the current section of `P0_IMPLEMENTATION_STATUS.md` for scope, source-size
+limits, linear-step evidence and reproducible native measurements.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
