@@ -6,8 +6,11 @@ import pytest
 
 from bf_runtime import run_bf
 from compiler import compile_source
+from compiler_dynamic_intlist import select_dynamic_int_list
 from pybf import compile_source as compile_public_source
-from compiler_layout import compile_source as compile_layout_source
+from compiler_layout import (compile_source as compile_layout_source,
+                             lower_with_layout)
+from bfpackedseq import ACCESS_WORKSPACE_CELLS
 
 
 def execute(source: str, input_data: str = "") -> str:
@@ -65,12 +68,7 @@ print(a)
     assert execute(source) == "30\n20\n[10, 20, 99]\n"
 
 
-def test_abc136_c_build_stairs_official_samples_against_cpython():
-    # https://atcoder.jp/contests/abc136/tasks/abc136_c
-    # Correctness fixture only: the existing fixed list capacity is sufficient
-    # for samples, NOT the official N<=100000. Reuse this source unchanged when
-    # the dynamic-list frontend and traversal are ready; never specialize on it.
-    source = '''
+ABC136_C_SOURCE = '''
 n = int(input())
 h = list(map(int, input().split()))
 ok = True
@@ -85,7 +83,22 @@ if ok:
 else:
     print("No")
 '''
-    code = compile_public_source(source)
+
+
+def test_abc136_c_build_stairs_official_samples_against_cpython():
+    # https://atcoder.jp/contests/abc136/tasks/abc136_c
+    # The unchanged ordinary source now selects runtime-sized integer storage.
+    # Each random access is still O(N), so this proves samples and removes the
+    # former 64-item capacity bound; it is not an official N<=100000 claim.
+    selection = select_dynamic_int_list(ast.parse(ABC136_C_SOURCE))
+    assert selection is not None
+    assert selection.needs_load and selection.needs_store
+    raw, plan = lower_with_layout(ABC136_C_SOURCE)
+    assert plan.dynamic_intlist_base is not None
+    assert plan.dynamic_intlist_base - ACCESS_WORKSPACE_CELLS > plan.temp_peak
+    assert set(raw) <= set("><+-.,[]")
+    code = compile_public_source(ABC136_C_SOURCE)
+    assert len(code) <= 1_800_000  # 512 KiB remains the final source-size target.
     assert set(code) <= set("><+-.,[]")
     samples = [
         ("5\n1 2 1 1 3\n", "Yes\n"),
@@ -94,7 +107,7 @@ else:
         ("1\n1000000000\n", "Yes\n"),
     ]
     for data, expected in samples:
-        reference = subprocess.run([sys.executable, "-c", source], input=data,
+        reference = subprocess.run([sys.executable, "-c", ABC136_C_SOURCE], input=data,
             text=True, capture_output=True, check=True, timeout=5).stdout
         assert reference == expected
         result = run_bf(code, data, memory_size=120_000, step_limit=500_000_000)
@@ -177,7 +190,7 @@ def test_abc100_c_official_samples_against_cpython():
     # https://atcoder.jp/contests/abc100/tasks/abc100_c
     # Sample correctness, not a maximum-N or AtCoder runtime claim.
     code = compile_public_source(ABC100_C_SOURCE)
-    assert len(code) <= 2_500_000  # Track this milestone; final target remains 512 KiB.
+    assert len(code) <= 1_100_000  # Track this milestone; final target remains 512 KiB.
     assert set(code) <= set("><+-.,[]")
     samples = [
         ("3\n5 2 4\n", "3\n"),

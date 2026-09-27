@@ -207,7 +207,11 @@ for i in range(n):
 - compile-time memory placement / temporary arena
 - standalone Brainfuck出力
 
-ただし現在のlist/string runtimeは「固定容量の値」に近く、Pythonのobject semanticsとはまだ一致していません。
+ただし現在の一般list/string runtimeは「固定容量の値」に近く、Pythonの
+object semanticsとはまだ一致していません。静的に証明できる単一ownerの
+整数listにはruntime長records、alias、`len` / `sum` / `clear`、index
+load/store/AugAssignまでのrestricted routeがありますが、これは下記の一般
+heap/reference modelの代替ではありません。
 
 特に次が大きな不足です。
 

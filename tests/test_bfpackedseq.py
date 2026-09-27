@@ -429,6 +429,77 @@ def test_runtime_packed_sequence_exchange_value_changes_only_a_hit(
     assert execution.pointer == seq.base
 
 
+@pytest.mark.parametrize("operator,operand,initial,expected", [
+    ("add", 7, -10, -3),
+    ("add", 1, (1 << 63) - 1, -(1 << 63)),
+    ("sub", -5, 7, 12),
+    ("sub", 1, -(1 << 63), (1 << 63) - 1),
+    ("floordiv", 2, -17, -9),
+    ("floordiv", 256, -17, -1),
+    ("floordiv", 1 << 62, -(1 << 63), -2),
+    ("floordiv", 1 << 62, (1 << 63) - 1, 1),
+    ("mod", 4, -17, 3),
+    ("mod", 256, -17, 239),
+    ("mod", 1, -(1 << 63), 0),
+    ("mod", 1 << 62, -1, (1 << 62) - 1),
+])
+def test_runtime_packed_sequence_literal_update_is_one_preserving_scan(
+    operator, operand, initial, expected,
+):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+
+    bf = BFEmitter()
+    count = PackedU32Ref(0)
+    packed_index = PackedI64Ref(8)
+    previous = PackedI64Ref(16)
+    hit = 24
+    PackedU32Core(bf, 32).set_u32(count, 3)
+    PackedI64Ops(bf, 32).set_u64(packed_index, 1)
+    seq = RuntimePackedIntSequence(128)
+    seq.repeat_constant(bf, count, initial)
+    seq.update_literal(
+        bf, packed_index, previous, operator, operand, found=hit,
+    )
+    execution = run_bf(bf.code(), memory_size=1_000, step_limit=500_000_000)
+    assert _decode_s64(execution.memory, packed_index) == 1
+    assert _decode_s64(execution.memory, previous) == initial
+    assert execution.memory[hit] == 1
+    assert [_decode_s64(execution.memory, seq.item(i)) for i in range(3)] == [
+        initial, expected, initial,
+    ]
+    assert not any(execution.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base])
+    assert execution.pointer == seq.base
+
+
+def test_runtime_packed_sequence_literal_update_miss_and_invalid_api():
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+
+    bf = BFEmitter()
+    count = PackedU32Ref(0)
+    packed_index = PackedI64Ref(8)
+    previous = PackedI64Ref(16)
+    hit = 24
+    PackedU32Core(bf, 32).set_u32(count, 2)
+    PackedI64Ops(bf, 32).set_u64(packed_index, 256)
+    seq = RuntimePackedIntSequence(128)
+    seq.repeat_constant(bf, count, 11)
+    seq.update_literal(bf, packed_index, previous, "add", 9, found=hit)
+    execution = run_bf(bf.code(), memory_size=1_000, step_limit=500_000_000)
+    assert _decode_s64(execution.memory, previous) == 0
+    assert execution.memory[hit] == 0
+    assert [_decode_s64(execution.memory, seq.item(i)) for i in range(2)] == [11, 11]
+
+    for operator, operand in [("multiply", 2), ("floordiv", 0), ("mod", 3)]:
+        rejected = BFEmitter()
+        with pytest.raises(ValueError):
+            seq.update_literal(
+                rejected, PackedI64Ref(0), PackedI64Ref(8), operator, operand,
+            )
+        assert rejected.code() == ""
+
+
 def test_runtime_packed_sequence_access_rejects_overlapping_workspace():
     from bfpacked64 import PackedI64Ref
     bf = BFEmitter()

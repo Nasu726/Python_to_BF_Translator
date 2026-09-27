@@ -10,6 +10,27 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-22 — Dynamic int AugAssign exposed the rooted-scan boundary
+
+- The restricted single-owner input/repeat list route supports all existing
+  integer `a[i] op= rhs` forms with one index evaluation and Python's
+  target/load-before-RHS order. Observable `sum(a)` caches update only on a hit.
+- The first correct implementation used one full load scan and one full store
+  scan. It made ABC100 C's largest official sample exceed the unchanged 500M
+  raw-step guard. Do not restore this unconditionally or hide it with a larger
+  limit.
+- The selector now tracks whether `sum(a)` is observable. Without it, pure
+  literal add/sub and positive power-of-two floor-div/mod mutate the selected
+  packed record during the access scan. Simple stores skip cache arithmetic and
+  singleton repetition skips initial sum reduction under the same proof.
+- Resulting public sizes: ABC100 C 1,068,376 B; ABC136 C 1,724,276 B. Largest
+  ABC100 sample is 113,901,836 raw steps. Both ordinary sources use runtime
+  extent and pass official samples plus 65-element native Tritium cases, but
+  remain above 512 KiB and O(N²) over N rooted accesses.
+- Next optimization must retain physical locality across a sequential loop or
+  batch accesses. Further constant-factor rooted scans cannot establish the
+  official maximum-N claims.
+
 ---
 
 ## 2026-09-20 — Feature completeness takes priority
