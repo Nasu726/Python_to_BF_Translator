@@ -133,7 +133,12 @@ programのliteral `+=` / `-=` と2冪の`//=` / `%=`は、1回のrecord走査内
 先頭からの走査にできます。nが実際のlist長より小さければ最初のn要素だけを
 更新し、大きければ既存の暫定範囲外store規則に従って末尾で止まります。
 負のnでは何も更新しません。
-`sum(a)`を観測する場合やloop本体に別の文がある場合は対象外です。
+`for i in range(n): while a[i] % 2 == 0: a[i] //= 2; answer += 1`
+という通常のnested loopも、indexが他で使われず、`sum(a)`が観測されない
+単一ownerのlistでは1回のmobile走査で処理します。符号付き値の2による
+除算とscalarの集計を各record上で行い、元のABC100 Cのソースが
+512 KiB未満のBrainfuckになります。
+`sum(a)`を観測する場合や、上記の条件に合わないloop本体は対象外です。
 一般のheap object modelではないため、複数owner、rebind、
 escape、slice、`append`、nested list、copy、sortはこのruntime長routeでは
 未対応です。

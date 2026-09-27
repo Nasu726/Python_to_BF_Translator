@@ -188,9 +188,9 @@ print(answer)
 
 def test_abc100_c_official_samples_against_cpython():
     # https://atcoder.jp/contests/abc100/tasks/abc100_c
-    # Sample correctness, not a maximum-N or AtCoder runtime claim.
+    # Ordinary source, official samples; runtime scale remains a separate gate.
     code = compile_public_source(ABC100_C_SOURCE)
-    assert len(code) <= 1_100_000  # Track this milestone; final target remains 512 KiB.
+    assert len(code) <= 512 * 1024
     assert set(code) <= set("><+-.,[]")
     samples = [
         ("3\n5 2 4\n", "3\n"),

@@ -396,6 +396,81 @@ class PythonToBFStream(_Base):
             return None
         return (*literal, None if whole_list else extent)
 
+    def _linear_halving_tally_loop(
+        self, node: ast.For,
+    ) -> tuple[ast.AST | None, str] | None:
+        """Prove a record-local even/halve loop with one scalar tally."""
+        if (self.dynamic_int_selection is None or self.dynamic_int_selection.needs_sum
+                or self._range_shadowed or node.orelse
+                or not isinstance(node.target, ast.Name)
+                or len(node.body) != 1 or not isinstance(node.body[0], ast.While)):
+            return None
+        inner = node.body[0]
+        if inner.orelse or len(inner.body) != 2:
+            return None
+        condition = inner.test
+        if (not isinstance(condition, ast.Compare)
+                or len(condition.ops) != 1 or not isinstance(condition.ops[0], ast.Eq)
+                or len(condition.comparators) != 1
+                or not isinstance(condition.comparators[0], ast.Constant)
+                or type(condition.comparators[0].value) is not int
+                or condition.comparators[0].value != 0
+                or not isinstance(condition.left, ast.BinOp)
+                or not isinstance(condition.left.op, ast.Mod)
+                or not isinstance(condition.left.right, ast.Constant)
+                or type(condition.left.right.value) is not int
+                or condition.left.right.value != 2):
+            return None
+        update, tally = inner.body
+        if (not isinstance(update, ast.AugAssign)
+                or not isinstance(update.op, ast.FloorDiv)
+                or not isinstance(update.value, ast.Constant)
+                or type(update.value.value) is not int or update.value.value != 2
+                or not isinstance(tally, ast.AugAssign)
+                or not isinstance(tally.target, ast.Name)
+                or not isinstance(tally.op, ast.Add)
+                or not isinstance(tally.value, ast.Constant)
+                or type(tally.value.value) is not int or tally.value.value != 1
+                or tally.target.id == node.target.id):
+            return None
+        for item in (condition.left.left, update.target):
+            if (not isinstance(item, ast.Subscript)
+                    or not self._dynamic_int_name(item.value)
+                    or not isinstance(item.slice, ast.Name)
+                    or item.slice.id != node.target.id):
+                return None
+        if (len(self._int_name_nodes.get(node.target.id, ())) != 3
+                or any(name is not node.target
+                       and name is not condition.left.left.slice
+                       and name is not update.target.slice
+                       for name in self._int_name_nodes[node.target.id])):
+            return None
+        iterator = node.iter
+        if (not isinstance(iterator, ast.Call) or iterator.keywords
+                or not isinstance(iterator.func, ast.Name)
+                or iterator.func.id != "range" or len(iterator.args) != 1):
+            return None
+        extent = iterator.args[0]
+        whole_list = (isinstance(extent, ast.Call) and not extent.keywords
+                      and isinstance(extent.func, ast.Name)
+                      and extent.func.id == "len" and len(extent.args) == 1
+                      and self._dynamic_int_name(extent.args[0]))
+        return (None if whole_list else extent), tally.target.id
+
+    def _normalized_prefix_count(self, bound: ast.AST) -> PackedI64Ref:
+        count = self._packed_int_expr(
+            bound, "integer-list loop bound must be an integer",
+        )
+        scratch = [self.temps.cell() for _ in range(4)]
+        negative = scratch[0]
+        _extract_packed_sign(self.bf, count.byte(7), *scratch)
+        self.bf.begin_while(negative)
+        self.bf.clear(negative)
+        for i in range(8):
+            self.bf.clear(count.byte(i))
+        self.bf.end_while(negative)
+        return count
+
     def _packed_int_expr(self, node, error_message):
         if (isinstance(node, ast.Constant)
                 or (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub))
@@ -458,22 +533,23 @@ class PythonToBFStream(_Base):
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
         if isinstance(node, ast.For):
+            tally = self._linear_halving_tally_loop(node)
+            if tally is not None:
+                bound, answer_name = tally
+                count = (self._int_length if bound is None
+                         else self._normalized_prefix_count(bound))
+                initial = self._pack_word(self.variables[answer_name])
+                result = self._new_packed_i64()
+                self._ensure_provisional_access_base()
+                self.dynamic_int_sequence.halve_and_count_prefix(
+                    self.bf, count, initial, result,
+                )
+                self.backend.copy64(self.variables[answer_name], result)
+                return
             linear = self._linear_literal_loop(node)
             if linear is not None:
                 operator, operand, bound = linear
-                count = None
-                if bound is not None:
-                    count = self._packed_int_expr(
-                        bound, "integer-list loop bound must be an integer",
-                    )
-                    scratch = [self.temps.cell() for _ in range(4)]
-                    negative = scratch[0]
-                    _extract_packed_sign(self.bf, count.byte(7), *scratch)
-                    self.bf.begin_while(negative)
-                    self.bf.clear(negative)
-                    for i in range(8):
-                        self.bf.clear(count.byte(i))
-                    self.bf.end_while(negative)
+                count = None if bound is None else self._normalized_prefix_count(bound)
                 self._ensure_provisional_access_base()
                 if count is None:
                     self.dynamic_int_sequence.update_all_literal(
