@@ -4,9 +4,10 @@ Build rdebath/Brainfuck revision 14a729d, then:
 python tools/bench_tritium_dynamic_int_updates.py \
     --tritium /path/to/tritium/bfi.out
 
-These ordinary sources intentionally remain above 512 KiB. The benchmark
-checks native correctness/runtime separately; local timing is not an AtCoder
-host guarantee and does not establish either problem's official maximum N.
+ABC100 C's ordinary source now fits 512 KiB via record-local halving/tally;
+ABC136 C still exceeds the limit. The benchmark checks native
+correctness/runtime separately; local timing is not an AtCoder host guarantee
+and does not establish either problem's official maximum N.
 """
 
 import argparse
@@ -75,6 +76,8 @@ def _cases():
         ("sample3", [2184, 2126, 1721, 1800, 1024,
                      2528, 3360, 1945, 1280, 1776]),
         ("beyond64", [1 << (index % 8) for index in range(65)]),
+        ("n256", [1 << (index % 8) for index in range(256)]),
+        ("n1024", [1 << (index % 8) for index in range(1024)]),
     ]
     abc136 = [
         ("sample1", [1, 2, 1, 1, 3]),

@@ -6,7 +6,40 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: runtime-bounded prefix updates
+## Current increment: record-local even/halve/tally loop (ABC100 C)
+
+The ordinary [ABC100 C source](https://atcoder.jp/contests/abc100/tasks/abc100_c)
+in `tests/test_abc_c_foundation.py` now compiles to **357,519 B**, leaving
+**166,769 B** below 512 KiB (previously 1,068,376 B). The three official
+samples still match CPython; raw steps are **1,034,210 / 2,257,631 /
+5,818,718**, down from 8,181,784 / 8,466,202 / 113,901,836. The unchanged
+source also returns the correct count at N=65/256/1024 under Tritium rev
+`14a729d` on a portable local build. A separate N=10,000/200,000 test using
+repeated positive powers of two produced the expected results in 0.243/4.024
+seconds locally. This is evidence of linear traversal and a practical large
+case on this machine, not an AtCoder judge acceptance or timing guarantee.
+
+The proof recognizes a `range(n)` or `range(len(alias))` loop whose dead index
+only appears in `alias[i] % 2 == 0` and `alias[i] //= 2`, followed by one
+`scalar += 1` inside the `while`. The list has one statically proven owner and
+no observable cached `sum(a)`; a shadowed `range`, observable loop index,
+different divisor/body, or other effects retain general lowering. A signed
+packed count and initial scalar tally travel inside the existing 56-cell
+frame. Each current record is divided arithmetically by two until odd, the
+tally increments modulo 2**64, and the frame rewinds before copying the tally
+back to the scalar. Negative range bounds perform zero iterations; a zero
+payload or an out-of-bounds read of the current restricted route's zero value
+continues to loop as the source does. Tests cover aliases, initial tally,
+negative values including INT64_MIN, empty input, short bounds, and fallback.
+The interpreter remains 8-bit wrapping standard Brainfuck and the program's
+BF source length does not depend on N.
+
+ABC136 C still emits **1,724,276 B**, uses repeated rooted accesses and has
+no large-N acceptance claim. The runtime heap/object features in
+`IMPLEMENTATION_PLAN.md` also remain outstanding. Next improve reverse
+adjacent reads, observable sums, and general dynamic list operations.
+
+## Previous increment: runtime-bounded prefix updates
 
 The same statically proven, one-statement pure literal update loop now accepts
 `for i in range(n): a[i] op= literal`, even if N differs from `len(a)`. The
@@ -37,11 +70,10 @@ Negative bound normalization is covered here with smaller runtime inputs and
 the literal INT64_MIN case; do not raise the guard or misattribute that parser
 cost to the new prefix traversal.
 
-ABC100 C's inner `while` and answer accumulation, and ABC136 C's backward
-adjacent compare and `break`, still prevent this loop lowering. Their ordinary
-sources and acceptance claims are unchanged. The next work is mobile loop
-control/accumulator or an adjacent reverse cursor, not further special cases
-for isolated literal updates.
+At this earlier checkpoint ABC100 C's inner `while` and answer accumulation,
+and ABC136 C's backward adjacent compare and `break`, prevented the
+pure-literal loop lowering. ABC100 C now has the separate guarded lowering
+above; ABC136 C remains on the rooted route.
 
 ## Previous increment: one linear pass for pure literal indexed loops
 
@@ -52,8 +84,8 @@ update, a literal add/sub or positive power-of-two floor-div/mod, no observable
 `sum(a)`, and an induction variable used nowhere else in the module. It also
 rejects a shadowed `range`. The list extent cannot change in this body, and
 the alias shares the same list. Zero-length input is valid. All other loops
-retain the existing general lowering, including the original ABC100 C and
-ABC136 C sources.
+retain the existing general lowering. ABC100 C was subsequently handled by
+the guarded nested loop above; ABC136 C still uses the general route.
 
 The low-level operation carries its 56-cell arithmetic workspace across
 consecutive 10-cell records, then rewinds it to its fixed position. It emits
@@ -111,12 +143,12 @@ loads return zero and invalid updates are no-ops. Slices, rebinding, escaping,
 multiple dynamic owners, append/capacity growth, general heap handles and
 nested lists remain outside this restricted route.
 
-Current public source telemetry:
+Historical public source telemetry for this earlier increment:
 
 | Ordinary source | Generated BF | 512 KiB headroom |
 | --- | ---: | ---: |
 | ABC170 A indexed reads | 518,124 B | 6,164 B |
-| ABC100 C indexed `//= 2` | 1,068,376 B | -544,088 B |
+| ABC100 C indexed `//= 2` (historical) | 1,068,376 B | -544,088 B |
 | ABC136 C indexed compare/`-= 1` | 1,724,276 B | -1,199,988 B |
 
 [ABC100 C — *3 or /2](https://atcoder.jp/contests/abc100/tasks/abc100_c)
@@ -139,7 +171,7 @@ sample plus one 65-element case returned exact output. ABC100 runs were
 These local timings are not an AtCoder-host guarantee. The existing ABC170 A
 benchmark remains 0.033–0.045 seconds across all zero positions.
 
-No size or step limit was raised: ABC100/136 remain explicitly above 512 KiB,
+No size or step limit was raised: at this historical checkpoint ABC100/136 were above 512 KiB,
 and the first two-pass implementation exposed a real ABC100 sample regression
 over 500M steps. The fused packed update replaced that implementation for pure
 literals and brought the same sample to 113.9M steps. Tests cover all eight

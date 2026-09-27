@@ -28,6 +28,7 @@ from bfcore import BFEmitter
 from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Ref
 from bfpackedops import PackedI64Ops
+from bfstreamseq import _extract_packed_sign
 
 
 RECORD_STRIDE = 10
@@ -755,6 +756,92 @@ def _update_prefix_walk_code(update: str) -> str:
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
+def _arm_even_payload(bf: BFEmitter, frame: int) -> None:
+    """Test the low bit without changing the current record's value."""
+    ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+    payload = frame + ACCESS_WORKSPACE_CELLS + PAYLOAD
+    tmp, helper = frame + _ACCESS_TMP, frame + _ACCESS_HELPER
+    quotient, parity, gate = (frame + _ACCESS_SCRATCH + i for i in range(3))
+    ops._copy_cell(payload, tmp, helper)
+    ops._split_parity(tmp, quotient, parity, gate)
+    bf.clear(quotient)
+    bf.set_const(frame + _ACCESS_FOUND, 1)
+    bf.begin_while(parity)
+    bf.clear(parity)
+    bf.clear(frame + _ACCESS_FOUND)
+    bf.end_while(parity)
+
+
+def _halve_record_and_increment(bf: BFEmitter) -> None:
+    """Arithmetic shift the current signed payload; tally one division."""
+    payload = PackedI64Ref(ACCESS_WORKSPACE_CELLS + PAYLOAD)
+    ops = PackedI64Ops(bf, _ACCESS_SCRATCH)
+    carry = _ACCESS_NONZERO
+    quotient, parity, gate = (_ACCESS_SCRATCH + i for i in range(3))
+    # The high byte supplies the arithmetic sign extension. Work is bounded
+    # by eight byte values regardless of the int64's magnitude.
+    _extract_packed_sign(bf, payload.byte(7), quotient, parity, gate,
+                         _ACCESS_SCRATCH + 3)
+    ops._move_cell(quotient, carry)
+    for index in range(7, -1, -1):
+        ops._split_parity(payload.byte(index), quotient, parity, gate)
+        ops._move_cell(quotient, payload.byte(index))
+        bf.begin_while(carry)
+        bf.add_const(carry, -1)
+        bf.add_const(payload.byte(index), 128)
+        bf.end_while(carry)
+        ops._move_cell(parity, carry)
+    bf.clear(carry)
+
+    counter = PackedI64Ref(_ACCESS_VALUE)
+    core = PackedU32Core(bf, _ACCESS_SCRATCH)
+    core.increment(PackedU32Ref(counter.base))
+    overflow = _ACCESS_ZERO
+    core.is_zero(overflow, PackedU32Ref(counter.base))
+    bf.begin_while(overflow)
+    bf.clear(overflow)
+    core.increment(PackedU32Ref(counter.base + 4))
+    bf.end_while(overflow)
+
+
+@lru_cache(maxsize=1)
+def _halve_and_count_prefix_walk_code() -> str:
+    """Run a nested even/halve/tally loop beside each visited record."""
+    width = ACCESS_WORKSPACE_CELLS
+    prepare = BFEmitter()
+    prepare.ptr = width + MARKER
+    _arm_prefix_hit(prepare, 0)
+    prepare.move(_ACCESS_FOUND)
+
+    body = BFEmitter()
+    body.ptr = _ACCESS_FOUND
+    body.clear(_ACCESS_FOUND)
+    _arm_even_payload(body, 0)
+    body.begin_while(_ACCESS_FOUND)
+    body.clear(_ACCESS_FOUND)
+    _halve_record_and_increment(body)
+    _arm_even_payload(body, 0)
+    body.end_while(_ACCESS_FOUND)
+    _decrement_repeat_count(
+        body, count_base=_ACCESS_INDEX, scratch_base=_ACCESS_SCRATCH,
+    )
+    _rotate_mobile_frame(
+        body, forward=True, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    _arm_prefix_hit(body, RECORD_STRIDE)
+    body.move(RECORD_STRIDE + _ACCESS_FOUND)
+
+    rewind = BFEmitter()
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(
+        rewind, forward=False, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    rewind.move(width + BACK)
+    return (prepare.code() + "[" + body.code() + "]"
+            + ">" * (width + BACK - _ACCESS_FOUND)
+            + "[" + rewind.code() + "]" + "<" * BACK)
+
+
 def _decrement_repeat_count(bf: BFEmitter, *, count_base=8, scratch_base=16) -> None:
     """Decrement a nonzero u64 with bounded byte work and clean scratch."""
     core = PackedU32Core(bf, scratch_base)
@@ -1127,6 +1214,42 @@ class RuntimePackedIntSequence:
         bf.move(self.base)
         bf.emit(_update_prefix_walk_code(update_key))
         bf.ptr = self.base
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def halve_and_count_prefix(
+        self, bf: BFEmitter, count: PackedI64Ref,
+        initial: PackedI64Ref, result: PackedI64Ref,
+    ) -> None:
+        """Run ``while item % 2 == 0: item //= 2; total += 1`` in one scan.
+
+        Count is nonnegative and evaluated before this call. The scalar tally
+        starts at initial and is returned in result, modulo 2**64. The normal
+        zero payload loops forever, as it does in the source. A missing item
+        beyond the end also reads zero under the existing list-index contract.
+        """
+        self._check_layout()
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if frame < 0 or any(ref.base < 0 or ref.base + ref.cells > frame
+                            for ref in (count, initial, result)):
+            raise ValueError("prefix operands must precede the mobile frame")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+        ops.copy(PackedI64Ref(frame + _ACCESS_INDEX), count)
+        ops.copy(PackedI64Ref(frame + _ACCESS_VALUE), initial)
+        bf.move(self.base)
+        bf.emit(_halve_and_count_prefix_walk_code())
+        bf.ptr = self.base
+        # Remaining count implies the source loop would read zero at the first
+        # missing index and keep dividing that zero indefinitely.
+        _arm_repeat_marker(bf, marker=frame + _ACCESS_FOUND,
+                           count_base=frame + _ACCESS_INDEX,
+                           scratch_base=frame + _ACCESS_SCRATCH)
+        bf.begin_while(frame + _ACCESS_FOUND)
+        bf.end_while(frame + _ACCESS_FOUND)
+        ops.copy(result, PackedI64Ref(frame + _ACCESS_VALUE))
         for cell in range(frame, self.base):
             bf.clear(cell)
         bf.move(self.base)

@@ -358,6 +358,69 @@ print(sum(a), a[2])
         assert execute(compile_source(source), "").output == reference(source, "")
 
 
+@pytest.mark.parametrize("bound,values,initial", [
+    ("len(b)", "-48 7", 7),
+    ("len(b)", "", -9),
+    ("n", "-16 40 3", -2),
+    ("n", "4 8 16", 19),
+])
+def test_linear_even_halving_tallies_and_mutates_shared_records(bound, values, initial):
+    source = f'''
+n = 2
+a = list(map(int, input().split()))
+b = a
+answer = {initial}
+for i in range({bound}):
+    while a[i] % 2 == 0:
+        b[i] //= 2
+        answer += 1
+print(answer, b[0] if len(a) else 0, len(b))
+'''
+    data = values + "\n"
+    code = compile_source(source)
+    assert execute(code, data).output == reference(source, data)
+
+
+def test_linear_even_halving_handles_signed_boundary_and_snapshot_bound():
+    source = '''
+a = [-(1 << 63)] * 1
+answer = 1
+for i in range(answer):
+    while a[i] % 2 == 0:
+        a[i] //= 2
+        answer += 1
+print(answer, a[0])
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_linear_even_halving_keeps_suffix_and_carries_scalar_over_u32():
+    source = '''
+a = [8] * 3
+answer = 4294967295
+n = 1
+for i in range(n):
+    while a[i] % 2 == 0:
+        a[i] //= 2
+        answer += 1
+print(answer, a[0], a[2])
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_linear_even_halving_falls_back_for_observable_index_or_sum():
+    source = '''
+a = [8] * 2
+answer = 0
+for i in range(len(a)):
+    while a[i] % 2 == 0:
+        a[i] //= 2
+        answer += 1
+print(i, answer, sum(a))
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
 @pytest.mark.parametrize("operator,operand", [
     ("+", 3), ("-", 3), ("//", 4), ("%", 4),
 ])

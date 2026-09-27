@@ -10,6 +10,28 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-28 — ABC100 C nested loop uses mobile record and scalar tally
+
+- One-owner integer lists now prove the exact source-level shape `for i in
+  range(n or len(a)): while a[i] % 2 == 0: a[i] //= 2; answer += 1`, with the
+  same record for the condition and update, a dead index and no observed
+  `sum(a)`. The proof is syntactic and reusable; no problem identity is
+  inspected. A 56-cell mobile frame carries the normalized 64-bit count and
+  initial tally. Each element is locally right-shifted until odd, and the
+  modulo-int64 tally returns after the frame rewinds. Negative even values
+  use sign extension; zero loops forever, consistent with the source.
+- The unchanged ABC100 C official-sample source is 357,519 B (166,769 B
+  below 512 KiB), down from 1,068,376 B. Sample raw steps are 1,034,210 /
+  2,257,631 / 5,818,718. Portable Tritium rev `14a729d` confirms N=65,
+  256, 1024; repeated powers of two at N=10,000 and 200,000 finish in
+  0.243/4.024 seconds locally. Judge maximum acceptance is unverified.
+- ABC136 C's reverse adjacent comparisons, `break`, and 1,724,276-byte
+  ordinary source remain open. These source-shape proofs do not yet supply
+  general dynamic list objects, observable cached sums, or arbitrary mobile
+  statements needed by `IMPLEMENTATION_PLAN.md`.
+
+---
+
 ## 2026-09-28 — Mobile count handles prefix loops without assuming N equals length
 
 - The whole-list mobile update proof extends to `range(n)` for any runtime
@@ -28,9 +50,9 @@ Do not record routine green CI runs. Record only baselines or results that affec
   `n=int(input())` frontend exceeds 500M raw steps even without any list or
   loop. Do not weaken the guard to test that input; the prefix logic's extreme
   negative bound is separately covered by an int64 literal.
-- Both real ABC100 C and ABC136 C remain unchanged O(N²) rooted passes. The
-  next mobile frame must handle a per-record loop and aggregate or adjacent
-  compare / early exit; a count alone does not solve their body semantics.
+- At this checkpoint both ABC100 C and ABC136 C used O(N²) rooted passes.
+  ABC100 C's per-record loop and aggregate were added in the next increment;
+  adjacent compare and early exit still need a mobile lowering.
 
 ---
 
@@ -47,8 +69,8 @@ Do not record routine green CI runs. Record only baselines or results that affec
   steps. These variants have different output; compare growth, not equivalence.
 - General conditionals, nested/effectful RHS, visible sums or loop index, and
   reverse/adjacent indexed loops still require mobile scalar/control-flow
-  lowering or a retained physical cursor. ABC100 C/ABC136 C remain unchanged
-  above 512 KiB and O(N²) for their current indexed loops.
+  lowering or a retained physical cursor. At this checkpoint ABC100 C/ABC136 C
+  were both above 512 KiB and O(N²); see the later ABC100 C entry above.
 
 ---
 

@@ -1,31 +1,24 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-28):** PR #21 is merged at
-`f20a2f397f1214ccb534ab2cd14232a0311db2e2`. The subsequent
-`dynamic-intlist-prefix-update-1` increment extends the proven one-statement
-pure-literal update loop from `range(len(a))` to `range(n)` for any runtime
-signed bound, without assuming n equals the actual list length. A mobile
-int64 count stops the forward pass at n or the sentinel; all unused suffix
-records, the original bound and list metadata survive. A negative bound
-performs no update. The induction variable must be dead elsewhere and
-`sum(a)` unobserved. Other loops keep rooted lowering.
+**Latest checkpoint (2026-09-28):** PR #22 was merged after all four CI
+shards passed. The next increment compiles the ordinary ABC100 C nested
+even/halve/tally loop with a reusable guarded mobile-record lowering. It
+carries both the evaluated range bound and a scalar tally with the packed
+list frame, divides each current value by two until odd, rewinds and restores
+the tally. It applies only if the index is otherwise dead, the list has one
+statically proven owner, `sum(a)` is unobserved, and both loop bodies exactly
+match this effect shape. Other loops use the established general route.
 
-`tools/bench_linear_int_updates.py` now reproduces 320,326 BF bytes and
-10,822,760 raw steps at N=65 for the counted example. A last-element-read
-native variant is 517,238 B and passes 65/256/1024 using a portable local
-Tritium rev `14a729d` build. This is not a generic cursor or a C-problem
-acceptance: ABC100 C's inner while/aggregate and ABC136 C's adjacent reverse
-pass are unchanged. The previous whole-list route remains available.
-
-The unchanged ABC100 C and ABC136 C ordinary sources now select runtime-sized
-storage. Their generated programs are 1,068,376 B and 1,724,276 B respectively,
-so neither meets 512 KiB yet. All official samples and 65-element native
-Tritium cases pass; the largest ABC100 sample fell from an initial two-pass
-regression over 500M raw steps to 113,901,836. Every rooted access is still
-O(N), so these loops remain O(N²), not maximum-N acceptance. Read the current
-section of `P0_IMPLEMENTATION_STATUS.md` for exact scope, measurements and the
-reproducible benchmark. The next architectural boundary remains a retained
-physical cursor or mobile general loop body, followed by general object routing.
+The unchanged ABC100 C source now produces **357,519 B**, 166,769 B below
+512 KiB. Official samples pass under the unchanged raw-step guard; Tritium
+rev `14a729d` also passes N=65/256/1024 and repeated-power-of-two N=200,000
+in 4.024 seconds on a local portable build. This is evidence of linear work
+on that input, not an AtCoder judge acceptance claim. The ABC136 C source
+still produces **1,724,276 B**, retains O(N²) rooted adjacent accesses, and
+remains above the submission limit. Read `P0_IMPLEMENTATION_STATUS.md` for
+the guarded shape, benchmarks and remaining feature work. The next major
+boundary is reverse adjacent comparisons / early exit, then broader runtime
+object routing under `IMPLEMENTATION_PLAN.md`.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
