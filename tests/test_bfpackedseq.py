@@ -113,6 +113,68 @@ def test_update_all_literal_rejects_invalid_frame_or_operator_without_emitting()
     assert bf.code() == ""
 
 
+@pytest.mark.parametrize("operator,operand,values,expected", [
+    ("add", 3, [10, 20, 30], [13, 23, 33]),
+    ("sub", 3, [0, -1, 7], [-3, -4, 4]),
+    ("floordiv", 4, [-17, 18, -8], [-5, 4, -2]),
+    ("mod", 4, [-17, 18, -8], [3, 2, 0]),
+])
+def test_update_prefix_literal_preserves_count_and_untouched_suffix(
+    operator, operand, values, expected,
+):
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    seq = RuntimePackedIntSequence(128)
+    for count in (0, 1, 2, 3, 5, 1 << 32):
+        bf = BFEmitter()
+        packed_count = PackedI64Ref(0)
+        PackedI64Ops(bf, 64).set_u64(packed_count, count)
+        seq.read_lf_terminated_s64s(bf)
+        seq.update_prefix_literal(bf, packed_count, operator, operand)
+        data = " ".join(map(str, values)) + "\n"
+        result = run_bf(bf.code(), data, memory_size=2000,
+                        step_limit=500_000_000)
+        assert result.pointer == seq.base
+        assert _decode_s64(result.memory, packed_count) == count
+        assert [_decode_s64(result.memory, seq.item(i)) for i in range(3)] == [
+            expected[i] if i < count else values[i] for i in range(3)
+        ]
+        assert result.memory[seq.marker(3)] == 0
+        assert result.memory[seq.back(3)] == 1
+        assert result.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base] == [0] * ACCESS_WORKSPACE_CELLS
+
+
+def test_update_prefix_literal_rejects_overlapping_count_and_invalid_operator():
+    from bfpacked64 import PackedI64Ref
+    bf = BFEmitter()
+    with pytest.raises(ValueError, match="precede"):
+        RuntimePackedIntSequence(128).update_prefix_literal(
+            bf, PackedI64Ref(128 - ACCESS_WORKSPACE_CELLS), "add", 1,
+        )
+    with pytest.raises(ValueError, match="unsupported"):
+        RuntimePackedIntSequence(128).update_prefix_literal(
+            bf, PackedI64Ref(0), "mod", 3,
+        )
+    assert bf.code() == ""
+
+
+def test_update_prefix_literal_empty_sequence_and_positive_count():
+    from bfpacked64 import PackedI64Ref
+    from bfpackedops import PackedI64Ops
+    seq = RuntimePackedIntSequence(128)
+    bf = BFEmitter()
+    count = PackedI64Ref(0)
+    PackedI64Ops(bf, 64).set_u64(count, 7)
+    seq.read_lf_terminated_s64s(bf)
+    seq.update_prefix_literal(bf, count, "add", 3)
+    result = run_bf(bf.code(), "\n", memory_size=2000,
+                    step_limit=500_000_000)
+    assert result.pointer == seq.base
+    assert _decode_s64(result.memory, count) == 7
+    assert result.memory[seq.marker(0)] == result.memory[seq.back(0)] == 0
+    assert result.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base] == [0] * ACCESS_WORKSPACE_CELLS
+
+
 def _raw_word(value):
     return "".join(chr((value >> (8 * i)) & 255) for i in range(8))
 

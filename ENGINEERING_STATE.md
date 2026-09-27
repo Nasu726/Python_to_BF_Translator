@@ -10,6 +10,30 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-28 — Mobile count handles prefix loops without assuming N equals length
+
+- The whole-list mobile update proof extends to `range(n)` for any runtime
+  signed-int64 bound. Normalize negatives to zero, carry an 8-byte count in
+  the 56-cell frame, and stop on count exhaustion or the actual end marker.
+  Rewind restores the list and fixed workspace. This avoids assuming the
+  first input's N equals the following input list length.
+- Public source bytes: 320,326 for `n=int(input()); a=list(...); for i in range(n):
+  a[i]+=3; print(len(a))`. Raw steps at N=8/32/65: 1,605,592 / 5,113,667 /
+  10,822,760. A live-`i` fallback variant takes 4,894,483 / 22,854,989 /
+  69,960,058 steps. The native last-item-read variant is 517,238 B, below
+  512 KiB by 7,050 B, and passes 65/256/1024 on a portable local build of
+  Tritium rev `14a729d`. These sources are deliberately simple and do not
+  represent a C-problem acceptance claim.
+- IMPORTANT unrelated limit: parsing INT64_MIN with the existing standalone
+  `n=int(input())` frontend exceeds 500M raw steps even without any list or
+  loop. Do not weaken the guard to test that input; the prefix logic's extreme
+  negative bound is separately covered by an int64 literal.
+- Both real ABC100 C and ABC136 C remain unchanged O(N²) rooted passes. The
+  next mobile frame must handle a per-record loop and aggregate or adjacent
+  compare / early exit; a count alone does not solve their body semantics.
+
+---
+
 ## 2026-09-27 — Restricted whole-list update proves linear sequential lowering
 
 - One-owner integer lists support the narrow `range(len(a))` / dead-index /

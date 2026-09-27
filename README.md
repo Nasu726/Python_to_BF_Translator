@@ -129,6 +129,10 @@ programのliteral `+=` / `-=` と2冪の`//=` / `%=`は、1回のrecord走査内
 直接更新します。`for i in range(len(a)): a[i] += 3` のような、indexが
 他で使われず、各要素に純粋な定数更新を1回ずつ行うloopは、list全体を
 1回のmobile走査で処理します(`-=`, 正の2冪による`//=`, `%=`も対象)。
+同じ制約のもとで`for i in range(n): a[i] += 3`も、runtimeのnを運ぶ
+先頭からの走査にできます。nが実際のlist長より小さければ最初のn要素だけを
+更新し、大きければ既存の暫定範囲外store規則に従って末尾で止まります。
+負のnでは何も更新しません。
 `sum(a)`を観測する場合やloop本体に別の文がある場合は対象外です。
 一般のheap object modelではないため、複数owner、rebind、
 escape、slice、`append`、nested list、copy、sortはこのruntime長routeでは

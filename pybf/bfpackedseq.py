@@ -658,26 +658,32 @@ def _access_walk_code(*, store: bool, update: str | None = None) -> str:
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
+def _emit_record_literal_update(bf: BFEmitter, update: str, frame: int) -> None:
+    """Update the record immediately after one 56-cell mobile frame."""
+    payload = PackedI64Ref(frame + ACCESS_WORKSPACE_CELLS + PAYLOAD)
+    if update in ("add", "sub"):
+        ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+        operation = ops.add_inplace if update == "add" else ops.sub_inplace
+        operation(payload, PackedI64Ref(frame + _ACCESS_VALUE))
+    else:
+        operator, separator, shift_text = update.partition(":")
+        if separator != ":" or operator not in ("floordiv", "mod"):
+            raise ValueError(f"unsupported packed literal update {update!r}")
+        _shift_payload_power_of_two(
+            bf, source=payload,
+            destination=PackedI64Ref(frame + _ACCESS_VALUE),
+            scratch=frame + _ACCESS_SCRATCH, shift=int(shift_text),
+            modulo=operator == "mod",
+        )
+
+
 @lru_cache(maxsize=128)
 def _update_all_walk_code(update: str) -> str:
     """Update consecutive records while carrying the arithmetic frame."""
     width = ACCESS_WORKSPACE_CELLS
     body = BFEmitter()
     body.ptr = width + MARKER
-    payload = PackedI64Ref(width + PAYLOAD)
-    if update in ("add", "sub"):
-        ops = PackedI64Ops(body, _ACCESS_SCRATCH)
-        operation = ops.add_inplace if update == "add" else ops.sub_inplace
-        operation(payload, PackedI64Ref(_ACCESS_VALUE))
-    else:
-        operator, separator, shift_text = update.partition(":")
-        if separator != ":" or operator not in ("floordiv", "mod"):
-            raise ValueError(f"unsupported packed literal update {update!r}")
-        _shift_payload_power_of_two(
-            body, source=payload, destination=PackedI64Ref(_ACCESS_VALUE),
-            scratch=_ACCESS_SCRATCH, shift=int(shift_text),
-            modulo=operator == "mod",
-        )
+    _emit_record_literal_update(body, update, 0)
     _rotate_mobile_frame(
         body, forward=True, width=width, saved_record=_ACCESS_SAVED_RECORD,
     )
@@ -690,6 +696,62 @@ def _update_all_walk_code(update: str) -> str:
     )
     rewind.move(width + BACK)
     return ("[" + body.code() + "]" + ">" * BACK
+            + "[" + rewind.code() + "]" + "<" * BACK)
+
+
+def _arm_prefix_hit(bf: BFEmitter, frame: int) -> None:
+    """Set mobile hit flag when remaining count and next marker are nonzero."""
+    gate = frame + _ACCESS_GATE
+    found = frame + _ACCESS_FOUND
+    tmp = frame + _ACCESS_TMP
+    helper = frame + _ACCESS_HELPER
+    _arm_repeat_marker(
+        bf, marker=gate, count_base=frame + _ACCESS_INDEX,
+        scratch_base=frame + _ACCESS_SCRATCH,
+    )
+    bf.clear(found)
+    bf.begin_while(gate)
+    bf.clear(gate)
+    PackedI64Ops(bf, frame + _ACCESS_SCRATCH)._copy_cell(
+        frame + ACCESS_WORKSPACE_CELLS + MARKER, tmp, helper,
+    )
+    bf.begin_while(tmp)
+    bf.clear(tmp)
+    bf.set_const(found, 1)
+    bf.end_while(tmp)
+    bf.end_while(gate)
+
+
+@lru_cache(maxsize=128)
+def _update_prefix_walk_code(update: str) -> str:
+    """Walk min(count, length) records; count is carried with the frame."""
+    width = ACCESS_WORKSPACE_CELLS
+    prepare = BFEmitter()
+    prepare.ptr = width + MARKER
+    _arm_prefix_hit(prepare, 0)
+    prepare.move(_ACCESS_FOUND)
+
+    body = BFEmitter()
+    body.ptr = _ACCESS_FOUND
+    body.clear(_ACCESS_FOUND)
+    _emit_record_literal_update(body, update, 0)
+    _decrement_repeat_count(
+        body, count_base=_ACCESS_INDEX, scratch_base=_ACCESS_SCRATCH,
+    )
+    _rotate_mobile_frame(
+        body, forward=True, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    _arm_prefix_hit(body, RECORD_STRIDE)
+    body.move(RECORD_STRIDE + _ACCESS_FOUND)
+
+    rewind = BFEmitter()
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(
+        rewind, forward=False, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    rewind.move(width + BACK)
+    return (prepare.code() + "[" + body.code() + "]"
+            + ">" * (width + BACK - _ACCESS_FOUND)
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
@@ -1027,6 +1089,43 @@ class RuntimePackedIntSequence:
             )
         bf.move(self.base)
         bf.emit(_update_all_walk_code(update_key))
+        bf.ptr = self.base
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def update_prefix_literal(
+        self, bf: BFEmitter, count: PackedI64Ref, operator: str, operand: int,
+    ) -> None:
+        """Update the first min(nonnegative count, length) records in O(length).
+
+        Invalid indexes beyond the end are no-op, matching the restricted
+        list's current store contract. The caller normalizes negative counts
+        to zero before calling this primitive. Count and record metadata survive.
+        """
+        self._check_layout()
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if (frame < 0 or count.base < 0
+                or count.base + count.cells > frame):
+            raise ValueError("prefix count must precede the mobile frame")
+        if type(operand) is not int:
+            raise TypeError("literal update operand must be an integer")
+        if operator in ("add", "sub"):
+            update_key = operator
+        elif (operator in ("floordiv", "mod")
+              and 0 < operand < (1 << 63)
+              and operand & (operand - 1) == 0):
+            update_key = f"{operator}:{operand.bit_length() - 1}"
+        else:
+            raise ValueError(f"unsupported packed literal update {operator!r}")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+        ops.copy(PackedI64Ref(frame + _ACCESS_INDEX), count)
+        if operator in ("add", "sub"):
+            ops.set_u64(PackedI64Ref(frame + _ACCESS_VALUE), operand)
+        bf.move(self.base)
+        bf.emit(_update_prefix_walk_code(update_key))
         bf.ptr = self.base
         for cell in range(frame, self.base):
             bf.clear(cell)

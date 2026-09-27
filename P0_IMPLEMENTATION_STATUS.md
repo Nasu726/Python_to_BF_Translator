@@ -1,12 +1,49 @@
 # Feature / optimization / ABC acceptance track
 
-Updated 2026-09-27. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
+Updated 2026-09-28. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
 Every feature must eventually have all three: implementation, optimization, and
 validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: one linear pass for pure literal indexed loops
+## Current increment: runtime-bounded prefix updates
+
+The same statically proven, one-statement pure literal update loop now accepts
+`for i in range(n): a[i] op= literal`, even if N differs from `len(a)`. The
+range expression is evaluated exactly once before the loop; negative signed
+int64 bounds become zero. A mobile int64 count travels with the 56-cell frame,
+which visits only `min(max(n, 0), len(a))` records, then rewinds. Count, other
+scalars, all suffix elements and list metadata are preserved. Invalid indexes
+beyond the list keep the restricted route's documented no-op store behavior
+until the runtime error ABI is implemented. The induction variable must be
+dead outside the update, `range` unshadowed and `sum(a)` unobserved. All other
+loop shapes retain the general rooted route.
+
+The ordinary two-input-line public source in `tools/bench_linear_int_updates.py`
+emits **320,326 B** and takes **1,605,592 / 5,113,667 / 10,822,760** raw
+steps at N=8/32/65. Its fallback variant reads `i` afterward, emits 540,548 B
+and takes 4,894,483 / 22,854,989 / 69,960,058 steps. The outputs differ;
+compare growth rather than claiming equivalent whole-program source savings.
+The optional native test prints the mutated last element: **517,238 B** (7,050
+B under 512 KiB) and exact output at N=65/256/1024 on locally rebuilt
+Tritium rev `14a729d` with `-b -e` (0.070–0.088 seconds locally). The original
+binary failed with SIGILL on the present host; the rebuild used GCC `-O2
+-fwrapv` with DynASM/GNU Lightning/TCC/dlopen/GMP disabled. These timing
+samples are not a maximum-N or judge acceptance claim.
+
+The standalone pre-existing decimal `int(input())` path exceeds the unchanged
+500-million raw-step guard on INT64_MIN input even without a list or loop.
+Negative bound normalization is covered here with smaller runtime inputs and
+the literal INT64_MIN case; do not raise the guard or misattribute that parser
+cost to the new prefix traversal.
+
+ABC100 C's inner `while` and answer accumulation, and ABC136 C's backward
+adjacent compare and `break`, still prevent this loop lowering. Their ordinary
+sources and acceptance claims are unchanged. The next work is mobile loop
+control/accumulator or an adjacent reverse cursor, not further special cases
+for isolated literal updates.
+
+## Previous increment: one linear pass for pure literal indexed loops
 
 For the restricted single-owner runtime integer list, the compiler now proves
 `for i in range(len(a)): alias[i] op= constant` can visit each current record

@@ -358,6 +358,93 @@ print(sum(a), a[2])
         assert execute(compile_source(source), "").output == reference(source, "")
 
 
+@pytest.mark.parametrize("operator,operand", [
+    ("+", 3), ("-", 3), ("//", 4), ("%", 4),
+])
+def test_counted_prefix_loop_matches_cpython_for_shorter_extent(operator, operand):
+    source = f'''
+a = list(map(int, input().split()))
+b = a
+n = int(input())
+for i in range(n):
+    b[i] {operator}= {operand}
+print(a[0], b[1], a[2], n)
+'''
+    code = compile_source(source)
+    for count in (-2, 0, 1, 2, 3):
+        data = f"-17 18 20\n{count}\n"
+        assert execute(code, data).output == reference(source, data)
+
+
+def test_counted_prefix_loop_normalizes_literal_int64_min_to_zero():
+    source = '''
+a = [3] * 2
+n = -9223372036854775808
+for i in range(n):
+    a[i] += 2
+print(a[0], a[1])
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_counted_prefix_loop_evaluates_bound_once_and_preserves_following_input():
+    source = '''
+a = [3] * 4
+for i in range(int(input())):
+    a[i] += 2
+print(a[0], a[1], a[2], a[3])
+print(input())
+'''
+    data = "2\ntail\n"
+    result = execute(compile_source(source), data)
+    assert result.output == reference(source, data)
+    assert result.input_consumed == len(data)
+
+
+def test_counted_prefix_loop_clips_legacy_out_of_range_noop_and_crosses_64():
+    source = '''
+a = [3] * 65
+n = int(input())
+for i in range(n):
+    a[i] += 2
+print(a[0], a[64], len(a))
+'''
+    code = compile_source(source)
+    for count in (0, 64, 65, 67):
+        output = execute(code, f"{count}\n").output
+        assert output == f"{5 if count else 3} {5 if count >= 65 else 3} 65\n"
+
+
+def test_counted_prefix_loop_public_source_and_steps_stay_under_budget():
+    source = '''
+n = int(input())
+a = list(map(int, input().split()))
+for i in range(n):
+    a[i] += 3
+print(len(a))
+'''
+    code = compile_source(source)
+    assert len(code) <= 512 * 1024
+    last_source = source.replace("print(len(a))", "print(a[-1], len(a))")
+    assert len(compile_source(last_source)) <= 512 * 1024
+    values = [i % 5 for i in range(65)]
+    data = "65\n" + " ".join(map(str, values)) + "\n"
+    result = execute(code, data)
+    assert result.output == reference(source, data)
+    assert result.steps < 13_000_000
+
+
+def test_counted_prefix_loop_falls_back_when_induction_variable_is_live():
+    source = '''
+a = [3] * 3
+n = 2
+for i in range(n):
+    a[i] += 1
+print(i, a[0], a[1], a[2])
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
 def test_dynamic_integer_augmented_index_survives_dynamic_rhs_load():
     source = '''
 a = [10] * 2
