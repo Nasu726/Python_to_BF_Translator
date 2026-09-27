@@ -1,12 +1,15 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-22):** PR #19 is merged at
-`acff5dee83d88c2af42e6e1c3fa3036e61dc7001`. The active
-`dynamic-intlist-augassign-1` increment extends its restricted single-owner
-runtime list route to all integer `a[i] op= rhs` operators. Index evaluation is
-single-shot and precedes the RHS; aliases and observable cached sums remain
-consistent. When no `sum(a)` is observable, literal `+=` / `-=` and positive
-power-of-two `//=` / `%=` update the packed payload in one mobile scan.
+**Latest checkpoint (2026-09-27):** PR #20 is merged at
+`4864c6a2cb49522dea7de0fd6ebe93b3acd45b43`. The subsequent
+`dynamic-intlist-linear-update-1` increment recognizes the statically proven
+`for i in range(len(a)): alias[i] op= literal` subset and carries an update
+frame through all records in O(N) total work. The induction variable must be
+dead elsewhere, `sum(a)` unobserved and the body a single pure update.
+Other loops retain the established index-once, load-before-RHS semantics.
+`tools/bench_linear_int_updates.py` reproduces 214,670 BF bytes and 8,912,966
+raw steps for the new 65-record example; its live-induction fallback variant
+takes 72,732,263 steps. This is not a generic cursor or a C-problem acceptance.
 
 The unchanged ABC100 C and ABC136 C ordinary sources now select runtime-sized
 storage. Their generated programs are 1,068,376 B and 1,724,276 B respectively,
@@ -16,7 +19,7 @@ regression over 500M raw steps to 113,901,836. Every rooted access is still
 O(N), so these loops remain O(N²), not maximum-N acceptance. Read the current
 section of `P0_IMPLEMENTATION_STATUS.md` for exact scope, measurements and the
 reproducible benchmark. The next architectural boundary remains a retained
-physical cursor or batched loop lowering, followed by general object routing.
+physical cursor or mobile general loop body, followed by general object routing.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`

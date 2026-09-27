@@ -148,6 +148,15 @@ class PythonToBFStream(_Base):
     def __init__(self, tree, *, string_capacity=255, list_capacity=64,
                  runtime_charlist_base=None, runtime_intlist_base=None):
         self.dynamic_int_selection = select_dynamic_int_list(tree)
+        self._int_name_nodes: dict[str, list[ast.Name]] = {}
+        if self.dynamic_int_selection is not None:
+            for name in ast.walk(tree):
+                if isinstance(name, ast.Name):
+                    self._int_name_nodes.setdefault(name.id, []).append(name)
+        self._range_shadowed = any(
+            isinstance(name.ctx, ast.Store)
+            for name in self._int_name_nodes.get("range", ())
+        )
         inference_tree = tree
         if self.dynamic_int_selection is not None:
             # These names denote one runtime object, not fixed-capacity value
@@ -342,6 +351,47 @@ class PythonToBFStream(_Base):
                     operand)
         return None
 
+    def _linear_literal_loop(
+        self, node: ast.For,
+    ) -> tuple[str, int] | None:
+        """Prove a loop is exactly one pure update per current list record.
+
+        The induction variable is dead outside the subscript. This allows the
+        record walker to replace both its scalar loop bookkeeping and the
+        repeated root-to-record scans without changing observable state.
+        """
+        if (self.dynamic_int_selection is None or self.dynamic_int_selection.needs_sum
+                or node.orelse or not isinstance(node.target, ast.Name)
+                or len(node.body) != 1 or not isinstance(node.body[0], ast.AugAssign)):
+            return None
+        update = node.body[0]
+        item = update.target
+        if (not isinstance(item, ast.Subscript)
+                or not self._dynamic_int_name(item.value)
+                or not isinstance(item.slice, ast.Name)
+                or item.slice.id != node.target.id):
+            return None
+        iterator = node.iter
+        if (not isinstance(iterator, ast.Call) or iterator.keywords
+                or not isinstance(iterator.func, ast.Name)
+                or iterator.func.id != "range" or len(iterator.args) != 1):
+            return None
+        extent = iterator.args[0]
+        if (not isinstance(extent, ast.Call) or extent.keywords
+                or not isinstance(extent.func, ast.Name) or extent.func.id != "len"
+                or len(extent.args) != 1
+                or not self._dynamic_int_name(extent.args[0])):
+            return None
+        # Never silently omit a loop target used before, after, or by another
+        # iteration; also avoid rebinding of the range builtin in this module.
+        if self._range_shadowed:
+            return None
+        if (len(self._int_name_nodes.get(node.target.id, ())) != 2
+                or any(name is not node.target and name is not item.slice
+                       for name in self._int_name_nodes[node.target.id])):
+            return None
+        return self._literal_dynamic_int_update(update)
+
     def _packed_int_expr(self, node, error_message):
         if (isinstance(node, ast.Constant)
                 or (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub))
@@ -403,6 +453,12 @@ class PythonToBFStream(_Base):
 
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
+        if isinstance(node, ast.For):
+            linear = self._linear_literal_loop(node)
+            if linear is not None:
+                self._ensure_provisional_access_base()
+                self.dynamic_int_sequence.update_all_literal(self.bf, *linear)
+                return
         if (isinstance(node, ast.AugAssign)
                 and isinstance(node.target, ast.Subscript)
                 and self._dynamic_int_name(node.target.value)):

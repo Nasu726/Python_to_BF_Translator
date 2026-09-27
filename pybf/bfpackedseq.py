@@ -658,6 +658,41 @@ def _access_walk_code(*, store: bool, update: str | None = None) -> str:
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
+@lru_cache(maxsize=128)
+def _update_all_walk_code(update: str) -> str:
+    """Update consecutive records while carrying the arithmetic frame."""
+    width = ACCESS_WORKSPACE_CELLS
+    body = BFEmitter()
+    body.ptr = width + MARKER
+    payload = PackedI64Ref(width + PAYLOAD)
+    if update in ("add", "sub"):
+        ops = PackedI64Ops(body, _ACCESS_SCRATCH)
+        operation = ops.add_inplace if update == "add" else ops.sub_inplace
+        operation(payload, PackedI64Ref(_ACCESS_VALUE))
+    else:
+        operator, separator, shift_text = update.partition(":")
+        if separator != ":" or operator not in ("floordiv", "mod"):
+            raise ValueError(f"unsupported packed literal update {update!r}")
+        _shift_payload_power_of_two(
+            body, source=payload, destination=PackedI64Ref(_ACCESS_VALUE),
+            scratch=_ACCESS_SCRATCH, shift=int(shift_text),
+            modulo=operator == "mod",
+        )
+    _rotate_mobile_frame(
+        body, forward=True, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    body.move(width + RECORD_STRIDE + MARKER)
+
+    rewind = BFEmitter()
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(
+        rewind, forward=False, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    rewind.move(width + BACK)
+    return ("[" + body.code() + "]" + ">" * BACK
+            + "[" + rewind.code() + "]" + "<" * BACK)
+
+
 def _decrement_repeat_count(bf: BFEmitter, *, count_base=8, scratch_base=16) -> None:
     """Decrement a nonzero u64 with bounded byte work and clean scratch."""
     core = PackedU32Core(bf, scratch_base)
@@ -961,6 +996,41 @@ class RuntimePackedIntSequence:
             found=found,
             literal_update=(operator, operand),
         )
+
+    def update_all_literal(
+        self, bf: BFEmitter, operator: str, operand: int,
+    ) -> None:
+        """Update every record in one forward pass and restore the tape.
+
+        The caller must establish that its Python loop visits exactly the
+        current records in order and has no observable per-iteration effects.
+        """
+        self._check_layout()
+        if type(operand) is not int:
+            raise TypeError("literal update operand must be an integer")
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if frame < 0:
+            raise ValueError("mobile frame must precede the sequence")
+        if operator in ("add", "sub"):
+            update_key = operator
+        elif (operator in ("floordiv", "mod")
+              and 0 < operand < (1 << 63)
+              and operand & (operand - 1) == 0):
+            update_key = f"{operator}:{operand.bit_length() - 1}"
+        else:
+            raise ValueError(f"unsupported packed literal update {operator!r}")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        if operator in ("add", "sub"):
+            PackedI64Ops(bf, frame + _ACCESS_SCRATCH).set_u64(
+                PackedI64Ref(frame + _ACCESS_VALUE), operand,
+            )
+        bf.move(self.base)
+        bf.emit(_update_all_walk_code(update_key))
+        bf.ptr = self.base
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
 
     def walk_records(
         self,

@@ -10,6 +10,24 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-27 — Restricted whole-list update proves linear sequential lowering
+
+- One-owner integer lists support the narrow `range(len(a))` / dead-index /
+  one-pure-literal-update loop with a mobile 56-cell frame across all records.
+  Marker/back metadata and frame state are restored; empty lists and aliases
+  retain semantics. The frontend rejects observable sums and other index uses.
+- Public BF for `a[i] += 3` over the entire input list, then `print(len(a))`,
+  is 214,670 B and takes 1,085,058 / 4,121,801 / 8,912,966 raw steps at
+  N=8/32/65. A variant reading the loop index after completion must stay on
+  the rooted route: 536,081 B and 4,726,420 / 23,518,318 / 72,732,263
+  steps. These variants have different output; compare growth, not equivalence.
+- General conditionals, nested/effectful RHS, visible sums or loop index, and
+  reverse/adjacent indexed loops still require mobile scalar/control-flow
+  lowering or a retained physical cursor. ABC100 C/ABC136 C remain unchanged
+  above 512 KiB and O(N²) for their current indexed loops.
+
+---
+
 ## 2026-09-22 — Dynamic int AugAssign exposed the rooted-scan boundary
 
 - The restricted single-owner input/repeat list route supports all existing
