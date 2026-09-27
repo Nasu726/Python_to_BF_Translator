@@ -353,12 +353,14 @@ class PythonToBFStream(_Base):
 
     def _linear_literal_loop(
         self, node: ast.For,
-    ) -> tuple[str, int] | None:
-        """Prove a loop is exactly one pure update per current list record.
+    ) -> tuple[str, int, ast.AST | None] | None:
+        """Prove a loop is a pure prefix update of one runtime list.
 
         The induction variable is dead outside the subscript. This allows the
         record walker to replace both its scalar loop bookkeeping and the
-        repeated root-to-record scans without changing observable state.
+        repeated root-to-record scans without changing observable state. None
+        as the bound denotes the whole list; any other bound is evaluated once
+        before the loop and travels with the record walker.
         """
         if (self.dynamic_int_selection is None or self.dynamic_int_selection.needs_sum
                 or node.orelse or not isinstance(node.target, ast.Name)
@@ -377,11 +379,10 @@ class PythonToBFStream(_Base):
                 or iterator.func.id != "range" or len(iterator.args) != 1):
             return None
         extent = iterator.args[0]
-        if (not isinstance(extent, ast.Call) or extent.keywords
-                or not isinstance(extent.func, ast.Name) or extent.func.id != "len"
-                or len(extent.args) != 1
-                or not self._dynamic_int_name(extent.args[0])):
-            return None
+        whole_list = (isinstance(extent, ast.Call) and not extent.keywords
+                      and isinstance(extent.func, ast.Name)
+                      and extent.func.id == "len" and len(extent.args) == 1
+                      and self._dynamic_int_name(extent.args[0]))
         # Never silently omit a loop target used before, after, or by another
         # iteration; also avoid rebinding of the range builtin in this module.
         if self._range_shadowed:
@@ -390,7 +391,10 @@ class PythonToBFStream(_Base):
                 or any(name is not node.target and name is not item.slice
                        for name in self._int_name_nodes[node.target.id])):
             return None
-        return self._literal_dynamic_int_update(update)
+        literal = self._literal_dynamic_int_update(update)
+        if literal is None:
+            return None
+        return (*literal, None if whole_list else extent)
 
     def _packed_int_expr(self, node, error_message):
         if (isinstance(node, ast.Constant)
@@ -456,8 +460,29 @@ class PythonToBFStream(_Base):
         if isinstance(node, ast.For):
             linear = self._linear_literal_loop(node)
             if linear is not None:
+                operator, operand, bound = linear
+                count = None
+                if bound is not None:
+                    count = self._packed_int_expr(
+                        bound, "integer-list loop bound must be an integer",
+                    )
+                    scratch = [self.temps.cell() for _ in range(4)]
+                    negative = scratch[0]
+                    _extract_packed_sign(self.bf, count.byte(7), *scratch)
+                    self.bf.begin_while(negative)
+                    self.bf.clear(negative)
+                    for i in range(8):
+                        self.bf.clear(count.byte(i))
+                    self.bf.end_while(negative)
                 self._ensure_provisional_access_base()
-                self.dynamic_int_sequence.update_all_literal(self.bf, *linear)
+                if count is None:
+                    self.dynamic_int_sequence.update_all_literal(
+                        self.bf, operator, operand,
+                    )
+                else:
+                    self.dynamic_int_sequence.update_prefix_literal(
+                        self.bf, count, operator, operand,
+                    )
                 return
         if (isinstance(node, ast.AugAssign)
                 and isinstance(node.target, ast.Subscript)

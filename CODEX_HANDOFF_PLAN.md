@@ -1,15 +1,21 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-27):** PR #20 is merged at
-`4864c6a2cb49522dea7de0fd6ebe93b3acd45b43`. The subsequent
-`dynamic-intlist-linear-update-1` increment recognizes the statically proven
-`for i in range(len(a)): alias[i] op= literal` subset and carries an update
-frame through all records in O(N) total work. The induction variable must be
-dead elsewhere, `sum(a)` unobserved and the body a single pure update.
-Other loops retain the established index-once, load-before-RHS semantics.
-`tools/bench_linear_int_updates.py` reproduces 214,670 BF bytes and 8,912,966
-raw steps for the new 65-record example; its live-induction fallback variant
-takes 72,732,263 steps. This is not a generic cursor or a C-problem acceptance.
+**Latest checkpoint (2026-09-28):** PR #21 is merged at
+`f20a2f397f1214ccb534ab2cd14232a0311db2e2`. The subsequent
+`dynamic-intlist-prefix-update-1` increment extends the proven one-statement
+pure-literal update loop from `range(len(a))` to `range(n)` for any runtime
+signed bound, without assuming n equals the actual list length. A mobile
+int64 count stops the forward pass at n or the sentinel; all unused suffix
+records, the original bound and list metadata survive. A negative bound
+performs no update. The induction variable must be dead elsewhere and
+`sum(a)` unobserved. Other loops keep rooted lowering.
+
+`tools/bench_linear_int_updates.py` now reproduces 320,326 BF bytes and
+10,822,760 raw steps at N=65 for the counted example. A last-element-read
+native variant is 517,238 B and passes 65/256/1024 using a portable local
+Tritium rev `14a729d` build. This is not a generic cursor or a C-problem
+acceptance: ABC100 C's inner while/aggregate and ABC136 C's adjacent reverse
+pass are unchanged. The previous whole-list route remains available.
 
 The unchanged ABC100 C and ABC136 C ordinary sources now select runtime-sized
 storage. Their generated programs are 1,068,376 B and 1,724,276 B respectively,
