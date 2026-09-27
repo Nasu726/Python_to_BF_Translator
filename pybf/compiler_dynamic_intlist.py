@@ -1,10 +1,10 @@
 """One statically owned runtime integer list with proven alias views.
 
 This route supports one top-level input-list or singleton-repeat construction
-and unconditional alias bindings, with len/sum/clear/index uses. It is not the
-general heap/object model: rebinding, escaping and multiple dynamic owners stay
-on the existing route. Selection is based on uses/definitions, never a problem
-name.
+and unconditional alias bindings, with len/sum/clear/index uses and item
+updates. It is not the general heap/object model: rebinding, escaping and
+multiple dynamic owners stay on the existing route. Selection is based on
+uses/definitions, never a problem name.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ class DynamicIntListSelection:
     bindings: dict[str, ast.Assign]
     needs_load: bool
     needs_store: bool
+    needs_sum: bool
 
 
 def dynamic_int_workspace_cells(selection: DynamicIntListSelection) -> int:
@@ -84,6 +85,7 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
     binding_nodes = set(bindings.values())
     needs_load = False
     needs_store = False
+    needs_sum = False
     top_positions = {node: i for i, statement in enumerate(tree.body) for node in ast.walk(statement)}
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     builtin_names = {"list", "map", "int", "input", "sum", "len"}
@@ -107,6 +109,8 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
         if (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name)
                 and parent.func.id in ("len", "sum") and parent.args == [node]
                 and not parent.keywords):
+            if parent.func.id == "sum":
+                needs_sum = True
             continue
         if isinstance(parent, ast.Subscript) and parent.value is node:
             if isinstance(parent.slice, ast.Slice):
@@ -120,6 +124,12 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                     and grandparent.targets == [parent]):
                 needs_store = True
                 continue
+            if (isinstance(parent.ctx, ast.Store)
+                    and isinstance(grandparent, ast.AugAssign)
+                    and grandparent.target is parent):
+                needs_load = True
+                needs_store = True
+                continue
         if isinstance(parent, ast.Attribute) and parent.value is node and parent.attr == "clear":
             call = parents.get(parent)
             if (isinstance(call, ast.Call) and call.func is parent
@@ -127,7 +137,9 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                     and isinstance(parents.get(call), ast.Expr)):
                 continue
         return None
-    return DynamicIntListSelection(owner, bindings, needs_load, needs_store)
+    return DynamicIntListSelection(
+        owner, bindings, needs_load, needs_store, needs_sum,
+    )
 
 
 class PythonToBFStream(_Base):
@@ -248,10 +260,22 @@ class PythonToBFStream(_Base):
             value_node, "dynamic integer-list item must be an integer"
         )
         index = self._normalize_dynamic_int_index(target.slice)
+        self._exchange_dynamic_int(index, value)
+
+    def _exchange_dynamic_int(
+        self, index: PackedI64Ref, value: PackedI64Ref,
+    ) -> None:
+        """Store one packed item and maintain an observable cached sum."""
         previous = self._new_packed_i64()
+        self._ensure_provisional_access_base()
+        if not self.dynamic_int_selection.needs_sum:
+            self.dynamic_int_sequence.exchange_value(
+                self.bf, index, value, previous,
+            )
+            return
+
         found = self.temps.cell()
         ops = self._dynamic_int_packed_ops()
-        self._ensure_provisional_access_base()
         self.dynamic_int_sequence.exchange_value(
             self.bf, index, value, previous, found=found,
         )
@@ -260,6 +284,63 @@ class PythonToBFStream(_Base):
         ops.sub_inplace(self._int_total, previous)
         ops.add_inplace(self._int_total, value)
         self.bf.end_while(found)
+
+    def _augment_dynamic_int(self, node: ast.AugAssign) -> None:
+        """Lower ``a[index] op= rhs`` without reevaluating the index.
+
+        Python resolves the subscription and loads its old value before it
+        evaluates the RHS. Keep the normalized packed index live across both
+        the load and RHS lowering, then reuse it for the exchange.
+        """
+        target = node.target
+        assert isinstance(target, ast.Subscript)
+        index = self._normalize_dynamic_int_index(target.slice)
+        old_packed = self._new_packed_i64()
+        self._ensure_provisional_access_base()
+
+        literal_update = self._literal_dynamic_int_update(node)
+        if (literal_update is not None
+                and not self.dynamic_int_selection.needs_sum):
+            # With no observable sum cache, a pure literal RHS can update the
+            # matching packed payload during the load scan. This preserves
+            # Python's target-before-RHS order (the RHS has no effects) while
+            # avoiding a second O(N) exchange traversal.
+            operator, operand = literal_update
+            self.dynamic_int_sequence.update_literal(
+                self.bf, index, old_packed, operator, operand,
+            )
+            return
+
+        self.dynamic_int_sequence.load_value(self.bf, index, old_packed)
+        old = self._new_word()
+        self.backend.copy64(old, old_packed)
+
+        result = self._compile_power_of_two_divmod(node.op, old, node.value)
+        if result is None:
+            rhs = self.compile_expr(node.value)
+            result = self._compile_augmented_value(node, old, rhs)
+        value = self._pack_word(result)
+        self._exchange_dynamic_int(index, value)
+
+    @staticmethod
+    def _literal_dynamic_int_update(
+        node: ast.AugAssign,
+    ) -> tuple[str, int] | None:
+        """Return a one-scan packed update for a side-effect-free literal."""
+        if not (isinstance(node.value, ast.Constant)
+                and type(node.value.value) in (int, bool)):
+            return None
+        operand = int(node.value.value)
+        if isinstance(node.op, ast.Add):
+            return "add", operand
+        if isinstance(node.op, ast.Sub):
+            return "sub", operand
+        if (isinstance(node.op, (ast.FloorDiv, ast.Mod))
+                and 0 < operand < (1 << 63)
+                and operand & (operand - 1) == 0):
+            return ("floordiv" if isinstance(node.op, ast.FloorDiv) else "mod",
+                    operand)
+        return None
 
     def _packed_int_expr(self, node, error_message):
         if (isinstance(node, ast.Constant)
@@ -303,21 +384,30 @@ class PythonToBFStream(_Base):
         for i in range(8):
             self.bf.clear(count.byte(i))
         self.bf.end_while(negative)
-        discarded_length = self._new_packed_u32()
         if self._int_provisional_layout:
             self.runtime_intlist_base = self.temps.top + dynamic_int_workspace_cells(
                 self.dynamic_int_selection
             ) + 10
             self.dynamic_int_sequence = RuntimePackedIntSequence(self.runtime_intlist_base)
         self.dynamic_int_sequence.repeat_value(self.bf, count, value)
-        # Reduction uses a u32 traversal length, but repetition already knows
-        # its exact signed-positive count. Retain the original 64-bit length.
-        self.dynamic_int_sequence.sum_and_length(self.bf, self._int_total, discarded_length)
+        if self.dynamic_int_selection.needs_sum:
+            discarded_length = self._new_packed_u32()
+            # Reduction uses a u32 traversal length, but repetition already
+            # knows its exact signed-positive count. Retain the original
+            # 64-bit length below.
+            self.dynamic_int_sequence.sum_and_length(
+                self.bf, self._int_total, discarded_length,
+            )
         for i in range(8):
             self.backend.copy_cell(count.byte(i), self._int_length.byte(i), self.backend.s0)
 
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
+        if (isinstance(node, ast.AugAssign)
+                and isinstance(node.target, ast.Subscript)
+                and self._dynamic_int_name(node.target.value)):
+            self._augment_dynamic_int(node)
+            return
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Subscript)
                 and self._dynamic_int_name(node.targets[0].value)):

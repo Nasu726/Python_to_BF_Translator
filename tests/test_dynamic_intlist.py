@@ -78,7 +78,7 @@ print(input())
 @pytest.mark.parametrize("source", [
     "a=list(map(int,input().split()))\na=[1]\nprint(len(a))",
     "a=list(map(int,input().split()))\nb=a\nb=[2]\nprint(len(a))",
-    "a=list(map(int,input().split()))\na[0]+=2\nprint(len(a))",
+    "a=list(map(int,input().split()))\ndel a[0]\nprint(len(a))",
     "a=list(map(int,input().split()))\nprint(a[:])",
     "a=list(map(int,input().split()))\nb=[a]\nprint(len(a))",
     "a=list(map(int,input().split()))\nprint(sum(a, 1))",
@@ -202,14 +202,16 @@ def test_repeat_candidate_does_not_disable_established_dynamic_input_owner():
     assert execute(compile_source(source), data).output == reference(source, data)
 
 
-@pytest.mark.parametrize("uses,needs_load,needs_store", [
-    ("print(len(a))", False, False),
-    ("print(a[0])", True, False),
-    ("a[0] = 1", False, True),
-    ("a[0] = a[1]", True, True),
+@pytest.mark.parametrize("uses,needs_load,needs_store,needs_sum", [
+    ("print(len(a))", False, False, False),
+    ("print(sum(a))", False, False, True),
+    ("print(a[0])", True, False, False),
+    ("a[0] = 1", False, True, False),
+    ("a[0] = a[1]", True, True, False),
+    ("a[0] += 1", True, True, False),
 ])
 def test_dynamic_integer_selection_tracks_required_access_frame(
-    uses, needs_load, needs_store,
+    uses, needs_load, needs_store, needs_sum,
 ):
     selection = select_dynamic_int_list(ast.parse(
         "a=list(map(int,input().split()))\n" + uses + "\n"
@@ -217,6 +219,7 @@ def test_dynamic_integer_selection_tracks_required_access_frame(
     assert selection is not None
     assert selection.needs_load is needs_load
     assert selection.needs_store is needs_store
+    assert selection.needs_sum is needs_sum
 
 
 @pytest.mark.parametrize("index", [0, 64, 256, -1, -65])
@@ -252,6 +255,76 @@ print(a[0], a[1], a[2], sum(a))
     assert execute(compile_source(source), data).output == reference(source, data)
     _, plan = lower_with_layout(source)
     assert plan.dynamic_intlist_base - ACCESS_WORKSPACE_CELLS > plan.temp_peak
+
+
+def test_dynamic_integer_augmented_assignment_evaluates_index_once_before_rhs():
+    source = '''
+a = [10] * 2
+b = a
+b[int(input())] += int(input())
+print(a[0], a[1], len(b), sum(a))
+print(input())
+'''
+    data = "0\n3\ntail\n"
+    result = execute(compile_source(source), data)
+    assert result.output == reference(source, data)
+    assert result.input_consumed == len(data)
+    _, plan = lower_with_layout(source)
+    assert plan.dynamic_intlist_base - ACCESS_WORKSPACE_CELLS > plan.temp_peak
+
+
+@pytest.mark.parametrize("op,rhs", [
+    ("+", 3),
+    ("-", 3),
+    ("*", 3),
+    ("//", 2),
+    ("%", 2),
+    ("&", 3),
+    ("|", 3),
+    ("^", 3),
+])
+def test_dynamic_integer_augmented_operators_update_alias_and_cached_sum(op, rhs):
+    source = f'''
+a = [10] * 1
+b = a
+b[-1] {op}= {rhs}
+print(a[0], len(b), sum(a))
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_dynamic_integer_augmented_assignment_beyond_old_capacity():
+    source = '''
+a = [2] * 65
+b = a
+b[64] += 3
+print(a[64], len(a), sum(b))
+'''
+    assert execute(compile_source(source), "").output == "5 65 133\n"
+
+
+def test_dynamic_integer_augmented_index_survives_dynamic_rhs_load():
+    source = '''
+a = [10] * 2
+b = a
+b[int(input())] += a[int(input())]
+print(a[0], a[1], sum(b))
+'''
+    data = "0\n1\n"
+    assert execute(compile_source(source), data).output == reference(source, data)
+
+
+def test_dynamic_integer_invalid_augmented_index_is_noop_but_evaluates_rhs():
+    source = '''
+a = [4] * 2
+a[int(input())] += int(input())
+print(a[0], a[1], sum(a))
+print(input())
+'''
+    data = "256\n3\ntail\n"
+    result = execute(compile_source(source), data)
+    assert result.output == "4 4 8\ntail\n"
+    assert result.input_consumed == len(data)
 
 
 def test_dynamic_integer_index_survives_clear_as_legacy_noop_zero_contract():

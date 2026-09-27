@@ -45,9 +45,10 @@ _MOBILE_SAVED_RECORD = _MOBILE_SCRATCH + PackedI64Ops.SCRATCH_CELLS
 REDUCTION_WORKSPACE_CELLS = _MOBILE_SAVED_RECORD + RECORD_STRIDE
 REPEAT_FORWARD_WORKSPACE_CELLS = 48
 
-# Maximum/store mobile random-access frame.  It carries the normalized index,
-# incoming value, previous/result value and hit flag across every record.  The
-# final ten cells save one record while the frame trades places with it.
+# Maximum store/literal-update mobile random-access frame. It carries the
+# normalized index, incoming/literal value, previous/result value and hit flag
+# across every record. The final ten cells save one record while the frame
+# trades places with it.
 _ACCESS_INDEX = 0
 _ACCESS_VALUE = 8
 _ACCESS_RESULT = 16
@@ -483,9 +484,64 @@ def _repeat_value_walk_code() -> str:
             + "[" + "<" * RECORD_STRIDE + "]<")
 
 
-@lru_cache(maxsize=2)
-def _access_walk_code(*, store: bool) -> str:
-    """Scan every record once with a mobile load/exchange frame."""
+def _shift_payload_power_of_two(
+    bf: BFEmitter,
+    *,
+    source: PackedI64Ref,
+    destination: PackedI64Ref,
+    scratch: int,
+    shift: int,
+    modulo: bool,
+) -> None:
+    """Destructively compute signed ``// 2**shift`` or positive ``%``.
+
+    The source is an already snapshotted record payload. Extracting its bits
+    from least to most significant consumes each byte. For division, the sign
+    bit also fills the vacated high bits, exactly matching arithmetic right
+    shift and Python floor division by a positive power of two.
+    """
+    if not 0 <= shift < 63:
+        raise ValueError("packed power-of-two shift must be in range(0, 63)")
+    for i in range(PAYLOAD_BYTES):
+        bf.clear(destination.byte(i))
+
+    ops = PackedI64Ops(bf, scratch)
+    quotient, parity, gate = scratch, scratch + 1, scratch + 2
+    for source_bit in range(64):
+        source_byte = source.byte(source_bit // 8)
+        ops._split_parity(source_byte, quotient, parity, gate)
+        ops._move_cell(quotient, source_byte)
+
+        output_bits: list[int] = []
+        if modulo:
+            if source_bit < shift:
+                output_bits.append(source_bit)
+        elif source_bit >= shift:
+            output_bits.append(source_bit - shift)
+        if not modulo and source_bit == 63:
+            output_bits.extend(range(64 - shift, 64))
+
+        if output_bits:
+            bf.begin_while(parity)
+            bf.add_const(parity, -1)
+            for output_bit in output_bits:
+                bf.add_const(
+                    destination.byte(output_bit // 8),
+                    1 << (output_bit % 8),
+                )
+            bf.end_while(parity)
+        else:
+            bf.clear(parity)
+
+    for i in range(PAYLOAD_BYTES):
+        ops._move_cell(destination.byte(i), source.byte(i))
+
+
+@lru_cache(maxsize=None)
+def _access_walk_code(*, store: bool, update: str | None = None) -> str:
+    """Scan every record once with a mobile load/exchange/update frame."""
+    if update is not None and not store:
+        raise ValueError("an in-place access update requires the store frame")
     if store:
         width = ACCESS_WORKSPACE_CELLS
         index = _ACCESS_INDEX
@@ -546,7 +602,27 @@ def _access_walk_code(*, store: bool) -> str:
     body.begin_while(zero)
     body.add_const(zero, -1)
     ops.copy(PackedI64Ref(result), PackedI64Ref(width + PAYLOAD))
-    if store:
+    if update == "add":
+        ops.add_inplace(
+            PackedI64Ref(width + PAYLOAD), PackedI64Ref(_ACCESS_VALUE)
+        )
+    elif update == "sub":
+        ops.sub_inplace(
+            PackedI64Ref(width + PAYLOAD), PackedI64Ref(_ACCESS_VALUE)
+        )
+    elif update is not None:
+        operation, separator, shift_text = update.partition(":")
+        if separator != ":" or operation not in ("floordiv", "mod"):
+            raise ValueError(f"unsupported packed literal update {update!r}")
+        _shift_payload_power_of_two(
+            body,
+            source=PackedI64Ref(width + PAYLOAD),
+            destination=PackedI64Ref(_ACCESS_VALUE),
+            scratch=scratch,
+            shift=int(shift_text),
+            modulo=operation == "mod",
+        )
+    elif store:
         ops.copy(PackedI64Ref(width + PAYLOAD), PackedI64Ref(_ACCESS_VALUE))
     body.set_const(found, 1)
     body.end_while(zero)
@@ -762,17 +838,20 @@ class RuntimePackedIntSequence:
         *,
         value: PackedI64Ref | None = None,
         found: int | None = None,
+        literal_update: tuple[str, int] | None = None,
     ) -> None:
-        """Load or exchange one signed-normalized runtime index.
+        """Load, exchange or literal-update one signed-normalized index.
 
         ``index`` is already normalized for Python negative indexing.  A still
         negative value or any value beyond the sequence naturally reaches the
-        sentinel without a hit.  This keeps all 64 bits and cannot wrap index
-        2**32 to zero.  Result is zero and an exchange is a no-op on a miss.
+        sentinel without a hit. This keeps all 64 bits and cannot wrap index
+        2**32 to zero. Result is zero and a mutation is a no-op on a miss.
         Inputs/outputs must be disjoint and precede the exclusive mobile frame.
         """
         self._check_layout()
-        store = value is not None
+        if value is not None and literal_update is not None:
+            raise ValueError("access cannot exchange and update simultaneously")
+        store = value is not None or literal_update is not None
         width = ACCESS_WORKSPACE_CELLS if store else LOAD_ACCESS_WORKSPACE_CELLS
         frame = self.base - width
         index_offset = _ACCESS_INDEX if store else _LOAD_ACCESS_INDEX
@@ -798,9 +877,24 @@ class RuntimePackedIntSequence:
         ops.copy(PackedI64Ref(frame + index_offset), index)
         if value is not None:
             ops.copy(PackedI64Ref(frame + _ACCESS_VALUE), value)
+        update_key = None
+        if literal_update is not None:
+            operator, operand = literal_update
+            if operator in ("add", "sub"):
+                ops.set_u64(PackedI64Ref(frame + _ACCESS_VALUE), operand)
+                update_key = operator
+            elif operator in ("floordiv", "mod"):
+                if not (operand > 0 and operand & (operand - 1) == 0):
+                    raise ValueError("division update requires a positive power of two")
+                shift = operand.bit_length() - 1
+                if shift >= 63:
+                    raise ValueError("division update shift must be less than 63")
+                update_key = f"{operator}:{shift}"
+            else:
+                raise ValueError(f"unsupported packed literal update {operator!r}")
 
         bf.move(self.base)
-        bf.emit(_access_walk_code(store=store))
+        bf.emit(_access_walk_code(store=store, update=update_key))
         bf.ptr = self.base
 
         ops.copy(result, PackedI64Ref(frame + result_offset))
@@ -833,6 +927,40 @@ class RuntimePackedIntSequence:
     ) -> None:
         """Replace one normalized index and return its previous value."""
         self._access_value(bf, index, previous, value=value, found=found)
+
+    def update_literal(
+        self,
+        bf: BFEmitter,
+        index: PackedI64Ref,
+        previous: PackedI64Ref,
+        operator: str,
+        operand: int,
+        *,
+        found: int | None = None,
+    ) -> None:
+        """Apply one pure literal update during the indexed record scan.
+
+        Supported operations are modulo-int64 add/sub and signed floor
+        division/modulo by a positive power of two. The old value is returned;
+        an invalid normalized index remains a zero/no-op miss.
+        """
+        if type(operand) is not int:
+            raise TypeError("literal update operand must be an integer")
+        if operator not in ("add", "sub", "floordiv", "mod"):
+            raise ValueError(f"unsupported packed literal update {operator!r}")
+        if operator in ("floordiv", "mod"):
+            if not (0 < operand < (1 << 63)
+                    and operand & (operand - 1) == 0):
+                raise ValueError(
+                    "division update requires a positive power of two below 2**63"
+                )
+        self._access_value(
+            bf,
+            index,
+            previous,
+            found=found,
+            literal_update=(operator, operand),
+        )
 
     def walk_records(
         self,

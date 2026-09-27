@@ -6,67 +6,76 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: dynamic integer-list indexing and ABC170 A
+## Current increment: dynamic integer-list updates and real ABC loops
 
-The restricted single-owner dynamic integer-list route now supports ordinary
-runtime `a[i]` loads and simple `a[i] = value` stores. This applies to both the
-uncapped input-list constructor and runtime singleton repetition, and all
-statically proven aliases observe the same mutation. Store lowering evaluates
-the right-hand side before the target index, matching Python assignment order.
-The old element is returned by the store primitive so the persistent cached sum
-can be updated as `sum -= old; sum += value`; cached length remains unchanged.
+The restricted single-owner runtime integer-list route now supports ordinary
+`a[i] op= rhs` for all existing integer augmented operators: `+=`, `-=`, `*=`,
+`//=`, `%=`, `&=`, `|=` and `^=`. This applies to uncapped input lists and
+runtime singleton repetition, including statically proven aliases. The target
+index is evaluated exactly once; its old value is loaded before the RHS, then
+the same normalized packed index is reused for the store. A successful generic
+exchange updates an observable cached sum as `sum -= old; sum += new`.
 
-The low-level implementation carries one mobile frame across the contiguous
-10-cell records: **48 cells for a load** and **56 cells for a store**. The load
-layout omits the unused incoming-value lane. The frame contains the full 64-bit
-normalized index, result/old value, hit state and arithmetic scratch (plus the
-incoming value for stores). Every materialized record is crossed once, then
-inverse swaps restore the records and return the frame to the fixed base.
-Therefore one access uses `10*N + O(1)`
-tape, has source independent of N, and runs in O(N) record work. It deliberately
-continues to the sentinel after a hit so fixed outputs are touched only after
-the frame returns; a loop containing N indexed accesses is consequently O(N²).
-A locality-preserving cursor/batched loop lowering remains required before
-claiming scalable ABC136-style indexed passes.
+The selector separately records whether `sum(a)` can ever be observed. If not,
+simple stores omit cached-sum maintenance and singleton repetition omits its
+initial sum reduction. More importantly, pure literal `+=` / `-=` and positive
+power-of-two `//=` / `%=` are applied to the matching packed payload inside the
+same mobile access scan. Packed division uses an arithmetic right shift, so
+negative floor division and positive modulo retain Python semantics. Programs
+which do observe `sum(a)`, effectful RHS expressions, and the other operators
+keep the fully general load-before-RHS plus exchange path.
 
-All eight index bytes participate. Index `2**32` cannot wrap to element zero.
-Negative indexes add the cached 64-bit length once before traversal, so `-1`
-and `-len(a)` work while values below `-len(a)` miss. Until the runtime error ABI
-exists, an invalid load returns zero and an invalid store is a no-op, preserving
-the project's explicitly documented legacy contract rather than pretending to
-raise Python `IndexError`. Slices and augmented assignment on this dynamic route
-remain rejected. Rebinding, escaping, multiple dynamic owners, append/capacity
-growth, general heap handles and nested lists are also outside this increment.
+Loads use a 48-cell mobile frame; stores and fused literal updates use 56 cells.
+The complete 64-bit normalized index, value/result state and scratch move across
+10-cell records, then inverse swaps restore the list and fixed base. One access
+therefore has source independent of N, `10*N + O(1)` tape and O(N) record work.
+Fusing a literal update removes its second full traversal, but N indexed loop
+iterations remain O(N²). A locality-preserving cursor/batched lowering is still
+required before either ABC loop can claim official maximum-N scalability.
+
+All eight index bytes participate; `2**32` cannot wrap to item zero. Negative
+indexes add the cached int64 length once. Until the error ABI exists, invalid
+loads return zero and invalid updates are no-ops. Slices, rebinding, escaping,
+multiple dynamic owners, append/capacity growth, general heap handles and
+nested lists remain outside this restricted route.
 
 Current public source telemetry:
 
-| Source shape | Generated BF | 512 KiB headroom |
+| Ordinary source | Generated BF | 512 KiB headroom |
 | --- | ---: | ---: |
-| runtime repeat + store + load | 407,441 B | 116,847 B |
-| ABC170 A ordinary loop | 518,124 B | 6,164 B |
-| repeat + store + cached len/sum | 583,615 B | -59,327 B |
-| repeat + store/load + cached sum | 611,103 B | -86,815 B |
+| ABC170 A indexed reads | 518,124 B | 6,164 B |
+| ABC100 C indexed `//= 2` | 1,068,376 B | -544,088 B |
+| ABC136 C indexed compare/`-= 1` | 1,724,276 B | -1,199,988 B |
 
-Thus this is functional progress, not a claim that every combination is under
-the submission limit. The ABC gate is intentionally kept at 512 KiB; it was not
-raised to accommodate the feature.
+[ABC100 C — *3 or /2](https://atcoder.jp/contests/abc100/tasks/abc100_c)
+now uses the runtime-sized route without changing its ordinary Python source.
+It is down from the earlier fixed-list 2,485,322 B. Official-sample raw steps
+are **8,181,784 / 8,466,202 / 113,901,836**; all match CPython under the
+unchanged 500-million guard.
 
-[ABC170 A — Five Variables](https://atcoder.jp/contests/abc170/tasks/abc170_a)
-is compiled from its ordinary Python loop through `pybf.compile_source`, with
-no task-name detection or problem-specific BF. Both official samples match
-CPython and their published output. `tools/bench_tritium_abc170_index.py`
-reproduces a native Tritium revision `14a729d` check for every possible zero
-position, three trials each. All 15 runs returned the exact result in
-0.033–0.045 seconds locally. These timings are not an AtCoder-host guarantee.
+[ABC136 C — Build Stairs](https://atcoder.jp/contests/abc136/tasks/abc136_c)
+also selects runtime-sized storage from the unchanged backward greedy source.
+The old 64-item capacity boundary is removed. Source fell from the fixed-route
+5,746,608 B to 1,724,276 B; official-sample raw steps are
+**15,910,034 / 8,424,538 / 15,884,453 / 4,151,172**. This proves samples and
+runtime extent, not the official N<=100000 bound or 512 KiB submission limit.
 
-Local validation: **146 tests passed** in the two directly affected low-level
-and frontend suites, plus **58 existing regression tests** for layout, public
-API, source size, compile performance, dynamic character lists and streaming
-integer lists. Coverage includes empty/cleared lists, aliases, cache updates,
-RHS/index input order, positions 0/64/256, negative indexes, `2**32`, int64
-values, complete record/frame restoration and layout separation. A regression
-run also caught and fixed an internal method-name collision with the dynamic
-character-list index normalizer; its fused swaps remain covered.
+`tools/bench_tritium_dynamic_int_updates.py` reproduces both programs with
+Tritium revision `14a729d` and `-b -e`. Three local trials of every official
+sample plus one 65-element case returned exact output. ABC100 runs were
+0.090–0.178 seconds and ABC136 runs were 0.115–0.296 seconds after compilation.
+These local timings are not an AtCoder-host guarantee. The existing ABC170 A
+benchmark remains 0.033–0.045 seconds across all zero positions.
+
+No size or step limit was raised: ABC100/136 remain explicitly above 512 KiB,
+and the first two-pass implementation exposed a real ABC100 sample regression
+over 500M steps. The fused packed update replaced that implementation for pure
+literals and brought the same sample to 113.9M steps. Tests cover all eight
+operators, aliases, cached sums, nested dynamic RHS loads, index/RHS input
+order, invalid misses, positions beyond 64, int64 wrap, negative floor/modulo,
+frame restoration and layout separation. The three directly affected suites
+pass **209 tests**; the complete repository passes **713 tests** with four local
+workers.
 
 ## Previous increment: public runtime singleton integer repetition
 
@@ -309,8 +318,9 @@ and avoid reinserting rooted heap lookup inside the sequential loop.
 
 Scalar and integer-list targets now support `//=`, `%=`, `&=`, `|=`, `^=`
 as well as `+=`, `-=`, `*=`. Subscript target evaluation and loading precede
-RHS evaluation; the index is evaluated once. These additions use the existing
-fixed-capacity list frontend, not the pending dynamic object model.
+RHS evaluation; the index is evaluated once. At that historical milestone
+these additions used the existing fixed-capacity list frontend. The current
+restricted runtime-sized route is documented above.
 
 A differential regression exposed an existing Quad signed-divmod bug:
 boolean/negation kernels borrowed shared Quad temporaries while that workspace
@@ -331,9 +341,9 @@ All three official samples match CPython and the published output. The public
 source is **2,485,322 B**, versus **29,415,994 B** with the power-of-two
 transformation disabled and the same corrected general division kernel.
 Sample raw steps: **12,894,431 / 23,979,296 / 290,989,246**.
-This is still above 512 KiB. The official N<=10000 bound is not established:
-this sample fixture still uses fixed-capacity storage, and no maximum-scale
-Tritium benchmark was performed.
+This historical result was still above 512 KiB and used fixed-capacity storage.
+The current dynamic-route measurements superseding it are documented above;
+the official N<=10000 bound remains unestablished.
 
 Local validation: 26 new focused cases passed (including the three official
 samples and 24 arithmetic boundary executions), plus 29 public-API, layout,
@@ -419,15 +429,16 @@ official N <= 100000. `tests/test_abc_c_foundation.py` compiles the ordinary
 backward, in-place greedy Python solution through the public API and compares
 all four official samples with both CPython and expected output.
 
-This currently exercises the existing **fixed-capacity** list frontend. It does
-NOT exercise the new heap mutation primitive and does NOT establish scalable
-ABC136 support. Reuse the same source for the future dynamic-list route, then
-test beyond 64 elements and benchmark the official maximum separately.
+At that checkpoint this exercised the **fixed-capacity** list frontend. The
+unchanged source now selects the restricted runtime-sized route and is tested
+beyond 64 elements, as documented in the current section. It still does NOT
+establish scalable maximum-N ABC136 support.
 
-The public-default ABC136 fixture emits **5,746,608 BF bytes**, above 512 KiB.
-Sample raw steps are 37,136,657 / 24,597,246 / 34,056,141 / 123,241,308.
-These measurements document the remaining optimization work; passing the
-samples is a functional milestone, not a contest-ready claim.
+The historical fixed-route fixture emitted **5,746,608 BF bytes**, above
+512 KiB. Sample raw steps were 37,136,657 / 24,597,246 / 34,056,141 /
+123,241,308. Current dynamic-route measurements are listed above. Both sets
+document remaining optimization work; passing samples is not a contest-ready
+claim.
 
 Local validation: 49 tests covering the ABC fixture, evaluation order,
 control flow, legacy list frontend and heap/handle/packed primitives passed;

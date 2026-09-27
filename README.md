@@ -117,14 +117,18 @@ a = list(map(int, input().split()))  # または a = [0] * n
 b = a
 i = int(input())
 b[i] = 7
+b[i] += 1
 print(a[i], len(b), sum(a))
 a.clear()
 ```
 
 現時点の対象は1個のownerと無条件alias、`len` / `sum` / statement-form
-`clear`、`a[i]`、単純な`a[i] = value`です。一般のheap object modelでは
-ないため、複数owner、rebind、escape、slice、augmented item assignment、
-`append`、nested list、copy、sortはこのruntime長routeでは未対応です。
+`clear`、`a[i]`、単純な`a[i] = value`、整数の`a[i] op= rhs`です。AugAssign
+はindexを1回だけ評価し、RHSより先に旧値をloadします。`sum(a)`が無い
+programのliteral `+=` / `-=` と2冪の`//=` / `%=`は、1回のrecord走査内で
+直接更新します。一般のheap object modelではないため、複数owner、rebind、
+escape、slice、`append`、nested list、copy、sortはこのruntime長routeでは
+未対応です。
 1回の添字アクセスはlist全体をmobile frameで往復するO(N)処理なので、
 N回のindexed loopがまだO(N²)になる点にも注意してください。範囲外は
 error ABI完成まで暫定的にload 0 / store no-opです。
@@ -177,7 +181,7 @@ single-owner整数list routeはこの64要素上限を使いません。固定�
 - `S = input().split()` / `list(input().split())`
 - `S = list(map(str, input().split()))`
 - `chars = list(input())`, character index load/store, `len(chars)`, `"".join(chars)`
-- restricted runtime長整数listのalias、`len` / `sum` / `clear`、単純なindex load/store
+- restricted runtime長整数listのalias、`len` / `sum` / `clear`、index load/store/AugAssign
 - `str(int_value)`, `int(str_value)`, `str(str_value)`, `int(int_value)`
 - int/string listのindex、代入、`append`, `len`, iteration
 - 一般のruntime list repetition (`[x] * n`, `A * n`, `n * A`)は固定容量。

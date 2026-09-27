@@ -1,16 +1,22 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-22):** PR #18 is merged at
-`35b9a2723b9fcf00338cfbef9213acf8689618f2`. The active
-`dynamic-intlist-index-1` increment adds runtime `a[i]` loads and simple stores
-to the same statically owned input/repetition alias slice. A 48-cell load /
-56-cell store mobile frame retains full int64 indexes, restores tape after every
-access and updates the cached sum on mutation. ABC170 A's ordinary indexed loop
-is 518,124 bytes and passes both official samples plus all five zero positions
-on native Tritium.
-This is O(N) per access, not general object allocation and not yet a scalable
-indexed pass. Read the current section of `P0_IMPLEMENTATION_STATUS.md` for the
-exact scope, source-size limits, tests and reproducible benchmark.
+**Latest checkpoint (2026-09-22):** PR #19 is merged at
+`acff5dee83d88c2af42e6e1c3fa3036e61dc7001`. The active
+`dynamic-intlist-augassign-1` increment extends its restricted single-owner
+runtime list route to all integer `a[i] op= rhs` operators. Index evaluation is
+single-shot and precedes the RHS; aliases and observable cached sums remain
+consistent. When no `sum(a)` is observable, literal `+=` / `-=` and positive
+power-of-two `//=` / `%=` update the packed payload in one mobile scan.
+
+The unchanged ABC100 C and ABC136 C ordinary sources now select runtime-sized
+storage. Their generated programs are 1,068,376 B and 1,724,276 B respectively,
+so neither meets 512 KiB yet. All official samples and 65-element native
+Tritium cases pass; the largest ABC100 sample fell from an initial two-pass
+regression over 500M raw steps to 113,901,836. Every rooted access is still
+O(N), so these loops remain O(N²), not maximum-N acceptance. Read the current
+section of `P0_IMPLEMENTATION_STATUS.md` for exact scope, measurements and the
+reproducible benchmark. The next architectural boundary remains a retained
+physical cursor or batched loop lowering, followed by general object routing.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
