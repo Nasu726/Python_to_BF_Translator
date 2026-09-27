@@ -126,11 +126,16 @@ a.clear()
 `clear`、`a[i]`、単純な`a[i] = value`、整数の`a[i] op= rhs`です。AugAssign
 はindexを1回だけ評価し、RHSより先に旧値をloadします。`sum(a)`が無い
 programのliteral `+=` / `-=` と2冪の`//=` / `%=`は、1回のrecord走査内で
-直接更新します。一般のheap object modelではないため、複数owner、rebind、
+直接更新します。`for i in range(len(a)): a[i] += 3` のような、indexが
+他で使われず、各要素に純粋な定数更新を1回ずつ行うloopは、list全体を
+1回のmobile走査で処理します(`-=`, 正の2冪による`//=`, `%=`も対象)。
+`sum(a)`を観測する場合やloop本体に別の文がある場合は対象外です。
+一般のheap object modelではないため、複数owner、rebind、
 escape、slice、`append`、nested list、copy、sortはこのruntime長routeでは
 未対応です。
-1回の添字アクセスはlist全体をmobile frameで往復するO(N)処理なので、
-N回のindexed loopがまだO(N²)になる点にも注意してください。範囲外は
+上記の限定したloop以外では、1回の添字アクセスがlist全体をmobile frameで
+往復するO(N)処理なので、N回のindexed loopがまだO(N²)になる点にも
+注意してください。範囲外は
 error ABI完成まで暫定的にload 0 / store no-opです。
 
 ## 入力と型変換

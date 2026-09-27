@@ -1,12 +1,47 @@
 # Feature / optimization / ABC acceptance track
 
-Updated 2026-09-22. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
+Updated 2026-09-27. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
 Every feature must eventually have all three: implementation, optimization, and
 validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: dynamic integer-list updates and real ABC loops
+## Current increment: one linear pass for pure literal indexed loops
+
+For the restricted single-owner runtime integer list, the compiler now proves
+`for i in range(len(a)): alias[i] op= constant` can visit each current record
+exactly once. This proof requires the body to consist solely of one augmented
+update, a literal add/sub or positive power-of-two floor-div/mod, no observable
+`sum(a)`, and an induction variable used nowhere else in the module. It also
+rejects a shadowed `range`. The list extent cannot change in this body, and
+the alias shares the same list. Zero-length input is valid. All other loops
+retain the existing general lowering, including the original ABC100 C and
+ABC136 C sources.
+
+The low-level operation carries its 56-cell arithmetic workspace across
+consecutive 10-cell records, then rewinds it to its fixed position. It emits
+constant-size BF source, uses O(N) runtime record work and 10*N+O(1) tape,
+and restores marker/back links and scratch. For the reproducible ordinary
+source in `tools/bench_linear_int_updates.py`, the specialized form emits
+**214,670 B**, below 512 KiB, and takes **1,085,058 / 4,121,801 /
+8,912,966** raw steps at N=8/32/65. The benchmark's fallback variant reads
+`i` after the loop, so it has different output; it emits 536,081 B and takes
+4,726,420 / 23,518,318 / 72,732,263 raw steps. Compare their growth rather
+than interpreting them as equivalent whole-program byte counts. The 65-item
+test checks the actual mutated last element through a subsequent indexed read.
+An optional native Tritium rev `14a729d` run (`-b -e`) with that last-element
+read emits **405,240 B**, checks the mutation at N=65/256/1024, and took
+0.055–0.085 seconds per run locally; startup dominates these small timings.
+This does not establish maximum-N behavior for any ABC problem.
+
+This is a narrowly proven sequential update, not a general physical cursor:
+conditionals, side effects, observable sums, nested indexing and the backward
+ABC136 C pass still use rooted accesses. It does not change the acceptance
+claims or code sizes for either existing ABC fixture below. The next boundary
+is a mobile body with loop control and live scalar values, or a retained
+physical cursor for adjacent dynamic indexes.
+
+## Previous increment: dynamic integer-list updates and real ABC loops
 
 The restricted single-owner runtime integer-list route now supports ordinary
 `a[i] op= rhs` for all existing integer augmented operators: `+=`, `-=`, `*=`,

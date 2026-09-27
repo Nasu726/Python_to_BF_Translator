@@ -303,6 +303,61 @@ print(a[64], len(a), sum(b))
     assert execute(compile_source(source), "").output == "5 65 133\n"
 
 
+@pytest.mark.parametrize("operator,operand", [
+    ("+", 3), ("-", 3), ("//", 4), ("%", 4),
+])
+def test_linear_literal_loop_matches_cpython_and_preserves_aliases(operator, operand):
+    source = f'''
+a = list(map(int, input().split()))
+b = a
+for i in range(len(a)):
+    b[i] {operator}= {operand}
+print(len(a), a[0], b[1], a[2])
+'''
+    code = compile_source(source)
+    assert len(code) < 900_000  # Three unrelated rooted print loads remain.
+    data = "-17 255 -9223372036854775799\n"
+    assert execute(code, data).output == reference(source, data)
+
+
+def test_linear_literal_loop_scales_past_old_capacity_and_handles_empty_list():
+    source = '''
+a = list(map(int, input().split()))
+for i in range(len(a)):
+    a[i] += 3
+print(len(a))
+'''
+    code = compile_source(source)
+    assert len(code) < 250_000
+    for n in (0, 1, 65):
+        data = " ".join(str(i % 5) for i in range(n)) + "\n"
+        result = execute(code, data)
+        assert result.output == reference(source, data)
+        if n == 65:
+            assert result.steps < 10_000_000
+            with_last = source.replace("print(len(a))", "print(a[64], len(a))")
+            assert execute(compile_source(with_last), data).output == reference(
+                with_last, data,
+            )
+
+
+def test_linear_literal_loop_falls_back_if_index_or_sum_is_observable():
+    index_source = '''
+a = [2] * 3
+for i in range(len(a)):
+    a[i] += 3
+print(i, a[0], a[2])
+'''
+    sum_source = '''
+a = [2] * 3
+for i in range(len(a)):
+    a[i] += 3
+print(sum(a), a[2])
+'''
+    for source in (index_source, sum_source):
+        assert execute(compile_source(source), "").output == reference(source, "")
+
+
 def test_dynamic_integer_augmented_index_survives_dynamic_rhs_load():
     source = '''
 a = [10] * 2

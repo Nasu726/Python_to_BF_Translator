@@ -74,6 +74,45 @@ def test_runtime_packed_sequence_persistent_stride_is_ten_cells_per_int64():
     assert seq.item(1).base - seq.item(0).base == 10
 
 
+@pytest.mark.parametrize("operator,operand,values,expected", [
+    ("add", 3, [0, 255, -1, 2**63 - 1], [3, 258, 2, -(2**63) + 2]),
+    ("sub", 3, [0, -2, -(2**63)], [-3, -5, 2**63 - 3]),
+    ("floordiv", 4, [0, -17, 18, -(2**63)], [0, -5, 4, -(2**61)]),
+    ("mod", 4, [0, -17, 18, -(2**63)], [0, 3, 2, 0]),
+])
+def test_update_all_literal_restores_record_layout_and_mobile_frame(
+    operator, operand, values, expected,
+):
+    baseline, seq = _program(base=128)
+    bf = BFEmitter()
+    seq.read_lf_terminated_s64s(bf)
+    seq.update_all_literal(bf, operator, operand)
+    result = run_bf(bf.code(), " ".join(map(str, values)) + "\n",
+                    memory_size=2000, step_limit=500_000_000)
+    original = run_bf(baseline, " ".join(map(str, values)) + "\n",
+                      memory_size=2000, step_limit=500_000_000)
+    assert result.pointer == seq.base
+    for i, value in enumerate(expected):
+        assert _decode_s64(result.memory, seq.item(i)) == value
+    for i in range(len(values) + 1):
+        assert result.memory[seq.marker(i)] == original.memory[seq.marker(i)]
+        assert result.memory[seq.back(i)] == original.memory[seq.back(i)]
+    assert result.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base] == [0] * ACCESS_WORKSPACE_CELLS
+    assert result.memory[seq.marker(len(values)):] == original.memory[seq.marker(len(values)):]
+
+
+def test_update_all_literal_rejects_invalid_frame_or_operator_without_emitting():
+    bf = BFEmitter()
+    with pytest.raises(ValueError, match="precede"):
+        RuntimePackedIntSequence(ACCESS_WORKSPACE_CELLS - 1).update_all_literal(
+            bf, "add", 3,
+        )
+    for operator, operand in (("multiply", 2), ("floordiv", 0), ("mod", 3)):
+        with pytest.raises(ValueError):
+            RuntimePackedIntSequence(128).update_all_literal(bf, operator, operand)
+    assert bf.code() == ""
+
+
 def _raw_word(value):
     return "".join(chr((value >> (8 * i)) & 255) for i in range(8))
 
