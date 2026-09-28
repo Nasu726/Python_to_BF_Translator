@@ -144,6 +144,14 @@ alias以外の文が無いと証明できる場合のみ全体走査にします
 単一ownerのlistでは1回のmobile走査で処理します。符号付き値の2による
 除算とscalarの集計を各record上で行い、元のABC100 Cのソースが
 512 KiB未満のBrainfuckになります。
+同じ限定routeは`for i in range(n - 2, -1, -1)`で隣接要素を
+比較し、条件付きで`a[i] -= 1`し、再比較して失敗時に`break`する
+逆方向のloopにも対応します。直前の`ok = True`、使用されないloop index、
+観測されない`sum(a)`などを証明できる場合のみ、失敗後もrecordを元の配置に
+戻す1回の走査を使います。ABC136 Cの通常のPython解答は193,217 Bで、
+公式sampleとN=100,000の3ケースを検証しています。
+ただし高さ10^9を10万個並べた正規入力はローカル実行で約6秒かかり、
+ABC136 Cの2秒制限を満たすと主張できません。整数入力の高速化が次の課題です。
 `sum(a)`を観測する場合や、上記の条件に合わないloop本体は対象外です。
 一般のheap object modelではないため、複数owner、rebind、
 escape、slice、`append`、nested list、copy、sortはこのruntime長routeでは

@@ -519,6 +519,100 @@ class PythonToBFStream(_Base):
         return (first < last and all(statement in selection.bindings.values()
                                      for statement in body[first + 1:last]))
 
+    def _reverse_adjacent_guard_loop(
+        self, node: ast.For,
+    ) -> tuple[ast.AST, str] | None:
+        """Prove a reverse adjacent signed compare/decrement/early-exit loop."""
+        selection = self.dynamic_int_selection
+        if (selection is None or selection.needs_sum or self._range_shadowed
+                or node.orelse or not isinstance(node.target, ast.Name)
+                or len(node.body) != 2 or not all(
+                    isinstance(item, ast.If) and not item.orelse
+                    for item in node.body
+                ) or node not in self._int_source_tree.body):
+            return None
+        position = self._int_source_tree.body.index(node)
+        if position == 0:
+            return None
+        previous = self._int_source_tree.body[position - 1]
+        if (not isinstance(previous, ast.Assign) or len(previous.targets) != 1
+                or not isinstance(previous.targets[0], ast.Name)
+                or not isinstance(previous.value, ast.Constant)
+                or previous.value.value is not True):
+            return None
+        success_name = previous.targets[0].id
+        first, second = node.body
+        if (len(first.body) != 1 or not isinstance(first.body[0], ast.AugAssign)
+                or len(second.body) != 2 or not isinstance(second.body[0], ast.Assign)
+                or not isinstance(second.body[1], ast.Break)):
+            return None
+        update, failure = first.body[0], second.body[0]
+        if (not isinstance(update.op, ast.Sub)
+                or not isinstance(update.value, ast.Constant)
+                or type(update.value.value) is not int or update.value.value != 1
+                or len(failure.targets) != 1
+                or not isinstance(failure.targets[0], ast.Name)
+                or failure.targets[0].id != success_name
+                or not isinstance(failure.value, ast.Constant)
+                or failure.value.value is not False
+                or success_name == node.target.id):
+            return None
+
+        index_uses: list[ast.Name] = [node.target]
+
+        def item_at(value, offset: int) -> bool:
+            if not isinstance(value, ast.Subscript) or not self._dynamic_int_name(value.value):
+                return False
+            subscript = value.slice
+            if offset:
+                if (not isinstance(subscript, ast.BinOp)
+                        or not isinstance(subscript.op, ast.Add)
+                        or not isinstance(subscript.right, ast.Constant)
+                        or type(subscript.right.value) is not int
+                        or subscript.right.value != 1):
+                    return False
+                subscript = subscript.left
+            if not isinstance(subscript, ast.Name) or subscript.id != node.target.id:
+                return False
+            index_uses.append(subscript)
+            return True
+
+        if not item_at(update.target, 0):
+            return None
+        for condition in (first.test, second.test):
+            if (not isinstance(condition, ast.Compare)
+                    or len(condition.ops) != 1
+                    or not isinstance(condition.ops[0], ast.Gt)
+                    or len(condition.comparators) != 1
+                    or not item_at(condition.left, 0)
+                    or not item_at(condition.comparators[0], 1)):
+                return None
+        names = self._int_name_nodes.get(node.target.id, ())
+        if len(names) != len(index_uses) or any(name not in index_uses for name in names):
+            return None
+
+        iterator = node.iter
+        if (not isinstance(iterator, ast.Call) or iterator.keywords
+                or not isinstance(iterator.func, ast.Name)
+                or iterator.func.id != "range" or len(iterator.args) != 3):
+            return None
+        start = iterator.args[0]
+        if (not isinstance(start, ast.BinOp) or not isinstance(start.op, ast.Sub)
+                or not isinstance(start.right, ast.Constant)
+                or type(start.right.value) is not int or start.right.value != 2):
+            return None
+
+        def minus_one(value) -> bool:
+            return (isinstance(value, ast.UnaryOp)
+                    and isinstance(value.op, ast.USub)
+                    and isinstance(value.operand, ast.Constant)
+                    and type(value.operand.value) is int
+                    and value.operand.value == 1)
+
+        if not minus_one(iterator.args[1]) or not minus_one(iterator.args[2]):
+            return None
+        return start.left, success_name
+
     def _normalized_prefix_count(self, bound: ast.AST) -> PackedI64Ref:
         count = self._packed_int_expr(
             bound, "integer-list loop bound must be an integer",
@@ -595,6 +689,15 @@ class PythonToBFStream(_Base):
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
         if isinstance(node, ast.For):
+            adjacent = self._reverse_adjacent_guard_loop(node)
+            if adjacent is not None:
+                bound, success_name = adjacent
+                extent = self._normalized_prefix_count(bound)
+                self._ensure_provisional_access_base()
+                self.dynamic_int_sequence.decrease_reverse_adjacent(
+                    self.bf, extent, self.variables[success_name].bit(0),
+                )
+                return
             index_bound = self._linear_index_fill_loop(node)
             if index_bound is not False:
                 if index_bound is None:

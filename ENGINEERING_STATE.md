@@ -10,6 +10,28 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-28 — ABC136 C reverse adjacent walk fits 512 KiB
+
+- The compiler recognizes an exact dead-index `range(bound - 2, -1, -1)`
+  loop with two adjacent signed comparisons, conditional `-= 1`, `break`,
+  and a preceding `ok = True`. A 56-cell frame seeks the bounded suffix,
+  tests and optionally decrements the left record at each physical pair,
+  then rewinds even after failure. Alias reads and records survive; live
+  indices, observable sums and other statement shapes fall back.
+- The unchanged official ABC136 C source now emits 193,217 B (331,071 B below
+  512 KiB), down from 1,724,276 B. All four official samples match CPython.
+  Portable Tritium rev `14a729d` also checks N=65/256/1024 and two distinct
+  N=100,000 inputs: all ones (Yes, 1.16 s) and a left-side failure (No,
+  1.19 s). The all-10^9-height valid case instead needs 6.31 s, exceeding
+  the official 2-second time limit locally. An input-only diagnostic on that
+  case takes 4.37 s, implicating decimal token parsing as the major cost;
+  improve input and record comparisons before claiming judge readiness.
+- This pass does not implement general reverse loops or P0's runtime object
+  handles, nested containers, copying or stable sorting. Signed 64-bit ABI
+  and provisional out-of-range list behavior still apply.
+
+---
+
 ## 2026-09-28 — P0 sequential index stores use one mobile record walk
 
 - `for i in range(n): a[i] = i` now carries a packed index with the

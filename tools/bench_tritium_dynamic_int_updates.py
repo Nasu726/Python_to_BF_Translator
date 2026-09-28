@@ -4,10 +4,13 @@ Build rdebath/Brainfuck revision 14a729d, then:
 python tools/bench_tritium_dynamic_int_updates.py \
     --tritium /path/to/tritium/bfi.out
 
-ABC100 C's ordinary source now fits 512 KiB via record-local halving/tally;
-ABC136 C still exceeds the limit. The benchmark checks native
-correctness/runtime separately; local timing is not an AtCoder host guarantee
-and does not establish either problem's official maximum N.
+The unchanged ABC100 C and ABC136 C sources both fit 512 KiB via mobile
+record walks. The benchmark checks native correctness/runtime separately;
+local timing is not an AtCoder host guarantee. Pass --large to exercise
+ABC136 C at its official maximum N=100000 (rather than in every smoke run).
+The large run also profiles the same list-input frontend without the loop to
+separate decimal-token parsing from reverse traversal costs. The official
+time limit is 2 seconds; passing output here is not a judge-time claim.
 """
 
 import argparse
@@ -50,6 +53,13 @@ else:
 '''
 
 
+INTLIST_INPUT_SOURCE = '''
+n = int(input())
+h = list(map(int, input().split()))
+print(len(h))
+'''
+
+
 def _abc100_expected(values: list[int]) -> str:
     answer = 0
     for value in values:
@@ -69,7 +79,7 @@ def _abc136_expected(values: list[int]) -> str:
     return "Yes\n"
 
 
-def _cases():
+def _cases(*, large: bool = False):
     abc100 = [
         ("sample1", [5, 2, 4]),
         ("sample2", [631, 577, 243, 199]),
@@ -85,8 +95,16 @@ def _cases():
         ("sample3", [1, 2, 3, 4, 5]),
         ("sample4", [1_000_000_000]),
         ("beyond64", list(range(65))),
+        ("n256", list(range(256))),
+        ("n1024", list(range(1024))),
     ]
-    return [
+    if large:
+        abc136.extend([
+            ("n100000_equal", [1] * 100_000),
+            ("n100000_failure", [3, 1] + [1] * 99_998),
+            ("n100000_upper_height", [1_000_000_000] * 100_000),
+        ])
+    programs = [
         ("abc100", ABC100_C_SOURCE, [
             (name, f"{len(values)}\n" + " ".join(map(str, values)) + "\n",
              _abc100_expected(values))
@@ -98,6 +116,13 @@ def _cases():
             for name, values in abc136
         ]),
     ]
+    if large:
+        programs.append(("input_only", INTLIST_INPUT_SOURCE, [
+            (name, f"{len(values)}\n" + " ".join(map(str, values)) + "\n",
+             f"{len(values)}\n")
+            for name, values in abc136[-3:]
+        ]))
+    return programs
 
 
 def main() -> None:
@@ -105,13 +130,14 @@ def main() -> None:
     parser.add_argument("--tritium", required=True)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=30)
+    parser.add_argument("--large", action="store_true")
     args = parser.parse_args()
     if args.trials < 1 or args.timeout <= 0:
         parser.error("trials and timeout must be positive")
 
     limit = 512 * 1024
     with tempfile.TemporaryDirectory(prefix="pybf-dynamic-int-update-") as directory:
-        for problem, source, cases in _cases():
+        for problem, source, cases in _cases(large=args.large):
             code = compile_source(source)
             print(
                 f"problem={problem} source_bytes={len(code)} "

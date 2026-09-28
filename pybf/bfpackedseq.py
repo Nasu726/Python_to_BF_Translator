@@ -853,6 +853,68 @@ def _halve_and_count_prefix_walk_code() -> str:
             + "[" + rewind.code() + "]" + "<" * BACK)
 
 
+@lru_cache(maxsize=1)
+def _reverse_adjacent_decrease_walk_code() -> str:
+    """Position at a bounded suffix, then compare adjacent records backwards.
+
+    The frame initially precedes record zero. After the forward seek it sits
+    between h[i] and h[i+1]. The reverse pass compares these two *physical*
+    records before each inverse frame swap, restoring every record on return.
+    A failed pair suppresses further updates but never skips the rewind.
+    """
+    width = ACCESS_WORKSPACE_CELLS
+    prepare = BFEmitter()
+    prepare.ptr = width + MARKER
+    _arm_prefix_hit(prepare, 0)
+    prepare.move(_ACCESS_FOUND)
+
+    forward = BFEmitter()
+    forward.ptr = _ACCESS_FOUND
+    forward.clear(_ACCESS_FOUND)
+    _decrement_repeat_count(
+        forward, count_base=_ACCESS_INDEX, scratch_base=_ACCESS_SCRATCH,
+    )
+    _rotate_mobile_frame(
+        forward, forward=True, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    _arm_prefix_hit(forward, RECORD_STRIDE)
+    forward.move(RECORD_STRIDE + _ACCESS_FOUND)
+
+    reverse = BFEmitter()
+    # Coordinates start at the left record, then [frame][right record].
+    reverse.ptr = RECORD_STRIDE + width + BACK
+    frame = RECORD_STRIDE
+    status = frame + _ACCESS_VALUE
+    found = frame + _ACCESS_FOUND
+    gate = frame + _ACCESS_GATE
+    ops = PackedI64Ops(reverse, frame + _ACCESS_SCRATCH)
+    ops._copy_cell(status, gate, frame + _ACCESS_HELPER)
+    reverse.begin_while(gate)
+    reverse.clear(gate)
+    left = PackedI64Ref(PAYLOAD)
+    right = PackedI64Ref(frame + width + PAYLOAD)
+    ops.signed_lt(found, right, left)  # left > right
+    reverse.begin_while(found)
+    reverse.clear(found)
+    _decrement_repeat_count(
+        reverse, count_base=PAYLOAD, scratch_base=frame + _ACCESS_SCRATCH,
+    )
+    reverse.end_while(found)
+    ops.signed_lt(found, right, left)
+    reverse.begin_while(found)
+    reverse.clear(found)
+    reverse.clear(status)
+    reverse.end_while(found)
+    reverse.end_while(gate)
+    _rotate_mobile_frame(
+        reverse, forward=False, width=width, saved_record=_ACCESS_SAVED_RECORD,
+    )
+    reverse.move(width + BACK)
+    return (prepare.code() + "[" + forward.code() + "]"
+            + ">" * (width + BACK - _ACCESS_FOUND)
+            + "[" + reverse.code() + "]" + "<" * BACK)
+
+
 def _decrement_repeat_count(bf: BFEmitter, *, count_base=8, scratch_base=16) -> None:
     """Decrement a nonzero u64 with bounded byte work and clean scratch."""
     core = PackedU32Core(bf, scratch_base)
@@ -1299,6 +1361,47 @@ class RuntimePackedIntSequence:
         bf.begin_while(frame + _ACCESS_FOUND)
         bf.end_while(frame + _ACCESS_FOUND)
         ops.copy(result, PackedI64Ref(frame + _ACCESS_VALUE))
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def decrease_reverse_adjacent(
+        self, bf: BFEmitter, extent: PackedI64Ref, success: int,
+    ) -> None:
+        """Reverse adjacent signed comparisons, one possible decrement each.
+
+        This is the data operation for a proved loop with index range
+        ``range(extent-2, -1, -1)``. Extent must be nonnegative; missing items
+        read as zero under the current restricted list ABI. The result flag is
+        one iff all comparisons passed; records and frame position are restored.
+        """
+        self._check_layout()
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if (frame < 0 or extent.base < 0 or extent.base + extent.cells > frame
+                or success < 0 or success >= frame):
+            raise ValueError("reverse comparison operands must precede the frame")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+        ops.copy(PackedI64Ref(frame + _ACCESS_INDEX), extent)
+        # N <= 1 has no adjacent pair. Otherwise seek to record N-1 or the
+        # sentinel, whichever is encountered first.
+        _arm_repeat_marker(bf, marker=frame + _ACCESS_FOUND,
+                           count_base=frame + _ACCESS_INDEX,
+                           scratch_base=frame + _ACCESS_SCRATCH)
+        bf.begin_while(frame + _ACCESS_FOUND)
+        bf.clear(frame + _ACCESS_FOUND)
+        _decrement_repeat_count(
+            bf, count_base=frame + _ACCESS_INDEX,
+            scratch_base=frame + _ACCESS_SCRATCH,
+        )
+        bf.end_while(frame + _ACCESS_FOUND)
+        bf.set_const(frame + _ACCESS_VALUE, 1)
+        bf.move(self.base)
+        bf.emit(_reverse_adjacent_decrease_walk_code())
+        bf.ptr = self.base
+        bf.clear(success)
+        _move_bytes(bf, frame + _ACCESS_VALUE, success)
         for cell in range(frame, self.base):
             bf.clear(cell)
         bf.move(self.base)
