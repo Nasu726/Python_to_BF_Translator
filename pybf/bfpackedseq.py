@@ -95,6 +95,11 @@ CONT = RECORD_STRIDE + 10
 HAS_TOKEN = RECORD_STRIDE + 11
 GATE = RECORD_STRIDE + 12
 LINE_TMP = RECORD_STRIDE + 13
+FAST_DIGITS_LEFT = RECORD_STRIDE + 14
+FAST_DIGIT_GATE = RECORD_STRIDE + 15
+FULL_DIGIT_GATE = RECORD_STRIDE + 16
+EARLY_DIGITS_LEFT = RECORD_STRIDE + 17
+EARLY_DIGIT_GATE = RECORD_STRIDE + 18
 
 # The base-4 words are temporary rolling parse state.  They overlap records
 # that do not exist yet and are zeroed before the next record is materialized.
@@ -218,15 +223,17 @@ def _flag_not(
     r.emit("]")
 
 
-@lru_cache(maxsize=1)
-def _decimal_digit_kernel() -> str:
+@lru_cache(maxsize=3)
+def _decimal_digit_kernel(lanes: int = 32) -> str:
     """Start/end at relative cell zero; CH contains numeric digit 0..9."""
     bf = BFEmitter()
     decimal = Base4DecimalCore(bf)
-    decimal.mul10_add_digit_inplace(
+    decimal.mul10_add_digit_one_pass(
         Base4I64Ref(ACC_BASE),
         Base4I64Ref(DECIMAL_SCRATCH_BASE),
+        Base4I64Ref(NEG_RESULT_BASE),
         CH,
+        lanes=lanes,
     )
     bf.move(0)
     return bf.code()
@@ -318,16 +325,49 @@ def _read_record_body() -> str:
     r.move(LINE_TMP)
     r.emit("]")
     _flag_not(r, ACTIVE, DELIMITER)
+    # Any first nine decimal digits fit below 10**9 < 2**32, even if the
+    # token later contains more digits. The first four fit in 16 bits; the
+    # tenth and later use full int64.
+    r.set_const(FAST_DIGITS_LEFT, 9)
+    r.set_const(EARLY_DIGITS_LEFT, 4)
 
     # One source loop handles every decimal digit. The expensive arithmetic is
-    # a fixed 32-lane radix-4 kernel, never a loop proportional to byte value.
+    # bounded by 8, 16 or 32 radix-4 lanes, never by an arbitrary byte value.
     r.move(ACTIVE)
     r.emit("[")
     r.add(ACTIVE, -1)
     r.add(CH, -ord("0"))
+    _flag_not(r, FULL_DIGIT_GATE, FAST_DIGITS_LEFT)
+    r.copy_preserved(FAST_DIGITS_LEFT, FAST_DIGIT_GATE, RESTORE)
+    r.copy_preserved(EARLY_DIGITS_LEFT, EARLY_DIGIT_GATE, RESTORE)
+    r.move(EARLY_DIGIT_GATE)
+    r.emit("[")
+    r.clear(EARLY_DIGIT_GATE)
+    r.clear(FAST_DIGIT_GATE)
+    r.add(EARLY_DIGITS_LEFT, -1)
+    r.add(FAST_DIGITS_LEFT, -1)
+    r.move(0)
+    r.emit(_decimal_digit_kernel(8))
+    r.pos = 0
+    r.move(EARLY_DIGIT_GATE)
+    r.emit("]")
+    r.move(FAST_DIGIT_GATE)
+    r.emit("[")
+    r.clear(FAST_DIGIT_GATE)
+    r.add(FAST_DIGITS_LEFT, -1)
+    r.move(0)
+    r.emit(_decimal_digit_kernel(16))
+    r.pos = 0
+    r.move(FAST_DIGIT_GATE)
+    r.emit("]")
+    r.move(FULL_DIGIT_GATE)
+    r.emit("[")
+    r.clear(FULL_DIGIT_GATE)
     r.move(0)
     r.emit(_decimal_digit_kernel())
     r.pos = 0
+    r.move(FULL_DIGIT_GATE)
+    r.emit("]")
 
     r.move(CH)
     r.emit(",")

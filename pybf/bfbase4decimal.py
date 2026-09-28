@@ -15,6 +15,11 @@ as two fixed 32-lane passes:
 The decimal digit is seeded as the radix carry of lane zero, so no third full
 word-add pass is required.  All per-lane totals are bounded by 12; there is no
 loop proportional to an arbitrary byte value.
+
+The runtime integer-list reader additionally uses a one-pass variant. It
+consumes each old radix-4 digit directly, with two scratch cells per lane;
+that variant bounds per-lane totals by 15 and may visit fewer than 32 lanes
+when the decimal digit count proves the result fits in the lower lanes.
 """
 
 from __future__ import annotations
@@ -152,6 +157,68 @@ class Base4DecimalCore:
         # Modulo-2**64 overflow is intentionally discarded.
         bf.clear(dst.marker(DIGITS))
         bf.clear(dst.value(DIGITS))
+
+    def mul10_add_digit_one_pass(
+        self,
+        dst: Base4I64Ref,
+        scratch: Base4I64Ref,
+        doubled: Base4I64Ref,
+        digit_cell: int,
+        *,
+        lanes: int = DIGITS,
+    ) -> None:
+        """Horner step in one radix-4 pass, modulo the selected lane width.
+
+        For old digit ``x`` and incoming carry ``c <= 9``, write
+        ``t = 2*x+c <= 15``; the new digit is ``t % 4`` and the next carry
+        is ``t // 4 + 2*x <= 9``. Both scratch words are zero on return. If
+        ``lanes < 32``, the caller proves the input/output fit in those lanes
+        and the high digits are zero before this operation.
+        """
+        words = (dst, scratch, doubled)
+        if any(a.base < b.base + b.cells and b.base < a.base + a.cells
+               for index, a in enumerate(words) for b in words[index + 1:]):
+            raise ValueError("decimal accumulation needs three distinct words")
+        if not 1 <= lanes <= DIGITS:
+            raise ValueError("decimal lane count must be in range(1, 32)")
+        if any(ref.base <= digit_cell < ref.base + ref.cells
+               for ref in (dst, scratch, doubled)):
+            raise ValueError("digit cell must not alias decimal words")
+
+        bf = self.bf
+        self._move_digit_to_initial_carry(digit_cell, dst)
+        for lane in range(lanes):
+            bf.set_const(scratch.marker(lane), 1)
+        bf.clear(scratch.marker(lanes))
+
+        r = _RelativeBuilder()
+        marker = 0
+        total = 1
+        old = dst.base - scratch.base + 1
+        carry_in = old - 1
+        carry_out = carry_in + STRIDE
+        twice = doubled.base - scratch.base + 1
+        r.clear(marker)
+        r.clear(total)
+        r.clear(twice)
+        r.move(old)
+        r.emit("[")
+        r.add(old, -1)
+        r.add(total, 2)
+        r.add(twice, 2)
+        r.move(old)
+        r.emit("]")
+        r.transfer(carry_in, total)
+        _map_total_wide(r, total, old, carry_out, max_total=15)
+        r.transfer(twice, carry_out)
+        r.move(STRIDE)
+
+        bf.move(scratch.marker(0))
+        bf.emit("[" + r.code() + "]")
+        bf.ptr = scratch.marker(lanes)
+        bf.clear(scratch.marker(lanes))
+        bf.clear(dst.marker(lanes))
+        bf.clear(dst.value(lanes))
 
 
 __all__ = ["Base4DecimalCore"]

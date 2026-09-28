@@ -1,20 +1,25 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-28):** PR #24 merged at
-`3e17fd5326ebf3dfebf3240c63998a698ee7fcb6` after all four test shards
-passed. The current reverse-adjacent increment turns the unchanged ABC136 C
-source into a 193,217-byte BF program, 331,071 bytes below 512 KiB (previously
-1,724,276 bytes). Four official samples match CPython; portable Tritium rev
-`14a729d` also returns the expected result on N=65/256/1024 and both
-N=100,000 equal-height and early-failure cases (1.16/1.19 seconds locally).
-This is a source-shape guarded mobile record walk, not a new general loop
-interpreter or an AtCoder judge-time guarantee. The valid maximum-height
-N=100,000 case (every value 10^9) produces Yes but takes **6.31 seconds**
-locally against the official **2-second** limit; a matched input-only source
-takes **4.37 seconds**, so optimizing decimal list-input parsing is the next
-ABC136 performance task. The next P0 architecture boundaries are
-heap object routing, list copying and stable sort; continue to check real ABC
-solutions after each relevant feature.
+**Latest checkpoint (2026-09-28):** PR #25 merged at
+`153e90ec1141a106be0dcf5066e8f13d96347518` with four green test shards.
+The current decimal-input increment replaces the runtime-sized integer-list
+reader's two-pass decimal digit update with one radix-4 lane pass. Its first
+four digits need only eight lanes, the next five need sixteen, and later
+digits use all 32; these bounds follow from digit count, not ABC constraints.
+The original reader for other frontends remains intact. The unchanged ABC136
+C source is 196,521 B, 327,767 B under 512 KiB; ABC100 C is 360,085 B.
+The all-10^9 N=100,000 ABC136 C valid case produces Yes in **5.61/5.74
+seconds** in a local two-trial run, down from ~6.31 s at the previous
+checkpoint; the input-only comparison takes **3.87/4.33 seconds**. These
+noisy results still exceed the official 2-second limit. Do not claim judge
+acceptance. Continue accelerating decimal input and record comparisons while
+advancing P0 object handles, copying and stable sorting.
+
+The preceding reverse-adjacent increment made the unchanged ABC136 C source
+193,217 B (previously 1,724,276 B), with four official samples matching
+CPython and portable Tritium rev `14a729d` returning the expected result at
+N=65/256/1024 and three distinct N=100,000 cases. This is a source-shape
+guarded mobile record walk, not a general loop interpreter.
 
 The previous index-fill increment addressed the *assignment portion*
 of `IMPLEMENTATION_PLAN.md`'s minimum example: `n=int(input());a=[0]*n;
