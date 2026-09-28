@@ -615,3 +615,46 @@ def test_runtime_packed_sequence_access_rejects_overlapping_workspace():
     with pytest.raises(ValueError, match="hit flag must not overlap"):
         seq.load_value(bf, PackedI64Ref(0), PackedI64Ref(8), found=8)
     assert bf.code() == ""
+
+
+@pytest.mark.parametrize("extent,values,expected,success", [
+    (5, [1, 2, 1, 1, 3], [1, 1, 1, 1, 3], 1),
+    (4, [1, 3, 2, 1], [1, 2, 1, 1], 0),
+    (4, [3, 2], [3, 1], 0),
+    (3, [7, 8, 9, 10], [7, 8, 9, 10], 1),
+    (1, [5, 4], [5, 4], 1),
+    (0, [5, 4], [5, 4], 1),
+    (5, [], [], 1),
+    (2, [-2, -3], [-3, -3], 1),
+    (2, [(1 << 63) - 1, -(1 << 63)], [(1 << 63) - 2, -(1 << 63)], 0),
+    (2, [-(1 << 63), -1], [-(1 << 63), -1], 1),
+    (1 << 32, [-1, -2], [-2, -2], 1),
+])
+def test_reverse_adjacent_walk_restores_records_and_skips_after_failure(
+    extent, values, expected, success,
+):
+    from bfpacked64 import PackedI64Ref
+
+    bf = BFEmitter()
+    seq = RuntimePackedIntSequence(128)
+    for index, value in enumerate(values):
+        bf.set_const(seq.marker(index), 1)
+        bf.set_const(seq.back(index), int(index > 0))
+        for byte in range(8):
+            bf.set_const(seq.item(index).byte(byte), (value >> (8 * byte)) & 255)
+    bf.set_const(seq.back(len(values)), int(bool(values)))
+    for byte in range(8):
+        bf.set_const(byte, (extent >> (8 * byte)) & 255)
+    bf.set_const(8, 99)
+    seq.decrease_reverse_adjacent(bf, PackedI64Ref(0), 8)
+    execution = run_bf(bf.code(), memory_size=3_000, step_limit=500_000_000)
+    assert execution.memory[8] == success
+    assert [_decode_s64(execution.memory, seq.item(i))
+            for i in range(len(values))] == expected
+    for index in range(len(values)):
+        assert execution.memory[seq.marker(index)] == 1
+        assert execution.memory[seq.back(index)] == int(index > 0)
+    assert execution.memory[seq.marker(len(values))] == 0
+    assert execution.memory[seq.back(len(values))] == int(bool(values))
+    assert not any(execution.memory[seq.base - ACCESS_WORKSPACE_CELLS:seq.base])
+    assert execution.pointer == seq.base

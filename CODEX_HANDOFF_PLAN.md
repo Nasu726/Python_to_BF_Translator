@@ -1,8 +1,22 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-28):** PR #23 merged at
-`46a21d318d356f8c679ef196cd4881133ae7d6f0` after all four test shards
-passed. The current index-fill increment addresses the *assignment portion*
+**Latest checkpoint (2026-09-28):** PR #24 merged at
+`3e17fd5326ebf3dfebf3240c63998a698ee7fcb6` after all four test shards
+passed. The current reverse-adjacent increment turns the unchanged ABC136 C
+source into a 193,217-byte BF program, 331,071 bytes below 512 KiB (previously
+1,724,276 bytes). Four official samples match CPython; portable Tritium rev
+`14a729d` also returns the expected result on N=65/256/1024 and both
+N=100,000 equal-height and early-failure cases (1.16/1.19 seconds locally).
+This is a source-shape guarded mobile record walk, not a new general loop
+interpreter or an AtCoder judge-time guarantee. The valid maximum-height
+N=100,000 case (every value 10^9) produces Yes but takes **6.31 seconds**
+locally against the official **2-second** limit; a matched input-only source
+takes **4.37 seconds**, so optimizing decimal list-input parsing is the next
+ABC136 performance task. The next P0 architecture boundaries are
+heap object routing, list copying and stable sort; continue to check real ABC
+solutions after each relevant feature.
+
+The previous index-fill increment addressed the *assignment portion*
 of `IMPLEMENTATION_PLAN.md`'s minimum example: `n=int(input());a=[0]*n;
 b=a;for i in range(n):a[i]=i`. The single-owner route now writes zero-based
 indices into each record during one mobile traversal. The shorter whole-list
@@ -20,10 +34,9 @@ expected last element even at N=200,000. This does not implement the
 
 The previous ordinary ABC100 C loop remains below the limit after the shared
 64-bit carry simplification: **356,781 B**, correct on official samples and
-N=65/1024 native cases. ABC136 C still produces 1,724,276 B with O(N²)
-rooted adjacent accesses. See `P0_IMPLEMENTATION_STATUS.md` for exact scope
-and reproducible benchmarks. The next major boundaries are list sorting,
-reverse adjacent comparisons / early exit, and general object routing.
+N=65/1024 native cases. The previous ABC136 C rooted pass emitted 1,724,276 B
+and was quadratic; the new pass above removes that bottleneck. See
+`P0_IMPLEMENTATION_STATUS.md` for exact scope and reproducible benchmarks.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`

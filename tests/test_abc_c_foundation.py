@@ -1,4 +1,5 @@
 import ast
+import random
 import subprocess
 import sys
 
@@ -87,9 +88,8 @@ else:
 
 def test_abc136_c_build_stairs_official_samples_against_cpython():
     # https://atcoder.jp/contests/abc136/tasks/abc136_c
-    # The unchanged ordinary source now selects runtime-sized integer storage.
-    # Each random access is still O(N), so this proves samples and removes the
-    # former 64-item capacity bound; it is not an official N<=100000 claim.
+    # The unchanged source uses a guarded reverse adjacent record pass. These
+    # samples and the 512 KiB gate do not alone prove judge-scale runtime.
     selection = select_dynamic_int_list(ast.parse(ABC136_C_SOURCE))
     assert selection is not None
     assert selection.needs_load and selection.needs_store
@@ -98,7 +98,7 @@ def test_abc136_c_build_stairs_official_samples_against_cpython():
     assert plan.dynamic_intlist_base - ACCESS_WORKSPACE_CELLS > plan.temp_peak
     assert set(raw) <= set("><+-.,[]")
     code = compile_public_source(ABC136_C_SOURCE)
-    assert len(code) <= 1_800_000  # 512 KiB remains the final source-size target.
+    assert len(code) <= 512 * 1024
     assert set(code) <= set("><+-.,[]")
     samples = [
         ("5\n1 2 1 1 3\n", "Yes\n"),
@@ -112,6 +112,21 @@ def test_abc136_c_build_stairs_official_samples_against_cpython():
         assert reference == expected
         result = run_bf(code, data, memory_size=120_000, step_limit=500_000_000)
         assert result.output == reference
+
+
+def test_abc136_c_build_stairs_diverse_signed_inputs_against_cpython():
+    code = compile_public_source(ABC136_C_SOURCE)
+    generator = random.Random(136)
+    for length in range(2, 10):
+        for _ in range(2):
+            heights = [generator.randrange(-6, 7) for _ in range(length)]
+            data = f"{length}\n" + " ".join(map(str, heights)) + "\n"
+            reference = subprocess.run(
+                [sys.executable, "-c", ABC136_C_SOURCE], input=data,
+                text=True, capture_output=True, check=True, timeout=5,
+            ).stdout
+            assert run_bf(code, data, memory_size=120_000,
+                          step_limit=500_000_000).output == reference
 
 
 @pytest.mark.parametrize("op,expected", [("+", 13), ("-", 7), ("*", 30)])

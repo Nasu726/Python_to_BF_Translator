@@ -510,6 +510,62 @@ for i in range(len(a)):
         assert execute(compile_source(source), "").output == reference(source, "")
 
 
+@pytest.mark.parametrize("extent,data", [
+    ("n", "4\n100 3 2 1\n"),
+    ("n", "5\n1 2 1 1 3\n"),
+    ("len(h)", "4\n100 3 2 1\n"),
+    ("len(h)", "1\n42\n"),
+    ("n", "0\n\n"),
+    ("n", "-1\n4 2\n"),
+    ("n", "3\n1 2 3 10\n"),
+])
+def test_reverse_adjacent_decrease_preserves_alias_and_early_exit(extent, data):
+    source = f'''
+n = int(input())
+h = list(map(int, input().split()))
+alias = h
+ok = True
+for i in range({extent} - 2, -1, -1):
+    if alias[i] > h[i + 1]:
+        alias[i] -= 1
+    if h[i] > alias[i + 1]:
+        ok = False
+        break
+if len(h):
+    if ok:
+        print("Yes", alias[0], h[-1])
+    else:
+        print("No", alias[0], h[-1])
+else:
+    if ok:
+        print("Yes", len(h))
+    else:
+        print("No", len(h))
+'''
+    code = compile_source(source)
+    assert execute(code, data).output == reference(source, data)
+
+
+@pytest.mark.parametrize("tail", [
+    "print(i, h[0])",
+    "print(sum(h), h[0])",
+])
+def test_reverse_adjacent_decrease_falls_back_when_index_or_sum_is_live(tail):
+    source = f'''
+n = 3
+h = [1] * 3
+ok = True
+for i in range(n - 2, -1, -1):
+    if h[i] > h[i + 1]:
+        h[i] -= 1
+    if h[i] > h[i + 1]:
+        ok = False
+        break
+{tail}
+'''
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
 @pytest.mark.parametrize("operator,operand", [
     ("+", 3), ("-", 3), ("//", 4), ("%", 4),
 ])

@@ -6,7 +6,37 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: linear index fill for the P0 repeat/alias program
+## Current increment: reverse adjacent signed comparisons (ABC136 C)
+
+The unchanged [ABC136 C source](https://atcoder.jp/contests/abc136/tasks/abc136_c)
+in `tests/test_abc_c_foundation.py` now emits **193,217 B**, **331,071 B below
+512 KiB**, down from 1,724,276 B. Four official samples match CPython. One
+mobile reverse pass positions the frame between adjacent records, compares
+signed 64-bit values, optionally decrements the left record, checks again,
+and suppresses subsequent mutations after failure while still rewinding and
+restoring the physical list. The compiler recognizes this specific *source
+shape*, not an AtCoder problem name: an unshadowed descending `range` with
+two exact adjacent tests, `-= 1`, `break`, preceding `ok = True`, a dead
+index and no observable `sum(a)`. Other loops retain the existing lowering.
+
+`python tools/bench_tritium_dynamic_int_updates.py --tritium /path/to/bfi
+--trials 1 --large` verifies the unchanged source at N=65/256/1024 and
+N=100,000 on portable Tritium rev `14a729d`. Equal heights return Yes in
+1.16 seconds; an early-failing left pair returns No in 1.19 seconds on this
+machine. Critically, an official-constraint upper-height input with
+100,000 copies of 10^9 returns Yes but takes **6.31 seconds**, beyond the
+problem's **2-second** limit even on this machine. The `--large` diagnostic's
+input-only version takes **4.37 seconds** for those values; the decimal token
+parser contributes most of the time, with the reverse pass also costing time.
+These are separate local runs, not a proof that subtraction gives an exact
+operation-by-operation profile. No ABC136 C judge acceptance is claimed.
+Correctness at different runtime bounds, alias
+mutations, signed extremal record values and compiler fallback is covered by
+focused tests. The restricted int-list ABI still uses zero reads/no-op stores
+out of range and fixed signed-int64 arithmetic; P0's general heap handles,
+copies, nesting and stable sorting remain open.
+
+## Previous increment: linear index fill for the P0 repeat/alias program
 
 The unchanged first half of `IMPLEMENTATION_PLAN.md`'s P0 example now takes
 one mobile pass:
@@ -44,7 +74,8 @@ This does **not** implement `a.sort()` or `print(b)` for arbitrary runtime
 lists; the full example and general heap/reference requirements remain open.
 The ABC100 C regression still passes official samples after the shared 64-bit
 carry code was shortened: it now emits **356,781 B**, with raw steps
-**1,032,857 / 2,257,631 / 5,741,459**. ABC136 C remains above 512 KiB.
+**1,032,857 / 2,257,631 / 5,741,459**. The ABC136 C size gap was closed
+by the subsequent reverse adjacent walk documented above.
 
 ## Previous increment: record-local even/halve/tally loop (ABC100 C)
 
@@ -74,10 +105,10 @@ negative values including INT64_MIN, empty input, short bounds, and fallback.
 The interpreter remains 8-bit wrapping standard Brainfuck and the program's
 BF source length does not depend on N.
 
-ABC136 C still emits **1,724,276 B**, uses repeated rooted accesses and has
-no large-N acceptance claim. The runtime heap/object features in
-`IMPLEMENTATION_PLAN.md` also remain outstanding. Next improve reverse
-adjacent reads, observable sums, and general dynamic list operations.
+At this earlier checkpoint ABC136 C emitted **1,724,276 B** and used rooted
+accesses; its later reverse pass is documented above. The runtime heap/object
+features in `IMPLEMENTATION_PLAN.md` remain outstanding. Next improve
+observable sums and general dynamic list operations.
 
 ## Previous increment: runtime-bounded prefix updates
 
@@ -112,8 +143,7 @@ cost to the new prefix traversal.
 
 At this earlier checkpoint ABC100 C's inner `while` and answer accumulation,
 and ABC136 C's backward adjacent compare and `break`, prevented the
-pure-literal loop lowering. ABC100 C now has the separate guarded lowering
-above; ABC136 C remains on the rooted route.
+pure-literal loop lowering. Both have subsequent guarded mobile passes above.
 
 ## Previous increment: one linear pass for pure literal indexed loops
 
@@ -124,8 +154,8 @@ update, a literal add/sub or positive power-of-two floor-div/mod, no observable
 `sum(a)`, and an induction variable used nowhere else in the module. It also
 rejects a shadowed `range`. The list extent cannot change in this body, and
 the alias shares the same list. Zero-length input is valid. All other loops
-retain the existing general lowering. ABC100 C was subsequently handled by
-the guarded nested loop above; ABC136 C still uses the general route.
+retain the existing general lowering. ABC100 C and ABC136 C were subsequently
+handled by their own guarded loop shapes above.
 
 The low-level operation carries its 56-cell arithmetic workspace across
 consecutive 10-cell records, then rewinds it to its fixed position. It emits
@@ -144,11 +174,10 @@ read emits **405,240 B**, checks the mutation at N=65/256/1024, and took
 This does not establish maximum-N behavior for any ABC problem.
 
 This is a narrowly proven sequential update, not a general physical cursor:
-conditionals, side effects, observable sums, nested indexing and the backward
-ABC136 C pass still use rooted accesses. It does not change the acceptance
-claims or code sizes for either existing ABC fixture below. The next boundary
-is a mobile body with loop control and live scalar values, or a retained
-physical cursor for adjacent dynamic indexes.
+At this earlier checkpoint conditionals, side effects, observable sums,
+nested indexing and the backward ABC136 C pass still used rooted accesses.
+The later guarded passes above added mobile loop control for two specific
+shapes; arbitrary indexed loops still need locality-preserving routing.
 
 ## Previous increment: dynamic integer-list updates and real ABC loops
 
@@ -574,15 +603,14 @@ backward, in-place greedy Python solution through the public API and compares
 all four official samples with both CPython and expected output.
 
 At that checkpoint this exercised the **fixed-capacity** list frontend. The
-unchanged source now selects the restricted runtime-sized route and is tested
-beyond 64 elements, as documented in the current section. It still does NOT
-establish scalable maximum-N ABC136 support.
+unchanged source now selects the restricted runtime-sized route; the current
+reverse pass above checks N=100,000 locally. This does not establish judge
+time limits or the complete P0 object model.
 
 The historical fixed-route fixture emitted **5,746,608 BF bytes**, above
 512 KiB. Sample raw steps were 37,136,657 / 24,597,246 / 34,056,141 /
-123,241,308. Current dynamic-route measurements are listed above. Both sets
-document remaining optimization work; passing samples is not a contest-ready
-claim.
+123,241,308. Current dynamic-route measurements are listed above. The old
+numbers document the previous bottleneck, not current source-size readiness.
 
 Local validation: 49 tests covering the ABC fixture, evaluation order,
 control flow, legacy list frontend and heap/handle/packed primitives passed;
@@ -610,12 +638,12 @@ The final error-state contract remains required, not waived.
 
 ## Next implementation boundary
 
-Design a locality-preserving physical cursor or batched indexed-loop lowering
-so a sequential pass does not restart a full scan from the list base for every
-element. Validate that boundary with the existing ABC136 C ordinary source,
-beyond-old-capacity inputs and a scaling/Tritium benchmark. Then join the proven
-single-owner semantics to general heap object routing and proceed through
-append, nested lists, copying and sorting in the plan's P0 order. Keep separate
+The ABC136 C reverse pass now validates one additional bounded batched
+indexed-loop shape at N=100,000. General indexed loops still need reusable
+locality-preserving routing; do not infer a universal cursor from two guarded
+patterns. Join the proven single-owner semantics to general heap object
+routing and proceed through append, nested lists, copying and sorting in the
+plan's P0 order. Keep separate
 ledger entries for:
 
 - semantics (CPython differential cases, alias/rebinding and operand order);
