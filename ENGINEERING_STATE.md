@@ -10,6 +10,26 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-28 — Packed list input uses one decimal lane pass
+
+- Horner's rule in radix 4 can consume each old digit in one pass: for
+  `x in 0..3`, incoming `c in 0..9`, compute `t=2*x+c`, output `t%4`, and
+  carry `t//4+2*x`. The new packed-sequence reader uses independent scratch
+  for `2*x` and `t`, then clears both. The original two-pass Base4DecimalCore
+  remains for unrelated readers.
+- Decimal input digit count proves a safe lane width without assuming an
+  AtCoder-specific height bound: digits 1–4 use 8 lanes, digits 5–9 use 16,
+  and subsequent digits use the full 32. Leading zeroes and sign handling
+  preserve the same fixed signed-int64 modulo ABI. The ABC136 C original
+  source remains below 512 KiB at 196,521 B; ABC100 C is 360,085 B.
+- Reproducible N=100,000 all-10^9 ABC136 C local samples were 5.61/5.74 s,
+  versus ~6.31 s before; the matched input-only source was 3.87/4.33 s
+  versus ~4.37 s. Timing varies across runs; **both versions still exceed
+  the official 2-second limit**. Further input and reverse-pass speedups
+  remain necessary before a judge acceptance claim.
+
+---
+
 ## 2026-09-28 — ABC136 C reverse adjacent walk fits 512 KiB
 
 - The compiler recognizes an exact dead-index `range(bound - 2, -1, -1)`

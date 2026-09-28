@@ -6,10 +6,37 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: reverse adjacent signed comparisons (ABC136 C)
+## Current increment: one-pass decimal ingestion with proven lane widths
 
-The unchanged [ABC136 C source](https://atcoder.jp/contests/abc136/tasks/abc136_c)
-in `tests/test_abc_c_foundation.py` now emits **193,217 B**, **331,071 B below
+The runtime-sized packed integer-list reader now updates one radix-4 digit
+per lane in a **single pass** for each decimal input digit. For an old digit
+`x` and incoming carry `c <= 9`, it computes `t = 2*x+c <= 15`, writes
+`t % 4` and forwards `t // 4 + 2*x <= 9`. The source shape, input syntax,
+signed int64 semantics and persistent 10-cell record representation remain
+unchanged. The first four decimal digits are guaranteed to fit in eight
+radix-4 lanes (16 bits), the first nine in sixteen lanes (32 bits), and all
+subsequent digits use the complete 32 lanes; signs and leading zeros do not
+invalidate the bound. The two-pass Base4DecimalCore path used by other readers
+is left unchanged. Tests cover both lane transitions, zero/negative input,
+INT64 boundaries, unsigned wrap modulo 2**64, scratch restoration, and the
+existing program corpus.
+
+The unchanged ABC136 C source now emits **196,521 B** (still **327,767 B
+below 512 KiB**); ABC100 C emits **360,085 B**. The new reader adds a small
+source dispatch while avoiding unnecessary decimal arithmetic. The
+`--large --trials 2` Tritium rev `14a729d` benchmark verifies the three
+N=100,000 ABC136 C cases. The all-10^9-height case returns Yes in
+**5.61/5.74 seconds** in one local run (previous source ~6.31 seconds);
+input-only took **3.87/4.33 seconds** (previous source ~4.37 seconds).
+These short local timing sets are noisy and **still exceed the problem's
+2-second limit**. Do not claim judge acceptance. Numeric-token parsing and
+record comparisons remain performance work alongside the unfinished P0
+object model.
+
+## Previous increment: reverse adjacent signed comparisons (ABC136 C)
+
+At this checkpoint the unchanged [ABC136 C source](https://atcoder.jp/contests/abc136/tasks/abc136_c)
+in `tests/test_abc_c_foundation.py` emitted **193,217 B**, **331,071 B below
 512 KiB**, down from 1,724,276 B. Four official samples match CPython. One
 mobile reverse pass positions the frame between adjacent records, compares
 signed 64-bit values, optionally decrements the left record, checks again,

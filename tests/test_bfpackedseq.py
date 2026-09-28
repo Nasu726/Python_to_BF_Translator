@@ -49,6 +49,24 @@ def test_runtime_packed_sequence_reads_signed_int64_boundaries():
     assert result.pointer == seq.base
 
 
+def test_runtime_packed_sequence_decimal_width_transitions_and_wrap():
+    tokens = [
+        "000000000", "9999", "10000", "999999999", "1000000000",
+        "-1000000000", "9223372036854775807", "18446744073709551615",
+        "18446744073709551616", "-18446744073709551617",
+    ]
+    code, seq = _program()
+    result = run_bf(code, " ".join(tokens) + "\n", memory_size=4_000,
+                    step_limit=500_000_000)
+    expected = [int(token) & ((1 << 64) - 1) for token in tokens]
+    expected = [value - (1 << 64) if value >> 63 else value
+                for value in expected]
+    assert [_decode_s64(result.memory, seq.item(i))
+            for i in range(len(tokens))] == expected
+    assert result.memory[seq.marker(len(tokens))] == 0
+    assert result.pointer == seq.base
+
+
 def test_runtime_packed_sequence_source_is_independent_of_runtime_item_count():
     code, seq = _program()
     source_size = len(code)
