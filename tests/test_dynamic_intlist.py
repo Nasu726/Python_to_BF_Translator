@@ -5,10 +5,11 @@ import sys
 import pytest
 
 from bf_runtime import run_bf
+from bfcore import BFEmitter
 from compiler_dynamic_intlist import select_dynamic_int_list
 from compiler_layout import lower_with_layout
 from bfpackedseq import (ACCESS_WORKSPACE_CELLS, LOAD_ACCESS_WORKSPACE_CELLS,
-                         REDUCTION_WORKSPACE_CELLS)
+                         REDUCTION_WORKSPACE_CELLS, _increment_mobile_u64)
 from pybf import compile_source
 
 
@@ -419,6 +420,94 @@ for i in range(len(a)):
 print(i, answer, sum(a))
 '''
     assert execute(compile_source(source), "").output == reference(source, "")
+
+
+def test_mobile_packed_increment_carries_across_all_eight_bytes():
+    for value in (0, 255, 65535, (1 << 32) - 1, (1 << 64) - 1):
+        bf = BFEmitter()
+        for i in range(8):
+            bf.set_const(8 + i, (value >> (8 * i)) & 255)
+        _increment_mobile_u64(bf, 8, 0)
+        result = execute(bf.code(), "")
+        assert sum(result.memory[8 + i] << (8 * i) for i in range(8)) == (
+            value + 1
+        ) % (1 << 64)
+        assert not any(result.memory[i] for i in range(30, 46))
+
+
+def test_linear_index_fill_matches_p0_alias_shape_and_fits_submission_limit():
+    source = '''
+n = int(input())
+a = [0] * n
+b = a
+for i in range(n):
+    a[i] = i
+print(b[-1], len(a))
+'''
+    code = compile_source(source)
+    assert len(code) <= 512 * 1024
+    assert set(code) <= set("><+-.,[]")
+    for n in (1, 8, 65):
+        data = f"{n}\n"
+        assert execute(code, data).output == reference(source, data)
+
+
+@pytest.mark.parametrize("source", [
+    '''a = [9] * 5
+n = 3
+for i in range(n):
+    a[i] = i
+print(a[0], a[2], a[4])''',
+    '''a = [9] * 3
+for i in range(-1):
+    a[i] = i
+print(a[0], a[2])''',
+    '''a = [9] * 0
+for i in range(len(a)):
+    a[i] = i
+print(len(a))''',
+    '''n = 3
+a = [9] * n
+n = 1
+for i in range(n):
+    a[i] = i
+print(a[0], a[2])''',
+    '''a = [9] * 3
+for i in range(len(a)):
+    a[i] = i
+print(a[0], a[2])''',
+])
+def test_linear_index_fill_count_and_list_extent_guards(source):
+    assert execute(compile_source(source), "").output == reference(source, "")
+
+
+@pytest.mark.parametrize("source,expected", [
+    ('''a = [9] * 5
+n = 7
+for i in range(n):
+    a[i] = i
+print(a[0], a[2], a[4])''', "0 2 4\n"),
+    ('''n = 3
+a = [9] * n
+a.clear()
+for i in range(n):
+    a[i] = i
+print(len(a))''', "0\n"),
+])
+def test_linear_index_fill_preserves_restricted_miss_behavior(source, expected):
+    # The existing dynamic-list route treats out-of-range stores as no-ops
+    # until a raising IndexError runtime ABI is implemented.
+    assert execute(compile_source(source), "").output == expected
+
+
+def test_linear_index_fill_falls_back_when_index_or_sum_is_observable():
+    for tail in ("print(i, a[2])", "print(sum(a), a[2])"):
+        source = f'''a = [9] * 3
+for i in range(len(a)):
+    a[i] = i
+{tail}
+'''
+        assert execute(compile_source(source), "").output == reference(source, "")
 
 
 @pytest.mark.parametrize("operator,operand", [

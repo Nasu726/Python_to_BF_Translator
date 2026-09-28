@@ -6,12 +6,52 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: record-local even/halve/tally loop (ABC100 C)
+## Current increment: linear index fill for the P0 repeat/alias program
+
+The unchanged first half of `IMPLEMENTATION_PLAN.md`'s P0 example now takes
+one mobile pass:
+
+```python
+n = int(input())
+a = [0] * n
+b = a
+for i in range(n):
+    a[i] = i
+print(b[-1], len(a))
+```
+
+The source in `tools/bench_linear_int_index_fill.py` emits **514,197 B**,
+**10,091 B below 512 KiB**. Raw steps at N=8/32/65 are **1,387,704 /
+2,749,414 / 6,118,629**. Before this pass, exactly the same source emitted
+679,088 B and took 5,297,050 / 24,979,324 / 88,520,932 steps. The new
+Tritium rev `14a729d` portable-build test checks the last element and length
+at N=65/1024/200,000 (0.074/0.189/0.287 seconds in one local run). These
+timings do not prove performance on the judge or for other statement shapes.
+
+The source-level proof accepts only `for i in range(n): alias[i] = i` or
+`range(len(alias))`, with no other use of the induction variable, no
+observable `sum(a)`, and an unshadowed `range`. The mobile 56-cell frame
+carries the current packed 64-bit index and stores it into each record; the
+runtime extent controls the whole-list walk. `range(n)` uses this shorter
+walk only when `n` is exactly the unchanged name used by a preceding singleton
+repeat and the intervening top-level statements only bind aliases. All
+other bounds use a separate 64-bit prefix count, preserving short ranges,
+negative bounds and the restricted route's current out-of-range no-op stores.
+Tests cover aliases, empty/negative bounds, changed `n`, `clear()`, observed
+index/sum fallback, and carry across the low 32 bits and 64-bit wrap.
+
+This does **not** implement `a.sort()` or `print(b)` for arbitrary runtime
+lists; the full example and general heap/reference requirements remain open.
+The ABC100 C regression still passes official samples after the shared 64-bit
+carry code was shortened: it now emits **356,781 B**, with raw steps
+**1,032,857 / 2,257,631 / 5,741,459**. ABC136 C remains above 512 KiB.
+
+## Previous increment: record-local even/halve/tally loop (ABC100 C)
 
 The ordinary [ABC100 C source](https://atcoder.jp/contests/abc100/tasks/abc100_c)
-in `tests/test_abc_c_foundation.py` now compiles to **357,519 B**, leaving
+in `tests/test_abc_c_foundation.py` originally compiled to **357,519 B**, leaving
 **166,769 B** below 512 KiB (previously 1,068,376 B). The three official
-samples still match CPython; raw steps are **1,034,210 / 2,257,631 /
+samples matched CPython; raw steps were **1,034,210 / 2,257,631 /
 5,818,718**, down from 8,181,784 / 8,466,202 / 113,901,836. The unchanged
 source also returns the correct count at N=65/256/1024 under Tritium rev
 `14a729d` on a portable local build. A separate N=10,000/200,000 test using

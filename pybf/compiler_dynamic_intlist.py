@@ -148,6 +148,7 @@ class PythonToBFStream(_Base):
     def __init__(self, tree, *, string_capacity=255, list_capacity=64,
                  runtime_charlist_base=None, runtime_intlist_base=None):
         self.dynamic_int_selection = select_dynamic_int_list(tree)
+        self._int_source_tree = tree
         self._int_name_nodes: dict[str, list[ast.Name]] = {}
         if self.dynamic_int_selection is not None:
             for name in ast.walk(tree):
@@ -457,6 +458,67 @@ class PythonToBFStream(_Base):
                       and self._dynamic_int_name(extent.args[0]))
         return (None if whole_list else extent), tally.target.id
 
+    def _linear_index_fill_loop(self, node: ast.For) -> ast.AST | None | bool:
+        """Prove ``alias[i] = i`` has no observable induction state.
+
+        Return False on a miss; None means the loop covers the whole list.
+        The source's range bound remains a node for evaluate-once lowering.
+        """
+        if (self.dynamic_int_selection is None or self.dynamic_int_selection.needs_sum
+                or self._range_shadowed or node.orelse
+                or not isinstance(node.target, ast.Name)
+                or len(node.body) != 1 or not isinstance(node.body[0], ast.Assign)):
+            return False
+        assignment = node.body[0]
+        if (len(assignment.targets) != 1
+                or not isinstance(assignment.targets[0], ast.Subscript)
+                or not isinstance(assignment.value, ast.Name)):
+            return False
+        item = assignment.targets[0]
+        if (not self._dynamic_int_name(item.value)
+                or not isinstance(item.slice, ast.Name)
+                or item.slice.id != node.target.id
+                or assignment.value.id != node.target.id):
+            return False
+        if (len(self._int_name_nodes.get(node.target.id, ())) != 3
+                or any(name is not node.target and name is not item.slice
+                       and name is not assignment.value
+                       for name in self._int_name_nodes[node.target.id])):
+            return False
+        iterator = node.iter
+        if (not isinstance(iterator, ast.Call) or iterator.keywords
+                or not isinstance(iterator.func, ast.Name)
+                or iterator.func.id != "range" or len(iterator.args) != 1):
+            return False
+        extent = iterator.args[0]
+        whole_list = (isinstance(extent, ast.Call) and not extent.keywords
+                      and isinstance(extent.func, ast.Name)
+                      and extent.func.id == "len" and len(extent.args) == 1
+                      and self._dynamic_int_name(extent.args[0]))
+        return None if whole_list or self._repeat_bound_is_list_length(node, extent) else extent
+
+    def _repeat_bound_is_list_length(self, node: ast.For, extent: ast.AST) -> bool:
+        """Prove an unmodified repeat count still equals the current extent."""
+        if not isinstance(extent, ast.Name):
+            return False
+        selection = self.dynamic_int_selection
+        producer = selection.bindings[selection.owner]
+        repeat = _repeat_parts(producer.value)
+        if repeat is None or not isinstance(repeat[1], ast.Name):
+            return False
+        count_name = extent.id
+        if repeat[1].id != count_name:
+            return False
+        if sum(isinstance(name.ctx, ast.Store)
+               for name in self._int_name_nodes.get(count_name, ())) != 1:
+            return False
+        body = self._int_source_tree.body
+        if node not in body:
+            return False
+        first, last = body.index(producer), body.index(node)
+        return (first < last and all(statement in selection.bindings.values()
+                                     for statement in body[first + 1:last]))
+
     def _normalized_prefix_count(self, bound: ast.AST) -> PackedI64Ref:
         count = self._packed_int_expr(
             bound, "integer-list loop bound must be an integer",
@@ -533,6 +595,16 @@ class PythonToBFStream(_Base):
     def _compile_stmt_inner(self, node):
         selection = self.dynamic_int_selection
         if isinstance(node, ast.For):
+            index_bound = self._linear_index_fill_loop(node)
+            if index_bound is not False:
+                if index_bound is None:
+                    self._ensure_provisional_access_base()
+                    self.dynamic_int_sequence.fill_all_indices(self.bf)
+                else:
+                    count = self._normalized_prefix_count(index_bound)
+                    self._ensure_provisional_access_base()
+                    self.dynamic_int_sequence.fill_prefix_indices(self.bf, count)
+                return
             tally = self._linear_halving_tally_loop(node)
             if tally is not None:
                 bound, answer_name = tally

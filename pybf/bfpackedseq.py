@@ -662,7 +662,11 @@ def _access_walk_code(*, store: bool, update: str | None = None) -> str:
 def _emit_record_literal_update(bf: BFEmitter, update: str, frame: int) -> None:
     """Update the record immediately after one 56-cell mobile frame."""
     payload = PackedI64Ref(frame + ACCESS_WORKSPACE_CELLS + PAYLOAD)
-    if update in ("add", "sub"):
+    if update == "index":
+        ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+        ops.copy(payload, PackedI64Ref(frame + _ACCESS_VALUE))
+        _increment_mobile_u64(bf, frame + _ACCESS_VALUE, frame)
+    elif update in ("add", "sub"):
         ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
         operation = ops.add_inplace if update == "add" else ops.sub_inplace
         operation(payload, PackedI64Ref(frame + _ACCESS_VALUE))
@@ -772,6 +776,21 @@ def _arm_even_payload(bf: BFEmitter, frame: int) -> None:
     bf.end_while(parity)
 
 
+def _increment_mobile_u64(bf: BFEmitter, base: int, frame: int) -> None:
+    """Increment all eight packed bytes with one local byte carry chain."""
+    ops = PackedI64Ops(bf, frame + _ACCESS_SCRATCH)
+    carry, gate, tmp, helper = (frame + _ACCESS_SCRATCH + i for i in range(4, 8))
+    bf.set_const(carry, 1)
+    for i in range(8):
+        ops._move_cell(carry, gate)
+        bf.begin_while(gate)
+        bf.clear(gate)
+        bf.add_const(base + i, 1)
+        ops._zero_flag(carry, base + i, tmp, helper)
+        bf.end_while(gate)
+    bf.clear(carry)
+
+
 def _halve_record_and_increment(bf: BFEmitter) -> None:
     """Arithmetic shift the current signed payload; tally one division."""
     payload = PackedI64Ref(ACCESS_WORKSPACE_CELLS + PAYLOAD)
@@ -793,15 +812,7 @@ def _halve_record_and_increment(bf: BFEmitter) -> None:
         ops._move_cell(parity, carry)
     bf.clear(carry)
 
-    counter = PackedI64Ref(_ACCESS_VALUE)
-    core = PackedU32Core(bf, _ACCESS_SCRATCH)
-    core.increment(PackedU32Ref(counter.base))
-    overflow = _ACCESS_ZERO
-    core.is_zero(overflow, PackedU32Ref(counter.base))
-    bf.begin_while(overflow)
-    bf.clear(overflow)
-    core.increment(PackedU32Ref(counter.base + 4))
-    bf.end_while(overflow)
+    _increment_mobile_u64(bf, _ACCESS_VALUE, 0)
 
 
 @lru_cache(maxsize=1)
@@ -1213,6 +1224,44 @@ class RuntimePackedIntSequence:
             ops.set_u64(PackedI64Ref(frame + _ACCESS_VALUE), operand)
         bf.move(self.base)
         bf.emit(_update_prefix_walk_code(update_key))
+        bf.ptr = self.base
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def fill_prefix_indices(self, bf: BFEmitter, count: PackedI64Ref) -> None:
+        """Store each visited zero-based index in its record in one scan.
+
+        Count is a nonnegative int64 evaluated by the caller. The frame's
+        value lane starts at zero and advances modulo 2**64; any out-of-range
+        suffix retains the restricted route's no-op store behavior.
+        """
+        self._check_layout()
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if frame < 0 or count.base < 0 or count.base + count.cells > frame:
+            raise ValueError("prefix count must precede the mobile frame")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        PackedI64Ops(bf, frame + _ACCESS_SCRATCH).copy(
+            PackedI64Ref(frame + _ACCESS_INDEX), count,
+        )
+        bf.move(self.base)
+        bf.emit(_update_prefix_walk_code("index"))
+        bf.ptr = self.base
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def fill_all_indices(self, bf: BFEmitter) -> None:
+        """Store zero-based positions while traversing every current record."""
+        self._check_layout()
+        frame = self.base - ACCESS_WORKSPACE_CELLS
+        if frame < 0:
+            raise ValueError("mobile frame must precede the sequence")
+        for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+        bf.emit(_update_all_walk_code("index"))
         bf.ptr = self.base
         for cell in range(frame, self.base):
             bf.clear(cell)

@@ -1,24 +1,29 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-28):** PR #22 was merged after all four CI
-shards passed. The next increment compiles the ordinary ABC100 C nested
-even/halve/tally loop with a reusable guarded mobile-record lowering. It
-carries both the evaluated range bound and a scalar tally with the packed
-list frame, divides each current value by two until odd, rewinds and restores
-the tally. It applies only if the index is otherwise dead, the list has one
-statically proven owner, `sum(a)` is unobserved, and both loop bodies exactly
-match this effect shape. Other loops use the established general route.
+**Latest checkpoint (2026-09-28):** PR #23 merged at
+`46a21d318d356f8c679ef196cd4881133ae7d6f0` after all four test shards
+passed. The current index-fill increment addresses the *assignment portion*
+of `IMPLEMENTATION_PLAN.md`'s minimum example: `n=int(input());a=[0]*n;
+b=a;for i in range(n):a[i]=i`. The single-owner route now writes zero-based
+indices into each record during one mobile traversal. The shorter whole-list
+walk applies to `range(len(alias))` and to a still-unmodified repeat count
+name with alias-only intervening statements. Other bounds use a separate
+mobile 64-bit count. Dead-index and no-observable-sum guards remain; loop
+semantics outside these proofs stay on the existing route.
 
-The unchanged ABC100 C source now produces **357,519 B**, 166,769 B below
-512 KiB. Official samples pass under the unchanged raw-step guard; Tritium
-rev `14a729d` also passes N=65/256/1024 and repeated-power-of-two N=200,000
-in 4.024 seconds on a local portable build. This is evidence of linear work
-on that input, not an AtCoder judge acceptance claim. The ABC136 C source
-still produces **1,724,276 B**, retains O(N²) rooted adjacent accesses, and
-remains above the submission limit. Read `P0_IMPLEMENTATION_STATUS.md` for
-the guarded shape, benchmarks and remaining feature work. The next major
-boundary is reverse adjacent comparisons / early exit, then broader runtime
-object routing under `IMPLEMENTATION_PLAN.md`.
+With a subsequent `print(b[-1],len(a))`, the ordinary P0-style source now
+emits **514,197 B**, 10,091 B below 512 KiB. The previous rooted version
+emitted 679,088 B and took 88,520,932 raw steps at N=65, versus 6,118,629
+after the mobile pass. A portable Tritium rev `14a729d` build returns the
+expected last element even at N=200,000. This does not implement the
+`a.sort();print(b)` remainder of the P0 example, nor the general heap model.
+
+The previous ordinary ABC100 C loop remains below the limit after the shared
+64-bit carry simplification: **356,781 B**, correct on official samples and
+N=65/1024 native cases. ABC136 C still produces 1,724,276 B with O(N²)
+rooted adjacent accesses. See `P0_IMPLEMENTATION_STATUS.md` for exact scope
+and reproducible benchmarks. The next major boundaries are list sorting,
+reverse adjacent comparisons / early exit, and general object routing.
 
 `IMPLEMENTATION_PLAN.md` is the minimum
 feature scope, not an optional long-term wishlist. Read `P0_IMPLEMENTATION_STATUS.md`
