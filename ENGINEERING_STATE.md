@@ -10,6 +10,27 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-28 — P0 sequential index stores use one mobile record walk
+
+- `for i in range(n): a[i] = i` now carries a packed index with the
+  single-owner list frame; `range(len(a))` walks all records. For `range(n)`,
+  only the unchanged exact repeat count with alias-only intervening statements
+  can prove the list's length equals `max(n,0)`. All other bounds retain a
+  counted prefix walk and out-of-range no-op stores. Observable sum/index and
+  shadowed `range` fall back.
+- The original P0-style `n=int(input());a=[0]*n;b=a;for i in range(n):
+  a[i]=i;print(b[-1],len(a))` is 514,197 B (10,091 B below 512 KiB),
+  down from 679,088 B. Raw N=8/32/65 steps changed from
+  5,297,050/24,979,324/88,520,932 to 1,387,704/2,749,414/6,118,629.
+  Tritium portable rev `14a729d` verifies the result at N=65/1024/200,000.
+  `tools/bench_linear_int_index_fill.py` reproduces the numbers and optionally
+  the native run. Full P0 sort/print and general heap models remain missing.
+- The common packed u64 carry chain was reduced to one byte-wise pass. ABC100 C
+  remains correct on official samples, now 356,781 B with raw sample steps
+  1,032,857 / 2,257,631 / 5,741,459. Keep its 512 KiB gate unchanged.
+
+---
+
 ## 2026-09-28 — ABC100 C nested loop uses mobile record and scalar tally
 
 - One-owner integer lists now prove the exact source-level shape `for i in
