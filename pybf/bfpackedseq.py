@@ -100,6 +100,8 @@ FAST_DIGIT_GATE = RECORD_STRIDE + 15
 FULL_DIGIT_GATE = RECORD_STRIDE + 16
 EARLY_DIGITS_LEFT = RECORD_STRIDE + 17
 EARLY_DIGIT_GATE = RECORD_STRIDE + 18
+TENTH_PENDING = RECORD_STRIDE + 19
+LATER_DIGIT_GATE = RECORD_STRIDE + 20
 
 # The base-4 words are temporary rolling parse state.  They overlap records
 # that do not exist yet and are zeroed before the next record is materialized.
@@ -223,7 +225,28 @@ def _flag_not(
     r.emit("]")
 
 
-@lru_cache(maxsize=3)
+def _is_numeric_digit(r: _RelativeBuilder, result: int, digit: int) -> None:
+    """Test a byte already offset by ASCII '0' with at most ten probes.
+
+    Valid decimal digits are 0..9; spaces, tabs, CR, LF and EOF all wrap to
+    values above 9. The digit stays available to the Horner step, while the
+    bounded temporary is fully consumed even for a separator.
+    """
+    r.copy_preserved(digit, TMP, RESTORE)
+    r.set_const(result, 1)
+    for step in range(10):
+        r.move(TMP)
+        r.emit("[")
+        r.add(TMP, -1)
+        if step == 9:
+            r.clear(result)
+            r.clear(TMP)
+    for _ in range(10):
+        r.move(TMP)
+        r.emit("]")
+
+
+@lru_cache(maxsize=4)
 def _decimal_digit_kernel(lanes: int = 32) -> str:
     """Start/end at relative cell zero; CH contains numeric digit 0..9."""
     bf = BFEmitter()
@@ -231,7 +254,6 @@ def _decimal_digit_kernel(lanes: int = 32) -> str:
     decimal.mul10_add_digit_one_pass(
         Base4I64Ref(ACC_BASE),
         Base4I64Ref(DECIMAL_SCRATCH_BASE),
-        Base4I64Ref(NEG_RESULT_BASE),
         CH,
         lanes=lanes,
     )
@@ -327,16 +349,18 @@ def _read_record_body() -> str:
     _flag_not(r, ACTIVE, DELIMITER)
     # Any first nine decimal digits fit below 10**9 < 2**32, even if the
     # token later contains more digits. The first four fit in 16 bits; the
-    # tenth and later use full int64.
+    # The tenth fits below 10**10 < 2**34 and needs 17 radix-4 lanes;
+    # subsequent digits use the full int64 width.
     r.set_const(FAST_DIGITS_LEFT, 9)
     r.set_const(EARLY_DIGITS_LEFT, 4)
+    r.set_const(TENTH_PENDING, 1)
+    r.add(CH, -ord("0"))
 
     # One source loop handles every decimal digit. The expensive arithmetic is
-    # bounded by 8, 16 or 32 radix-4 lanes, never by an arbitrary byte value.
+    # bounded by 8, 16, 17 or 32 radix-4 lanes, never by an arbitrary byte value.
     r.move(ACTIVE)
     r.emit("[")
     r.add(ACTIVE, -1)
-    r.add(CH, -ord("0"))
     _flag_not(r, FULL_DIGIT_GATE, FAST_DIGITS_LEFT)
     r.copy_preserved(FAST_DIGITS_LEFT, FAST_DIGIT_GATE, RESTORE)
     r.copy_preserved(EARLY_DIGITS_LEFT, EARLY_DIGIT_GATE, RESTORE)
@@ -363,26 +387,35 @@ def _read_record_body() -> str:
     r.move(FULL_DIGIT_GATE)
     r.emit("[")
     r.clear(FULL_DIGIT_GATE)
+    _flag_not(r, LATER_DIGIT_GATE, TENTH_PENDING)
+    r.move(TENTH_PENDING)
+    r.emit("[")
+    r.clear(TENTH_PENDING)
+    r.move(0)
+    r.emit(_decimal_digit_kernel(17))
+    r.pos = 0
+    r.move(TENTH_PENDING)
+    r.emit("]")
+    r.move(LATER_DIGIT_GATE)
+    r.emit("[")
+    r.clear(LATER_DIGIT_GATE)
     r.move(0)
     r.emit(_decimal_digit_kernel())
     r.pos = 0
+    r.move(LATER_DIGIT_GATE)
+    r.emit("]")
     r.move(FULL_DIGIT_GATE)
     r.emit("]")
 
     r.move(CH)
     r.emit(",")
-    _is_line_end(r, END_LINE, CH)
-    _is_hspace(r, DELIMITER, CH)
-    r.copy_preserved(END_LINE, LINE_TMP, RESTORE)
-    r.move(LINE_TMP)
-    r.emit("[")
-    r.add(LINE_TMP, -1)
-    r.set_const(DELIMITER, 1)
-    r.move(LINE_TMP)
-    r.emit("]")
-    _flag_not(r, ACTIVE, DELIMITER)
+    r.add(CH, -ord("0"))
+    _is_numeric_digit(r, ACTIVE, CH)
     r.move(ACTIVE)
     r.emit("]")
+    r.clear(TENTH_PENDING)
+    r.add(CH, ord("0"))
+    _is_line_end(r, END_LINE, CH)
 
     # Signed tokens use exact two's complement before persistent packing.
     r.move(SIGN)

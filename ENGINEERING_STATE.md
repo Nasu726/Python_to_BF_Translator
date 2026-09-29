@@ -10,6 +10,22 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-29 — Packed decimal parser uses adjacent carry cells
+
+- In the one-pass `10*x+d` radix-4 kernel, the current destination marker
+  already holds the incoming carry. Add `2*x` there and in the next marker,
+  then map the bounded total locally, preserving the seeded next carry.
+  A distant second scratch word is no longer needed. The digit-loop reader
+  tests the 0..9 numeric range with ten bounded probes and checks LF/EOF
+  once per token; digit 10 needs only 17 lanes by `10**10 < 2**34`.
+- The unchanged ABC136 C / ABC100 C sources emit 188,364 / 351,944 B. For
+  65 copies of 10^9, the input-only BF run drops from 45,161,131 to
+  27,540,736 steps. The N=100,000 all-10^9 ABC136 C native run returned Yes
+  in 3.03/3.14 s and input-only took 2.43/2.45 s in one two-trial local
+  sample. These results still exceed the official 2-second limit.
+
+---
+
 ## 2026-09-29 — Reverse adjacent recheck is conditional
 
 - After a failed `left > right` test, the guarded ABC136 C adjacent walk has
