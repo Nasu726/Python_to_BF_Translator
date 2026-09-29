@@ -1,12 +1,32 @@
 # Feature / optimization / ABC acceptance track
 
-Updated 2026-09-28. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
+Updated 2026-09-29. `IMPLEMENTATION_PLAN.md` defines the minimum feature scope.
 Every feature must eventually have all three: implementation, optimization, and
 validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: one-pass decimal ingestion with proven lane widths
+## Current increment: skip redundant reverse adjacent comparisons
+
+The ABC136 C mobile reverse walk now performs the second signed comparison
+only when the left record was decremented. When the first comparison is false,
+neither record changes and the second comparison has the same answer. The
+existing failure flag and physical list restoration are preserved. This is a
+general property of the guarded adjacent-walk source shape; it assumes no
+particular problem input values. The unchanged ABC136 C source emits
+**196,505 B**, **327,783 B below 512 KiB**. ABC100 C remains **360,085 B**.
+
+Portable Tritium rev `14a729d`, `tools/bench_tritium_dynamic_int_updates.py
+--large --trials 2`, checked the four official samples and three N=100,000
+cases. The all-10^9-height case returned Yes in **3.33/3.26 seconds** in this
+local run; input-only took **2.56/2.57 seconds**. A separate repeated-value
+source isolating list creation and reverse traversal improved from about
+1.33 to 0.71 seconds. The native measurements vary across runs, and even this
+faster whole-program measurement exceeds the official **2-second** limit.
+Judge acceptance is still unverified. Continue optimizing numeric-token input
+and advance the incomplete P0 object model.
+
+## Previous increment: one-pass decimal ingestion with proven lane widths
 
 The runtime-sized packed integer-list reader now updates one radix-4 digit
 per lane in a **single pass** for each decimal input digit. For an old digit

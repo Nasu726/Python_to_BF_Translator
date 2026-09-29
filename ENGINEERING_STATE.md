@@ -10,6 +10,20 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-29 — Reverse adjacent recheck is conditional
+
+- After a failed `left > right` test, the guarded ABC136 C adjacent walk has
+  changed neither record. Its second identical comparison can be omitted;
+  after a successful first test and decrement, recheck remains mandatory.
+- The unchanged ABC136 C source emits 196,505 B. Portable Tritium rev
+  `14a729d` verifies four official samples and three N=100,000 cases. The
+  all-10^9 case took 3.33/3.26 s, while the matched input-only source took
+  2.56/2.57 s in this local run. Reverse traversal of a repeated constant
+  list, without token input, fell from ~1.33 to ~0.71 s. Timing is noisy;
+  the current full program still exceeds the official 2-second limit.
+
+---
+
 ## 2026-09-28 — Packed list input uses one decimal lane pass
 
 - Horner's rule in radix 4 can consume each old digit in one pass: for
