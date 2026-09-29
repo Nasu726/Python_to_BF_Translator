@@ -1,8 +1,17 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-29):** PR #27 merged at
-`15e63f392b468be3f30b872e26a93b82dfcd85c3` with four green test shards.
-The current packed-decimal increment keeps the incoming total and next carry
+**Latest checkpoint (2026-09-29):** PR #28 merged at
+`c3264431510f72ee98dffdef9ccfd83bd22b48dd` with four green test shards.
+The current feature increment implements direct `print(alias)` for the proven
+single-owner runtime integer list. A 484-cell mobile frame carries Quad
+signed-decimal output along each record and restores the original list in a
+reverse pass. The ordinary P0 example through `print(b)`, without `sort()`,
+emits 523,240 B (1,048 B below 512 KiB), with alias/index correctness and
+portable Tritium rev `14a729d` matching CPython at N=65/1024/4097/100000.
+The N=100000 native run takes 3.70 s locally. Source headroom is narrow;
+`sort()`, general heap handles, copies and nested objects remain open.
+
+The preceding packed-decimal increment keeps the incoming total and next carry
 adjacent to each radix-4 destination lane instead of moving through a distant
 scratch word. The list parser tests a bounded 0..9 digit range and checks
 LF/EOF once per token; the tenth digit uses 17 lanes, with later digits using

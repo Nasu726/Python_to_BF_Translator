@@ -20,7 +20,8 @@ from bfpacked64 import PackedI64Ref
 from bfpackedops import PackedI64Ops
 from bfpackedseq import (ACCESS_WORKSPACE_CELLS, BACK,
                          LOAD_ACCESS_WORKSPACE_CELLS,
-                         REDUCTION_WORKSPACE_CELLS, RuntimePackedIntSequence)
+                         REDUCTION_WORKSPACE_CELLS, REPR_WORKSPACE_CELLS,
+                         RuntimePackedIntSequence)
 from compiler_dynamic_charlist import select_dynamic_char_list
 from compiler_stream import CompileError, PythonToBFStream as _Base
 from transpiler import _is_list_map_int_input_split
@@ -33,6 +34,7 @@ class DynamicIntListSelection:
     needs_load: bool
     needs_store: bool
     needs_sum: bool
+    needs_repr: bool
 
 
 def dynamic_int_workspace_cells(selection: DynamicIntListSelection) -> int:
@@ -41,6 +43,8 @@ def dynamic_int_workspace_cells(selection: DynamicIntListSelection) -> int:
         width = max(width, LOAD_ACCESS_WORKSPACE_CELLS)
     if selection.needs_store:
         width = max(width, ACCESS_WORKSPACE_CELLS)
+    if selection.needs_repr:
+        width = max(width, REPR_WORKSPACE_CELLS)
     return width
 
 
@@ -86,9 +90,10 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
     needs_load = False
     needs_store = False
     needs_sum = False
+    needs_repr = False
     top_positions = {node: i for i, statement in enumerate(tree.body) for node in ast.walk(statement)}
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    builtin_names = {"list", "map", "int", "input", "sum", "len"}
+    builtin_names = {"list", "map", "int", "input", "sum", "len", "print"}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
             return None
@@ -111,6 +116,11 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                 and not parent.keywords):
             if parent.func.id == "sum":
                 needs_sum = True
+            continue
+        if (isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name)
+                and parent.func.id == "print" and parent.args == [node]
+                and not parent.keywords and isinstance(parents.get(parent), ast.Expr)):
+            needs_repr = True
             continue
         if isinstance(parent, ast.Subscript) and parent.value is node:
             if isinstance(parent.slice, ast.Slice):
@@ -138,7 +148,7 @@ def select_dynamic_int_list(tree: ast.Module) -> DynamicIntListSelection | None:
                 continue
         return None
     return DynamicIntListSelection(
-        owner, bindings, needs_load, needs_store, needs_sum,
+        owner, bindings, needs_load, needs_store, needs_sum, needs_repr,
     )
 
 
@@ -223,6 +233,15 @@ class PythonToBFStream(_Base):
             ref = self._int_total if node.func.id == "sum" else self._int_length
             return self._cached_int_value(ref)
         return super().compile_expr(node)
+
+    def _compile_print(self, call: ast.Call) -> None:
+        if (len(call.args) == 1 and not call.keywords
+                and self._dynamic_int_name(call.args[0])):
+            self._ensure_provisional_access_base()
+            self.dynamic_int_sequence.print_repr(self.bf)
+            self._emit_string("\n")
+            return
+        return super()._compile_print(call)
 
     def _dynamic_int_packed_ops(self) -> PackedI64Ops:
         scratch = self.temps.top

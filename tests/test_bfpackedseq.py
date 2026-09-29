@@ -3,7 +3,8 @@ import pytest
 from bf_runtime import run_bf
 from bfcore import BFEmitter
 from bfpacked import PackedU32Core, PackedU32Ref
-from bfpackedseq import ACCESS_WORKSPACE_CELLS, RECORD_STRIDE, RuntimePackedIntSequence
+from bfpackedseq import (ACCESS_WORKSPACE_CELLS, RECORD_STRIDE,
+                         REPR_WORKSPACE_CELLS, RuntimePackedIntSequence)
 
 
 def _program(base=64):
@@ -95,6 +96,28 @@ def test_runtime_packed_sequence_source_is_independent_of_runtime_item_count():
     for i, expected in enumerate(values):
         assert _decode_s64(result.memory, seq.item(i)) == expected
     assert result.memory[seq.marker(len(values))] == 0
+    assert result.pointer == seq.base
+
+
+@pytest.mark.parametrize("data,expected", [
+    ("\n", "[]"),
+    ("0 1 -1\n", "[0, 1, -1]"),
+    ("9223372036854775807 -9223372036854775808\n",
+     "[9223372036854775807, -9223372036854775808]"),
+])
+def test_runtime_packed_sequence_print_repr_preserves_records(data, expected):
+    bf = BFEmitter()
+    seq = RuntimePackedIntSequence(600)
+    seq.read_lf_terminated_s64s(bf)
+    seq.print_repr(bf)
+    result = run_bf(bf.code(), data, memory_size=4_000,
+                    step_limit=500_000_000)
+    assert result.output == expected
+    values = [int(token) for token in data.split()]
+    assert [_decode_s64(result.memory, seq.item(i))
+            for i in range(len(values))] == values
+    assert result.memory[seq.marker(len(values))] == 0
+    assert not any(result.memory[seq.base - REPR_WORKSPACE_CELLS:seq.base])
     assert result.pointer == seq.base
 
 

@@ -29,6 +29,8 @@ from bfpacked import PackedU32Core, PackedU32Ref
 from bfpacked64 import PackedI64Ref
 from bfpackedops import PackedI64Ops
 from bfstreamseq import _extract_packed_sign
+from bfquad import Quad64Ref
+from bfquadbackend import QuadBinaryStringListIO
 
 
 RECORD_STRIDE = 10
@@ -62,6 +64,11 @@ _ACCESS_NONZERO = 29
 _ACCESS_SCRATCH = 30
 _ACCESS_SAVED_RECORD = _ACCESS_SCRATCH + PackedI64Ops.SCRATCH_CELLS
 ACCESS_WORKSPACE_CELLS = _ACCESS_SAVED_RECORD + RECORD_STRIDE
+
+# A mobile decimal printer keeps the Quad conversion and twenty decimal lanes
+# beside each record. The last ten frame cells are reserved for rotation.
+REPR_WORKSPACE_CELLS = 484
+_REPR_SAVED_RECORD = REPR_WORKSPACE_CELLS - RECORD_STRIDE
 
 # Loads omit the incoming-value lane.  The remaining fields keep the same
 # physical addresses relative to the sequence base, while the index and left
@@ -528,6 +535,46 @@ def _sum_length_walk_code() -> str:
     # End marker is never rotated. Its BACK starts the inverse walk. Each
     # inverse swap restores the preceding record; its BACK selects the next
     # iteration, stopping at the original first record (also handles N=0).
+    return ("[" + body.code() + "]" + ">" * BACK
+            + "[" + rewind.code() + "]" + "<" * BACK)
+
+
+@lru_cache(maxsize=1)
+def _repr_walk_code() -> str:
+    width = REPR_WORKSPACE_CELLS
+    body = BFEmitter()
+    body.ptr = width + MARKER
+    separator, first, character = 7, 6, 5
+    body.set_const(separator, 1)
+    body.begin_while(first)
+    body.clear(first)
+    body.clear(separator)
+    body.end_while(first)
+    body.begin_while(separator)
+    body.clear(separator)
+    for char in ", ":
+        body.set_const(character, ord(char))
+        body.move(character)
+        body.emit(".")
+    body.end_while(separator)
+
+    printer = QuadBinaryStringListIO(body, scratch_base=0)
+    printer.set_quad_workspace(131)
+    printer.packed64.copy(PackedI64Ref(16), PackedI64Ref(width + PAYLOAD))
+    printer.copy64(Quad64Ref(32), PackedI64Ref(16))
+    printer.print_s64(Quad64Ref(32), workspace_base=230)
+    _rotate_mobile_frame(
+        body, forward=True, width=width, saved_record=_REPR_SAVED_RECORD,
+    )
+    body.move(width + RECORD_STRIDE + MARKER)
+
+    rewind = BFEmitter()
+    rewind.ptr = RECORD_STRIDE + width + BACK
+    _rotate_mobile_frame(
+        rewind, forward=False, width=width,
+        saved_record=_REPR_SAVED_RECORD,
+    )
+    rewind.move(width + BACK)
     return ("[" + body.code() + "]" + ">" * BACK
             + "[" + rewind.code() + "]" + "<" * BACK)
 
@@ -1478,6 +1525,32 @@ class RuntimePackedIntSequence:
         bf.clear(success)
         _move_bytes(bf, frame + _ACCESS_VALUE, success)
         for cell in range(frame, self.base):
+            bf.clear(cell)
+        bf.move(self.base)
+
+    def print_repr(self, bf: BFEmitter) -> None:
+        """Print a Python-style signed-int list in one preserving mobile walk.
+
+        Reserve REPR_WORKSPACE_CELLS before the base. Decimal conversion uses
+        the mobile frame, so the generated source is independent of length.
+        The inverse pass restores every record and the original head position.
+        """
+        self._check_layout()
+        if self.base < REPR_WORKSPACE_CELLS:
+            raise ValueError("integer-list repr needs preceding mobile workspace")
+        character = self.base - REPR_WORKSPACE_CELLS + 5
+        first = self.base - REPR_WORKSPACE_CELLS + 6
+        bf.set_const(character, ord("["))
+        bf.move(character)
+        bf.emit(".")
+        bf.set_const(first, 1)
+        bf.move(self.base)
+        bf.emit(_repr_walk_code())
+        bf.ptr = self.base
+        bf.set_const(character, ord("]"))
+        bf.move(character)
+        bf.emit(".")
+        for cell in range(self.base - REPR_WORKSPACE_CELLS, self.base):
             bf.clear(cell)
         bf.move(self.base)
 
