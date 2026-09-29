@@ -6,7 +6,30 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: local decimal carry and bounded digit detection
+## Current increment: runtime integer-list repr output
+
+The single-owner runtime-sized integer list now accepts direct `print(alias)`.
+A mobile frame carries signed-decimal conversion and a first-element flag
+through the records in one forward pass and restores the physical list with
+one reverse pass. Empty lists, negative values and signed-int64 boundaries
+print with Python list punctuation, and later alias/index reads still observe
+the same records. The frontend accepts only a direct single-argument print of
+a proven owner/alias with no keyword arguments. Other list escapes and print
+shapes keep their established route or rejection.
+
+The unmodified *prefix* of `IMPLEMENTATION_PLAN.md`'s P0 example through
+`print(b)` (omitting `a.sort()`) emits **523,240 B**, **1,048 B below 512 KiB**.
+Portable Tritium rev `14a729d` verifies `n=65/1024/4097/100000`; the
+N=100,000 output matches CPython in 3.70 seconds locally. This is a feature
+and linear traversal milestone, not an AtCoder judge-time claim. The narrow
+source headroom is a constraint for adding sort to this example. General
+heap handles, list copying, nested containers and `sort()` remain missing.
+`tools/bench_tritium_intlist_repr.py --tritium /path/to/bfi --large`
+reproduces the source-size gate and full-output checks.
+The existing ABC100 C and ABC136 C source/samples remain regression gates;
+their unchanged sources now emit **346,824 B** and **188,364 B** respectively.
+
+## Previous increment: local decimal carry and bounded digit detection
 
 The runtime-sized packed integer-list parser accumulates `10*x + digit` with
 its total and next carry next to the destination radix-4 lane, eliminating

@@ -22,6 +22,37 @@ def execute(code, data):
     return run_bf(code, data, memory_size=120_000, step_limit=500_000_000)
 
 
+def test_runtime_integer_list_alias_repr_after_linear_index_fill():
+    source = '''
+n = int(input())
+a = [0] * n
+b = a
+for i in range(n):
+    a[i] = i
+print(b)
+'''
+    selection = select_dynamic_int_list(ast.parse(source))
+    assert selection is not None and selection.needs_repr
+    code = compile_source(source)
+    assert len(code) <= 512 * 1024
+    for n in (0, 5, 65):
+        data = f"{n}\n"
+        assert execute(code, data).output == reference(source, data)
+
+
+def test_runtime_integer_list_input_repr_keeps_alias_and_items():
+    source = '''
+a = list(map(int, input().split()))
+b = a
+print(b)
+print(a[0], len(b))
+'''
+    data = "-7 0 1000000000\n"
+    selection = select_dynamic_int_list(ast.parse(source))
+    assert selection is not None and selection.needs_repr
+    assert execute(compile_source(source), data).output == reference(source, data)
+
+
 @pytest.mark.parametrize("line", ["", "  \t", "0", "-1 255 256 -257", "1 2 3   "])
 def test_alias_chain_shares_clear_and_cached_values(line):
     source = '''
@@ -81,6 +112,8 @@ print(input())
     "a=list(map(int,input().split()))\nb=a\nb=[2]\nprint(len(a))",
     "a=list(map(int,input().split()))\ndel a[0]\nprint(len(a))",
     "a=list(map(int,input().split()))\nprint(a[:])",
+    "a=list(map(int,input().split()))\nprint(a, a)",
+    "a=list(map(int,input().split()))\nprint(a, end='!')",
     "a=list(map(int,input().split()))\nb=[a]\nprint(len(a))",
     "a=list(map(int,input().split()))\nprint(sum(a, 1))",
     "a=list(map(int,input().split()))\nx=a.clear()",
