@@ -61,26 +61,25 @@ def test_base4_decimal_digit_has_fixed_lane_work_not_value_proportional_byte_wor
 
 
 @pytest.mark.parametrize("text", [
-    "0", "9999", "10000", "999999999", "1000000000",
+    "0", "9999", "10000", "999999999", "1000000000", "9999999999",
     "18446744073709551615", "18446744073709551616",
 ])
 def test_one_pass_decimal_short_lanes_then_full_lanes(text):
     bf = BFEmitter()
-    value, scratch, doubled = (Base4I64Ref(base) for base in (40, 140, 240))
+    value, scratch = (Base4I64Ref(base) for base in (40, 140))
     digit_cell = 350
     base4 = Base4I64Core(bf)
     decimal = Base4DecimalCore(bf)
-    for word in (value, scratch, doubled):
+    for word in (value, scratch):
         base4.set_u64(word, 0)
     for index, char in enumerate(text):
         bf.set_const(digit_cell, ord(char) - ord("0"))
-        lanes = 8 if index < 4 else 16 if index < 9 else 32
+        lanes = 8 if index < 4 else 16 if index < 9 else 17 if index == 9 else 32
         decimal.mul10_add_digit_one_pass(
-            value, scratch, doubled, digit_cell, lanes=lanes,
+            value, scratch, digit_cell, lanes=lanes,
         )
     result = run_bf(bf.code(), memory_size=400,
                     step_limit=250_000_000)
     assert _decode(result.memory, value) == (int(text) & MASK64)
     assert result.memory[digit_cell] == 0
     assert result.memory[scratch.base:scratch.base + scratch.cells] == [0] * scratch.cells
-    assert result.memory[doubled.base:doubled.base + doubled.cells] == [0] * doubled.cells

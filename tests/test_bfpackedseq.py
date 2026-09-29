@@ -52,7 +52,8 @@ def test_runtime_packed_sequence_reads_signed_int64_boundaries():
 def test_runtime_packed_sequence_decimal_width_transitions_and_wrap():
     tokens = [
         "000000000", "9999", "10000", "999999999", "1000000000",
-        "-1000000000", "9223372036854775807", "18446744073709551615",
+        "9999999999", "-1000000000", "-9999999999",
+        "9223372036854775807", "18446744073709551615",
         "18446744073709551616", "-18446744073709551617",
     ]
     code, seq = _program()
@@ -64,6 +65,17 @@ def test_runtime_packed_sequence_decimal_width_transitions_and_wrap():
     assert [_decode_s64(result.memory, seq.item(i))
             for i in range(len(tokens))] == expected
     assert result.memory[seq.marker(len(tokens))] == 0
+    assert result.pointer == seq.base
+
+
+def test_runtime_packed_sequence_mixed_delimiters_and_eof_after_tenth_digit():
+    code, seq = _program()
+    values = [1_000_000_000, -9_999_999_999, 7]
+    result = run_bf(code, "1000000000\t-9999999999\r 7", memory_size=4_000,
+                    step_limit=500_000_000)
+    assert [_decode_s64(result.memory, seq.item(i))
+            for i in range(len(values))] == values
+    assert result.memory[seq.marker(len(values))] == 0
     assert result.pointer == seq.base
 
 

@@ -17,9 +17,10 @@ word-add pass is required.  All per-lane totals are bounded by 12; there is no
 loop proportional to an arbitrary byte value.
 
 The runtime integer-list reader additionally uses a one-pass variant. It
-consumes each old radix-4 digit directly, with two scratch cells per lane;
-that variant bounds per-lane totals by 15 and may visit fewer than 32 lanes
-when the decimal digit count proves the result fits in the lower lanes.
+consumes each old radix-4 digit directly, keeping the total and next carry
+beside the destination digit. Per-lane totals are at most 15, and the reader
+may visit fewer than 32 lanes when the decimal digit count proves the result
+fits in the lower lanes.
 """
 
 from __future__ import annotations
@@ -42,13 +43,15 @@ def _map_total_wide(
     carry: int,
     *,
     max_total: int,
+    clear_carry: bool = True,
 ) -> None:
     """Map bounded total to radix-4 digit/carry, consuming total."""
     if not 0 <= max_total <= 15:
         raise ValueError("wide radix-4 mapper is intended only for tiny totals")
 
     r.clear(out)
-    r.clear(carry)
+    if clear_carry:
+        r.clear(carry)
     for step in range(1, max_total + 1):
         r.move(total)
         r.emit("[")
@@ -162,7 +165,6 @@ class Base4DecimalCore:
         self,
         dst: Base4I64Ref,
         scratch: Base4I64Ref,
-        doubled: Base4I64Ref,
         digit_cell: int,
         *,
         lanes: int = DIGITS,
@@ -171,18 +173,19 @@ class Base4DecimalCore:
 
         For old digit ``x`` and incoming carry ``c <= 9``, write
         ``t = 2*x+c <= 15``; the new digit is ``t % 4`` and the next carry
-        is ``t // 4 + 2*x <= 9``. Both scratch words are zero on return. If
+        is ``t // 4 + 2*x <= 9``. The carry and total stay adjacent to the
+        destination digit; the scratch word is zero on return. If
         ``lanes < 32``, the caller proves the input/output fit in those lanes
         and the high digits are zero before this operation.
         """
-        words = (dst, scratch, doubled)
+        words = (dst, scratch)
         if any(a.base < b.base + b.cells and b.base < a.base + a.cells
                for index, a in enumerate(words) for b in words[index + 1:]):
-            raise ValueError("decimal accumulation needs three distinct words")
+            raise ValueError("decimal accumulation needs two distinct words")
         if not 1 <= lanes <= DIGITS:
             raise ValueError("decimal lane count must be in range(1, 32)")
         if any(ref.base <= digit_cell < ref.base + ref.cells
-               for ref in (dst, scratch, doubled)):
+               for ref in (dst, scratch)):
             raise ValueError("digit cell must not alias decimal words")
 
         bf = self.bf
@@ -193,24 +196,19 @@ class Base4DecimalCore:
 
         r = _RelativeBuilder()
         marker = 0
-        total = 1
+        total = dst.base - scratch.base
         old = dst.base - scratch.base + 1
-        carry_in = old - 1
-        carry_out = carry_in + STRIDE
-        twice = doubled.base - scratch.base + 1
+        carry_out = total + STRIDE
         r.clear(marker)
-        r.clear(total)
-        r.clear(twice)
         r.move(old)
         r.emit("[")
         r.add(old, -1)
         r.add(total, 2)
-        r.add(twice, 2)
+        r.add(carry_out, 2)
         r.move(old)
         r.emit("]")
-        r.transfer(carry_in, total)
-        _map_total_wide(r, total, old, carry_out, max_total=15)
-        r.transfer(twice, carry_out)
+        _map_total_wide(r, total, old, carry_out, max_total=15,
+                        clear_carry=False)
         r.move(STRIDE)
 
         bf.move(scratch.marker(0))

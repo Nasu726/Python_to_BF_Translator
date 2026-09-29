@@ -6,7 +6,29 @@ validation using real ABC programs. The order can vary; none substitutes for
 the others. Keep ordinary Python source unchanged instead of specializing by
 problem identity or rewriting away unsupported syntax.
 
-## Current increment: skip redundant reverse adjacent comparisons
+## Current increment: local decimal carry and bounded digit detection
+
+The runtime-sized packed integer-list parser accumulates `10*x + digit` with
+its total and next carry next to the destination radix-4 lane, eliminating
+repeated long tape movements to a second scratch word. After a byte is read,
+the parser classifies numeric digits using at most ten bounded tests; it
+checks LF/EOF only once at the end of a token instead of testing five exact
+separators after every digit. A tenth decimal digit needs at most 17 radix-4
+lanes (`10**10 < 2**34`), while digits 11+ still use the full 32 lanes.
+These are general decimal bounds, with no assumption about ABC heights;
+signs, leading zeros and signed-int64 wrap remain covered by tests.
+
+The unchanged ABC136 C source emits **188,364 B**, and ABC100 C emits
+**351,944 B**, both below 512 KiB. A 65-token all-10^9 input-only diagnostic
+fell from **45,161,131** to **27,540,736** raw BF steps. Portable Tritium
+rev `14a729d`, `tools/bench_tritium_dynamic_int_updates.py --large --trials 2`,
+checks all official ABC100/ABC136 samples and three N=100,000 ABC136 cases.
+The all-10^9-height ABC136 case returned Yes in **3.03/3.14 seconds** in one
+local run; input-only took **2.43/2.45 seconds**. Native timing varies and
+still exceeds the official **2-second** limit. No judge acceptance is claimed;
+numeric input and the unfinished P0 object model remain work.
+
+## Previous increment: skip redundant reverse adjacent comparisons
 
 The ABC136 C mobile reverse walk now performs the second signed comparison
 only when the left record was decremented. When the first comparison is false,

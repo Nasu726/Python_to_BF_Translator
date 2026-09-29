@@ -1,8 +1,21 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-29):** PR #26 merged at
-`201056ddde9f76a35fe30f26dda7de8af7892a33` with four green test shards.
-The current reverse-adjacent increment skips the second signed comparison
+**Latest checkpoint (2026-09-29):** PR #27 merged at
+`15e63f392b468be3f30b872e26a93b82dfcd85c3` with four green test shards.
+The current packed-decimal increment keeps the incoming total and next carry
+adjacent to each radix-4 destination lane instead of moving through a distant
+scratch word. The list parser tests a bounded 0..9 digit range and checks
+LF/EOF once per token; the tenth digit uses 17 lanes, with later digits using
+all 32. The unchanged ABC136 C / ABC100 C sources now emit 188,364 /
+351,944 B. A 65-token all-10^9 input-only diagnostic fell from 45,161,131
+to 27,540,736 raw BF steps. Portable Tritium rev `14a729d` returned Yes on
+the N=100,000 all-10^9 ABC136 case in 3.03/3.14 s; matched input-only took
+2.43/2.45 s. These local timings still exceed the official 2-second limit.
+The four official ABC136 C samples and three N=100,000 cases are correct;
+there is no judge acceptance claim. Continue numeric input and P0 object
+handles, copying, and stable sorting.
+
+The preceding reverse-adjacent increment skips the second signed comparison
 when the first failed: neither record changed, so the answer is identical.
 The unchanged ABC136 C source is now 196,505 B, 327,783 B under 512 KiB;
 ABC100 C stays 360,085 B. Portable Tritium rev `14a729d` validates four
