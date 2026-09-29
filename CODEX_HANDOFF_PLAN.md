@@ -1,8 +1,18 @@
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
-**Latest checkpoint (2026-09-28):** PR #25 merged at
-`153e90ec1141a106be0dcf5066e8f13d96347518` with four green test shards.
-The current decimal-input increment replaces the runtime-sized integer-list
+**Latest checkpoint (2026-09-29):** PR #26 merged at
+`201056ddde9f76a35fe30f26dda7de8af7892a33` with four green test shards.
+The current reverse-adjacent increment skips the second signed comparison
+when the first failed: neither record changed, so the answer is identical.
+The unchanged ABC136 C source is now 196,505 B, 327,783 B under 512 KiB;
+ABC100 C stays 360,085 B. Portable Tritium rev `14a729d` validates four
+official samples and three N=100,000 cases; the all-10^9 valid case took
+3.33/3.26 seconds and matched input-only took 2.56/2.57 seconds in this local
+two-trial run. These noisy measurements still exceed the official 2-second
+limit. Continue accelerating numeric-token input and advance P0 object
+handles, copying and stable sorting. No judge acceptance is claimed.
+
+The preceding decimal-input increment replaces the runtime-sized integer-list
 reader's two-pass decimal digit update with one radix-4 lane pass. Its first
 four digits need only eight lanes, the next five need sixteen, and later
 digits use all 32; these bounds follow from digit count, not ABC constraints.

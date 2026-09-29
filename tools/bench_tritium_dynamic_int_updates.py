@@ -9,8 +9,10 @@ record walks. The benchmark checks native correctness/runtime separately;
 local timing is not an AtCoder host guarantee. Pass --large to exercise
 ABC136 C at its official maximum N=100000 (rather than in every smoke run).
 The large run also profiles the same list-input frontend without the loop to
-separate decimal-token parsing from reverse traversal costs. The official
-time limit is 2 seconds; passing output here is not a judge-time claim.
+separate decimal-token parsing from reverse traversal costs, and repeats a
+constant list internally to measure the reverse walk without token parsing.
+The official time limit is 2 seconds; passing output here is not a judge-time
+claim.
 """
 
 import argparse
@@ -58,6 +60,11 @@ n = int(input())
 h = list(map(int, input().split()))
 print(len(h))
 '''
+
+
+REPEAT_REVERSE_SOURCE = ABC136_C_SOURCE.replace(
+    "h = list(map(int, input().split()))", "h = [1000000000] * n",
+)
 
 
 def _abc100_expected(values: list[int]) -> str:
@@ -121,6 +128,9 @@ def _cases(*, large: bool = False):
             (name, f"{len(values)}\n" + " ".join(map(str, values)) + "\n",
              f"{len(values)}\n")
             for name, values in abc136[-3:]
+        ]))
+        programs.append(("repeat_reverse", REPEAT_REVERSE_SOURCE, [
+            ("n100000_upper_height", "100000\n", "Yes\n"),
         ]))
     return programs
 

@@ -939,11 +939,13 @@ def _reverse_adjacent_decrease_walk_code() -> str:
     _decrement_repeat_count(
         reverse, count_base=PAYLOAD, scratch_base=frame + _ACCESS_SCRATCH,
     )
-    reverse.end_while(found)
+    # If the left record was unchanged, the second test is identical to the
+    # first and already false. Only recheck pairs that were decremented.
     ops.signed_lt(found, right, left)
     reverse.begin_while(found)
     reverse.clear(found)
     reverse.clear(status)
+    reverse.end_while(found)
     reverse.end_while(found)
     reverse.end_while(gate)
     _rotate_mobile_frame(
