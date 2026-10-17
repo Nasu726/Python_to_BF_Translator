@@ -85,6 +85,7 @@ jobs:
           - suite: contest
             files: >-
               tests/test_abc_c_foundation.py
+              tests/test_bfglobalprofile.py
               tests/test_code_size.py
               tests/test_compile_performance.py
               tests/test_compiler_partition.py
