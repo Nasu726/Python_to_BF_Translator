@@ -50,6 +50,23 @@ def analyze(code: str, *, top: int = 12) -> dict[str, Any]:
     pointer_run = arithmetic_run = 0
     max_pointer_run = max_arithmetic_run = 0
     pointer_run_count = arithmetic_run_count = 0
+
+    pointer_run_bytes_by_distance = {
+        "1-7": 0, "8-31": 0, "32-127": 0, "128-511": 0, "512+": 0,
+    }
+
+    def record_pointer_run(length: int) -> None:
+        if length < 8:
+            band = "1-7"
+        elif length < 32:
+            band = "8-31"
+        elif length < 128:
+            band = "32-127"
+        elif length < 512:
+            band = "128-511"
+        else:
+            band = "512+"
+        pointer_run_bytes_by_distance[band] += length
     # Maximal contiguous groups, not semantic cancellations across loops.
     for i, ch in enumerate(filtered):
         if ch in "><":
@@ -63,11 +80,13 @@ def analyze(code: str, *, top: int = 12) -> dict[str, Any]:
             if pointer_run:
                 max_pointer_run = max(max_pointer_run, pointer_run)
                 pointer_run_count += 1
+                record_pointer_run(pointer_run)
                 pointer_run = 0
         else:
             if pointer_run:
                 max_pointer_run = max(max_pointer_run, pointer_run)
                 pointer_run_count += 1
+                record_pointer_run(pointer_run)
                 pointer_run = 0
             if arithmetic_run:
                 max_arithmetic_run = max(max_arithmetic_run, arithmetic_run)
@@ -100,6 +119,7 @@ def analyze(code: str, *, top: int = 12) -> dict[str, Any]:
         raise ValueError(f"unmatched '[' at command offset {frames[-1].start}")
     if pointer_run:
         pointer_run_count += 1
+        record_pointer_run(pointer_run)
         max_pointer_run = max(max_pointer_run, pointer_run)
     if arithmetic_run:
         arithmetic_run_count += 1
@@ -122,6 +142,7 @@ def analyze(code: str, *, top: int = 12) -> dict[str, Any]:
         "commands": {ch: frequencies[ch] for ch in "><+-.,[]"},
         "pointer_run_count": pointer_run_count,
         "pointer_max_run": max_pointer_run,
+        "pointer_run_bytes_by_distance": pointer_run_bytes_by_distance,
         "arithmetic_run_count": arithmetic_run_count,
         "arithmetic_max_run": max_arithmetic_run,
         "loop_count": frequencies["["],
