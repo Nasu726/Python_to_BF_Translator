@@ -23,3 +23,21 @@ jobs:
         env:
           PYTHONPATH: pybf:tools
         run: python -m bfglobalprofile --abc199 --top 15
+
+      - name: Profile near-linear scaling (synthetic BF, no source rewrites)
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python - <<'PY'
+          from bfglobalprofile import analyze
+          from time import perf_counter
+          import resource
+          for repeats in (11000, 90000, 180000, 350000):
+              src = '[->+<]' * repeats
+              start = perf_counter()
+              report = analyze(src, top=1)
+              seconds = perf_counter() - start
+              rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+              assert report['bf_bytes'] == len(src)
+              print(f"bf_bytes={len(src)} seconds={seconds:.4f} maxrss_kb={rss_kb}")
+          PY
