@@ -25,6 +25,8 @@ def test_run_group_statistics_and_invalid_brackets():
     report = analyze(">><<++++---.,", top=0)
     assert report["pointer_run_count"] == 1
     assert report["pointer_max_run"] == 4
+    assert report["pointer_run_bytes_by_distance"]["1-7"] == 4
+    assert sum(report["pointer_run_bytes_by_distance"].values()) == 4
     assert report["arithmetic_max_run"] == 7
     assert report["top_repeated_loops"] == []
     with pytest.raises(ValueError, match="unmatched"):
@@ -38,3 +40,11 @@ def test_large_repeated_loops_have_no_quadratic_substring_materialization():
     assert report["bf_bytes"] == 600000
     assert report["top_repeated_loops"][0]["occurrences"] == 100000
     assert report["distinct_loop_fingerprints"] == 1
+
+def test_pointer_distance_bands_account_for_all_motion():
+    lengths = [3, 8, 33, 129, 513]
+    code = ".".join(">" * value for value in lengths)
+    report = analyze(code)
+    assert sum(report["pointer_run_bytes_by_distance"].values()) == sum(lengths)
+    assert report["pointer_run_bytes_by_distance"]["512+"] == 513
+    assert report["pointer_run_bytes_by_distance"]["128-511"] == 129
