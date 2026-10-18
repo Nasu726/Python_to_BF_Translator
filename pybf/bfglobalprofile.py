@@ -50,6 +50,43 @@ def profile_bf(code: str, *, top: int = 12) -> dict[str, object]:
     cancelled_pointer_bytes = 0
     reducible_arithmetic_bytes = 0
 
+    # A straight-line region contains only > < + -. Within such a region,
+    # independent cell additions commute. Its touched-cell extremes and final
+    # relative pointer determine the minimal movement to visit those cells.
+    # Loops and I/O are hard barriers; no runtime semantics are changed here.
+    straight_blocks = 0
+    straight_blocks_with_writes = 0
+    straight_moves = 0
+    shortest_moves = 0
+    max_block_reduction = 0
+    block_ptr = 0
+    block_moves = 0
+    touched_low: int | None = None
+    touched_high: int | None = None
+
+    def finish_straight_block() -> None:
+        nonlocal straight_blocks, straight_blocks_with_writes
+        nonlocal straight_moves, shortest_moves, max_block_reduction
+        nonlocal block_ptr, block_moves, touched_low, touched_high
+        if not block_moves and touched_low is None:
+            return
+        straight_blocks += 1
+        straight_moves += block_moves
+        if touched_low is None:
+            shortest = abs(block_ptr)
+        else:
+            straight_blocks_with_writes += 1
+            low, high = touched_low, touched_high
+            assert high is not None
+            shortest = min(
+                abs(low) + high - low + abs(block_ptr - high),
+                abs(high) + high - low + abs(block_ptr - low),
+            )
+        shortest_moves += shortest
+        max_block_reduction = max(max_block_reduction, block_moves - shortest)
+        block_ptr = block_moves = 0
+        touched_low = touched_high = None
+
     def finish_run() -> None:
         nonlocal run_kind, run_length, run_delta
         nonlocal pointer_runs, arithmetic_runs
@@ -67,6 +104,21 @@ def profile_bf(code: str, *, top: int = 12) -> dict[str, object]:
         run_delta = 0
 
     for offset, command in enumerate(filtered):
+        if command == ">":
+            block_ptr += 1
+            block_moves += 1
+        elif command == "<":
+            block_ptr -= 1
+            block_moves += 1
+        elif command in "+-":
+            if touched_low is None:
+                touched_low = touched_high = block_ptr
+            else:
+                touched_low = min(touched_low, block_ptr)
+                touched_high = max(touched_high, block_ptr)
+        else:
+            finish_straight_block()
+
         if command in "><":
             kind = "pointer"
         elif command in "+-":
@@ -108,6 +160,7 @@ def profile_bf(code: str, *, top: int = 12) -> dict[str, object]:
                 entry[0] += 1
 
     finish_run()
+    finish_straight_block()
     if stack:
         raise ValueError(f"unmatched '[' at BF command offset {stack[-1][0]}")
 
@@ -139,6 +192,14 @@ def profile_bf(code: str, *, top: int = 12) -> dict[str, object]:
             "arithmetic_runs": arithmetic_runs,
             "locally_cancellable_pointer_bytes": cancelled_pointer_bytes,
             "locally_reducible_arithmetic_bytes": reducible_arithmetic_bytes,
+        },
+        "straight_line": {
+            "blocks": straight_blocks,
+            "blocks_with_writes": straight_blocks_with_writes,
+            "actual_pointer_move_bytes": straight_moves,
+            "minimum_pointer_move_bytes": shortest_moves,
+            "theoretical_pointer_reduction_bytes": straight_moves - shortest_moves,
+            "largest_single_block_reduction": max_block_reduction,
         },
         "loops": {
             "instances": loops,
