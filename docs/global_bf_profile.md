@@ -68,3 +68,44 @@ BF without making assumptions about compressibility.
 
 This profiler deliberately does not edit emitted BF or modify the current
 public compile route. It is safe to land independently of PR #29.
+
+
+## First measurements (GitHub Actions, PR #31)
+
+The following are measurements of **current main**, not of PR #29. The
+source-size numbers describe public compiler output, not runtime cost:
+
+| Workload | Standard BF bytes | Loop instances | Notes |
+| --- | ---: | ---: | --- |
+| Ordinary ABC199 C | 1,344,281 | 18,210 | 819,993 B above 512 KiB |
+| Existing partition-specialized output | 363,109 | 6,934 | Under 512 KiB |
+
+For ABC199 C, 634,471 `>` plus 637,127 `<` consume **1,271,598
+bytes (94.6%)** of the generated source. The local adjacent-run canonicalization
+opportunity measured on this already optimized BF is **zero** (both pointer
+cancellations and arithmetic reductions). Of its 18,210 complete loop spans,
+576 distinct fingerprints occur more than once. The total 853,640 bytes of
+textually repeated loop spans **cannot be interpreted as removable bytes**;
+these include nested/overlapping text and BF has no macro call.
+
+Synthetic benchmark (Ubuntu GitHub-hosted runner, Python 3.12):
+
+| BF source | Profiler time | Process peak RSS |
+| ---: | ---: | ---: |
+| 65,536 B | 0.033 s | 13,144 KiB |
+| 524,288 B | 0.254 s | 17,644 KiB |
+| 1,048,576 B | 0.517 s | 28,288 KiB |
+| 2,097,152 B | 0.992 s | 47,160 KiB |
+
+The synthetic pattern consists of repeated small loops; distinct-span counts
+are small, making this a linear-path measurement rather than a proof of optimal
+behavior for adversarial distinct-span programs. The algorithmic bound above
+also covers the latter.
+
+**Next transformation hypothesis:** investigate pointer-path scheduling across
+straight-line regions while preserving each region's final pointer and cell
+updates. Because adjacent `><` is already absent, another textual local
+cancellation pass will not solve this workload. Such scheduling requires a
+formal proof for regions containing no input, output, or loop control, plus
+separate benchmark of runtime cost. Do not reorder across loops or I/O without
+additional proof.
