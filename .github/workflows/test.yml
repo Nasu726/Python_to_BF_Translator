@@ -101,6 +101,11 @@ jobs:
         run: python -m pytest --collect-only -q tests
       - name: Run ${{ matrix.suite }} tests
         run: python -m pytest -q -n 2 --dist=worksteal --durations=10 ${{ matrix.files }}
+      - name: Report P0 int-list repr source attribution
+        if: matrix.suite == 'contest'
+        env:
+          PYTHONPATH: pybf
+        run: python tools/profile_p0_intlist_source.py
       - name: Report public string/conversion source metrics
         if: matrix.suite == 'frontend'
         env:

@@ -138,7 +138,9 @@ programのliteral `+=` / `-=` と2冪の`//=` / `%=`は、1回のrecord走査内
 全体を走査し、`range(n)`ならrepeatに使った同じnが変更されず、間に
 alias以外の文が無いと証明できる場合のみ全体走査にします。それ以外は
 64-bitの回数を運ぶ先頭部分の走査です。計画書の`a=[0]*n`とaliasを使う
-例の逐次代入部分は対象ですが、`sort()`や一般のlist表示は未実装です。
+例の逐次代入と`print(b)`までは対象です。単一ownerとそのaliasを
+`print(a)`する場合、可変長のlistを符号付き整数のPython表記で表示し、
+元のlistを復元します。`sort()`や一般のobject表示は未実装です。
 `for i in range(n): while a[i] % 2 == 0: a[i] //= 2; answer += 1`
 という通常のnested loopも、indexが他で使われず、`sum(a)`が観測されない
 単一ownerのlistでは1回のmobile走査で処理します。符号付き値の2による

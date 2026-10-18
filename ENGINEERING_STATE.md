@@ -10,6 +10,22 @@ This file is a compact memory aid for long-running compiler work. Keep only info
 
 Do not record routine green CI runs. Record only baselines or results that affect architecture or acceptance criteria.
 
+## 2026-09-29 — Single-owner integer-list repr uses a mobile printer
+
+- A 484-cell frame carries the existing Quad signed-decimal printer through
+  contiguous ten-cell integer records, preserving alias-visible payload and
+  marker/back links on rewind. The frontend selects only direct
+  `print(alias)` with no keywords; this is not a general object printer.
+- The unmodified P0 example through `print(b)`, omitting `sort()`, now emits
+  523,240 B, just 1,048 B under 512 KiB. Native Tritium rev `14a729d`
+  matches CPython at N=65/1024/4097/100000 (3.70 s at N=100000 locally).
+  Further source reduction is necessary before a sort can fit in the same
+  program. The Quad decimal lane seeding uses additive marker increments
+  because each lane body consumes its marker, and the first carry/sentinel
+  are zero on every new bit; this saves source across 64 bit pushes.
+
+---
+
 ## 2026-09-29 — Packed decimal parser uses adjacent carry cells
 
 - In the one-pass `10*x+d` radix-4 kernel, the current destination marker

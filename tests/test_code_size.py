@@ -57,3 +57,23 @@ else:
     code = compile_source(source)
     result = run_bf(code, "ABC\n", step_limit=300_000_000)
     assert result.output == "AC!"
+
+
+
+def test_p0_runtime_intlist_repr_has_attributed_source_budget():
+    # Keep the complete ordinary-Python P0 prefix below AtCoder's source limit,
+    # including the new mobile repr printer, rather than testing it only via
+    # manual Tritium scripts. This also verifies that the independent
+    # layout-attribution diagnostic stays aligned with the public compiler.
+    from tools.bench_tritium_intlist_repr import SOURCE
+    from tools.profile_p0_intlist_source import profile_p0_source
+
+    profile = profile_p0_source(SOURCE)
+    public = compile_source(SOURCE)
+    assert set(public) <= BF_COMMANDS
+    assert len(public) == profile.final_bytes
+    assert 0 < profile.final_bytes <= ATCODER_SOURCE_LIMIT
+    assert profile.headroom == ATCODER_SOURCE_LIMIT - len(public)
+    assert profile.raw_bytes > 0
+    assert profile.runtime_base > profile.temp_peak
+    assert profile.statement_sizes

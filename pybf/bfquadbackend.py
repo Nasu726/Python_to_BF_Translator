@@ -551,7 +551,8 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         """digits = digits*2 + selected magnitude bit."""
         bf = self.bf
         first_carry = base + 2
-        bf.clear(first_carry)
+        # The previous lane pass consumes its incoming carry; the initial
+        # conversion clears this cell before the first bit.
 
         # magnitude is a private print copy, so the source bit can be consumed.
         source = magnitude.bit(bit_index)
@@ -561,9 +562,10 @@ class QuadBinaryStringListIO(BinaryStringListIO):
         bf.end_while(source)
 
         for digit in range(_DECIMAL_DIGITS):
-            bf.set_const(base + digit * _DECIMAL_STRIDE, 1)
+            # Every marker is consumed by its lane body before the next bit.
+            bf.add_const(base + digit * _DECIMAL_STRIDE, 1)
         sentinel = base + _DECIMAL_DIGITS * _DECIMAL_STRIDE
-        bf.clear(sentinel)
+        # The sentinel marker stays zero throughout the conversion.
 
         bf.move(base)
         bf.emit("[" + self._decimal_lane_body() + "]")
