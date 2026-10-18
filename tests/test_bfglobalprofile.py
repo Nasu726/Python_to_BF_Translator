@@ -63,3 +63,21 @@ def test_half_megabyte_profile_has_no_pairwise_loop_comparisons():
     assert report["loops"]["distinct_fingerprints"] == 1
     assert report["top_loop_motifs"][0]["instances"] == 60000
     assert report["runs"]["pointer_runs"] > 0
+
+
+def test_straight_line_pointer_lower_bound_is_not_local_cancellation():
+    # Each of these writes is independent. In one I/O-free, loop-free region,
+    # a monotone visit to cells 0 and 1 followed by return saves two moves.
+    report = profile_bf("+>+<+>+<.")
+    assert report["runs"]["locally_cancellable_pointer_bytes"] == 0
+    assert report["straight_line"]["actual_pointer_move_bytes"] == 4
+    assert report["straight_line"]["minimum_pointer_move_bytes"] == 2
+    assert report["straight_line"]["theoretical_pointer_reduction_bytes"] == 2
+
+
+def test_straight_line_bound_does_not_cross_io_or_loop():
+    report = profile_bf("+>+<.>+<[-]")
+    # Moving writes across the output or the loop is forbidden; the independent
+    # blocks each retain their own required entry/exit pointer coordinates.
+    assert report["straight_line"]["theoretical_pointer_reduction_bytes"] == 0
+    assert report["loops"]["instances"] == 1
