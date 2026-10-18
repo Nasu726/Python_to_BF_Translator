@@ -1,3 +1,32 @@
+> **Current repository snapshot — 2026-10-18**
+>
+> This is the authoritative resume pointer. Older sections below retain
+> historical implementation decisions and may describe former PR/CI states.
+> Always recheck live GitHub heads before treating old SHA/branch data as current.
+>
+> - **main:** `c3264431510f72ee98dffdef9ccfd83bd22b48dd` at last check; PRs
+>   #7, #8, #9, and #28 have been merged. The old #7 → #8 → #9 stack is no
+>   longer an active landing dependency.
+> - **PR #29:** `runtime-intlist-repr-walk`, open and independently CI-green
+>   at head `705c6abd908a450a3ec3c7e95ff9923c15b9d0e4`. Public Python
+>   integer-list display compiles to 523,240 BF bytes for a current benchmark,
+>   leaving just 1,048 bytes below the 512KiB source limit. Native Tritium
+>   N=100,000 output was checked against CPython; judge timing remains unproven.
+> - **Issue #10:** the active global **executable BF** size-optimization
+>   research ticket. Issue #11 is a closed duplicate. No LZ/gzip decoder, BF
+>   macros, or quadratic whole-program comparisons are permitted.
+> - **PR #31:** `global-bf-redundancy-profile-1` (based on main), separate from
+>   #29. It adds a near-linear *read-only* source profiler and real/synthetic
+>   measurement workflow, not an optimizing rewrite. Ordinary ABC199 C at
+>   current main is 1,344,281B; pointer moves are 94.6%, but strictly
+>   within-straight-line pointer rescheduling offers only a **2-byte bound**.
+>   That narrow hypothesis is rejected; investigate loop-aware runtime/data
+>   layout and semantics-proven structural changes instead.
+> - **Immediate next steps:** finish PR #31's four-shard CI and preserve its
+>   measurements in Issue #10; independently assess PR #29's merge readiness.
+>   Do not merge either PR without explicit user authorization. Continue
+>   ABC-based acceptance tests for the generic scalable compiler.
+>
 # Python-to-Brainfuck Translator — Persistent Handoff / Execution Plan
 
 **Latest checkpoint (2026-09-29):** PR #27 merged at
