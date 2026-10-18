@@ -1,0 +1,42 @@
+name: global-bf-profiler-benchmark
+
+on:
+  pull_request:
+    paths:
+      - 'pybf/bfglobalprofile.py'
+      - 'tests/test_bfglobalprofile.py'
+      - 'tools/profile_bf_global.py'
+      - 'tools/bench_bf_global_profile.py'
+      - '.github/workflows/global-bf-profiler-benchmark.yml'
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Profile synthetic 64KiB to 2MiB BF
+        env:
+          PYTHONPATH: pybf
+        run: python tools/bench_bf_global_profile.py
+      - name: Profile ordinary ABC199 C compilation
+        env:
+          PYTHONPATH: pybf
+        run: python tools/profile_bf_global.py --abc199 --top 12
+      - name: Profile partition-specialized BF
+        env:
+          PYTHONPATH: pybf
+        run: |
+          python - <<'PY'
+          from bfcontestpartition import build_partition_program
+          from bfglobalprofile import profile_bf
+          p = profile_bf(build_partition_program(), top=5)
+          print("partition_source_bytes=", p["source_bytes"])
+          print("partition_loop_count=", p["loops"]["instances"])
+          print("partition_repeated_loop_fingerprints=", p["loops"]["repeated_fingerprints"])
+          print("partition_top_motifs=", p["top_loop_motifs"])
+          PY
