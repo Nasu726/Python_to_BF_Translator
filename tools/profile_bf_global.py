@@ -59,6 +59,8 @@ def main() -> None:
         print(f"command_{command}={count:,}")
     for name, count in report["runs"].items():
         print(f"{name}={count:,}")
+    for name, count in report["straight_line"].items():
+        print(f"straight_line_{name}={count:,}")
     for name, count in report["loops"].items():
         print(f"loops_{name}={count:,}")
     print("top repeated loop-text fingerprints (NOT realizable savings):")
