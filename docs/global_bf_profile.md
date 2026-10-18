@@ -92,20 +92,27 @@ Synthetic benchmark (Ubuntu GitHub-hosted runner, Python 3.12):
 
 | BF source | Profiler time | Process peak RSS |
 | ---: | ---: | ---: |
-| 65,536 B | 0.033 s | 13,144 KiB |
-| 524,288 B | 0.254 s | 17,644 KiB |
-| 1,048,576 B | 0.517 s | 28,288 KiB |
-| 2,097,152 B | 0.992 s | 47,160 KiB |
+| 65,536 B | 0.052 s | 13,360 KiB |
+| 524,288 B | 0.407 s | 18,432 KiB |
+| 1,048,576 B | 0.820 s | 28,816 KiB |
+| 2,097,152 B | 1.642 s | 47,432 KiB |
 
 The synthetic pattern consists of repeated small loops; distinct-span counts
 are small, making this a linear-path measurement rather than a proof of optimal
 behavior for adversarial distinct-span programs. The algorithmic bound above
 also covers the latter.
 
-**Next transformation hypothesis:** investigate pointer-path scheduling across
-straight-line regions while preserving each region's final pointer and cell
-updates. Because adjacent `><` is already absent, another textual local
-cancellation pass will not solve this workload. Such scheduling requires a
-formal proof for regions containing no input, output, or loop control, plus
-separate benchmark of runtime cost. Do not reorder across loops or I/O without
-additional proof.
+**Rejected as the first optimization target:** straightforward pointer-path
+rescheduling *within* straight-line regions. Of the 1,271,598 pointer-movement
+bytes in ABC199 C, the sum of mathematically minimal pointer paths over 34,277
+independent regions is **1,271,596 bytes**. That is a maximum reduction of just
+**2 bytes** under this restricted reordering model, despite pointer movement
+accounting for 94.6% of source bytes. Only one region has a two-byte excess.
+
+The source profiler now derives this bound by separating every loop/I/O
+barrier and solving the two possible directions for visiting the low/high
+written cells inside each region. This result rules out a useful whole-program
+gain from *block-local scheduling alone*; it does not rule out changing loop
+algorithms, runtime data layout, mobile-pointer ABI, or proven loop-level
+rewrites. Those are the next hypotheses to investigate. Do not move BF
+operations across loop or I/O boundaries without separate semantic proof.
